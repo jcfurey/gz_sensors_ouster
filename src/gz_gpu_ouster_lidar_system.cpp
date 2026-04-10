@@ -143,6 +143,9 @@ void GzGpuOusterLidarSystem::Configure(
             : sensor_name_;
     lidar_frame_name_ = lidar_id;  // Gazebo sensor name, e.g. "lidar0"
 
+    // Image frame_id: match the URDF lidar frame (e.g. "lidar0/lidar_frame")
+    image_frame_id_ = lidar_id + "/lidar_frame";
+
     std::cout << "[GzGpuOusterLidar] Configured: H=" << H_ << " W=" << W_
           << " cpp=" << cpp_ << " sensor_name=" << sensor_name_
           << " gz_sensor=" << lidar_frame_name_
@@ -222,6 +225,16 @@ void GzGpuOusterLidarSystem::initRosInterface()
     const auto qos = rclcpp::SensorDataQoS();
     pkt_pub_ = ros_node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
         abs_prefix + "/lidar_packets", qos);
+
+    // Image publishers (same topics as os_image node)
+    range_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
+        abs_prefix + "/range_image", qos);
+    signal_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
+        abs_prefix + "/signal_image", qos);
+    reflec_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
+        abs_prefix + "/reflec_image", qos);
+    nearir_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
+        abs_prefix + "/nearir_image", qos);
 
     // Spin the node on a background thread so Zenoh completes peer discovery.
     // Without this, rmw_zenoh_cpp never processes incoming control messages
@@ -538,12 +551,83 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
 
     ++frame_id_;
 
+    // ── Publish image topics ─────────────────────────────────────────────────
+    publishImages(stamp_ns);
+
     // ── Wake drain thread ────────────────────────────────────────────────────
     {
         std::lock_guard<std::mutex> lk(drain_mtx_);
         drain_ready_.store(true, std::memory_order_release);
     }
     drain_cv_.notify_one();
+}
+
+// ── Publish sensor images ────────────────────────────────────────────────────
+
+void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
+{
+    const auto n = static_cast<size_t>(H_ * W_);
+    const uint32_t h = static_cast<uint32_t>(H_);
+    const uint32_t w = static_cast<uint32_t>(W_);
+    const uint32_t step = w * static_cast<uint32_t>(sizeof(uint16_t));
+
+    builtin_interfaces::msg::Time stamp;
+    stamp.sec  = static_cast<int32_t>(stamp_ns / 1000000000LL);
+    stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000LL);
+
+    auto make_image = [&]() -> sensor_msgs::msg::Image {
+        sensor_msgs::msg::Image msg;
+        msg.header.stamp = stamp;
+        msg.header.frame_id = image_frame_id_;
+        msg.height = h;
+        msg.width = w;
+        msg.encoding = "mono16";
+        msg.is_bigendian = false;
+        msg.step = step;
+        msg.data.resize(n * sizeof(uint16_t));
+        return msg;
+    };
+
+    // Range image: mm → 4mm-resolution uint16 (matches ouster_ros os_image)
+    // Values > 65535 (≈262 m) are clamped to 0 (no return).
+    if (range_image_pub_->get_subscription_count() > 0) {
+        auto msg = make_image();
+        auto * pixels = reinterpret_cast<uint16_t *>(msg.data.data());
+        for (size_t i = 0; i < n; ++i) {
+            const uint32_t r = (range_buf_[i] + 2u) >> 2;
+            pixels[i] = (r > 65535u) ? 0u : static_cast<uint16_t>(r);
+        }
+        range_image_pub_->publish(std::move(msg));
+    }
+
+    // Signal image: uint16 values from CUDA processing (photon counts)
+    if (signal_image_pub_->get_subscription_count() > 0) {
+        auto msg = make_image();
+        std::memcpy(msg.data.data(), signal_buf_.data(), n * sizeof(uint16_t));
+        signal_image_pub_->publish(std::move(msg));
+    }
+
+    // Reflectivity image: uint8 → uint16  (×257 maps [0,255] → [0,65535])
+    if (reflec_image_pub_->get_subscription_count() > 0) {
+        auto msg = make_image();
+        auto * pixels = reinterpret_cast<uint16_t *>(msg.data.data());
+        for (size_t i = 0; i < n; ++i) {
+            pixels[i] = static_cast<uint16_t>(reflectivity_buf_[i]) * 257u;
+        }
+        reflec_image_pub_->publish(std::move(msg));
+    }
+
+    // Near-IR image: GpuRays retro channel → uint16
+    // Retro represents surface reflectance; closest sim analogue to ambient IR.
+    if (nearir_image_pub_->get_subscription_count() > 0) {
+        auto msg = make_image();
+        auto * pixels = reinterpret_cast<uint16_t *>(msg.data.data());
+        for (size_t i = 0; i < n; ++i) {
+            const float v = std::clamp(retro_buf_[i] * 256.0f, 0.0f, 65535.0f);
+            pixels[i] = static_cast<uint16_t>(v);
+        }
+        nearir_image_pub_->publish(std::move(msg));
+    }
 }
 
 // ── Drain thread ─────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <chrono>
@@ -115,6 +116,11 @@ private:
     std::thread ros_spin_thread_;
     rclcpp::Publisher<ouster_sensor_msgs::msg::PacketMsg>::SharedPtr pkt_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr meta_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr range_image_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr signal_image_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr reflec_image_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr nearir_image_pub_;
+    std::string image_frame_id_;
     bool metadata_published_ = false;   // true once a subscriber has acked
 
     // ── Drain thread ─────────────────────────────────────────────────────────
@@ -132,6 +138,7 @@ private:
                     unsigned int height, unsigned int channels,
                     const std::string & format);
     void encodeAndPublish(int64_t stamp_ns);
+    void publishImages(int64_t stamp_ns);
     void drainThreadFunc();
 };
 
