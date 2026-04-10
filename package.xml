@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>gz_gpu_ouster_lidar</name>
+  <version>1.0.0</version>
+  <description>
+    Gazebo Harmonic system plugin that creates a GPU-based lidar sensor with
+    per-beam non-uniform elevation angles matching Ouster calibration metadata.
+    Fires rays via gz::rendering::GpuRays and produces Ouster lidar_packets
+    (PacketMsg) through CUDA post-processing.
+  </description>
+  <maintainer email="john.c.furey@erdc.dren.mil">John C. Furey</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Gazebo vendor packages (must find before actual gz-* packages) -->
+  <depend>gz_sim_vendor</depend>
+  <depend>gz_rendering_vendor</depend>
+  <depend>gz_sensors_vendor</depend>
+  <depend>gz_plugin_vendor</depend>
+
+  <!-- ROS 2 -->
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>ouster_sensor_msgs</depend>
+  <depend>ouster_ros</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

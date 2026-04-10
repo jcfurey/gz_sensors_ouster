@@ -1,0 +1,7 @@
+<plugin
+  filename="libgz_gpu_ouster_lidar.so"
+  name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
+  <metadata_path>/home/robot/data/ouster/os0_16_sim.json</metadata_path>
+  <sensor_name>os_sensor</sensor_name>
+  <lidar_hz>10.0</lidar_hz>
+</plugin>
