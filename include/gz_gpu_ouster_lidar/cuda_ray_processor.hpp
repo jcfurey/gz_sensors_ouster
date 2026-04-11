@@ -8,9 +8,28 @@ namespace gz_gpu_ouster_lidar {
 struct RayProcessParams {
     int H;                     ///< Beam count (pixels per column)
     int W;                     ///< Columns per frame
-    float base_signal;         ///< Baseline signal for 1/r² model
-    float base_reflectivity;   ///< Default reflectivity value
-    float range_noise_std;     ///< Gaussian range noise σ (metres), 0 = off
+
+    // ── Signal model ─────────────────────────────────────────────────────────
+    float base_signal;         ///< Baseline signal for 1/r² model (photons·m²)
+    float base_reflectivity;   ///< Default reflectivity value [0–255]
+
+    // ── Range noise ──────────────────────────────────────────────────────────
+    float range_noise_min_std; ///< Min range noise σ at 0 m (metres), e.g. 0.005
+    float range_noise_max_std; ///< Max range noise σ at max_range (metres), e.g. 0.03
+    float max_range;           ///< Sensor max range (metres) for noise scaling
+
+    // ── Photon / signal noise ────────────────────────────────────────────────
+    float signal_noise_scale;  ///< Signal Poisson noise scale (0 = off, 1 = physical)
+    float nearir_noise_scale;  ///< Near-IR Poisson noise scale (0 = off, 1 = physical)
+
+    // ── Random dropouts ──────────────────────────────────────────────────────
+    float dropout_rate_close;  ///< Dropout probability at 0 m (e.g. 0.001)
+    float dropout_rate_far;    ///< Dropout probability at max_range (e.g. 0.05)
+
+    // ── Depth-discontinuity suppression ──────────────────────────────────────
+    float edge_discon_threshold; ///< Depth jump threshold (metres) to suppress neighbor, 0=off
+
+    // ── Timing ───────────────────────────────────────────────────────────────
     uint64_t dt_per_col_ns;    ///< Nanoseconds between columns (rolling shutter)
 };
 

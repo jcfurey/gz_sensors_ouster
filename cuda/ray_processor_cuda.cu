@@ -40,18 +40,32 @@ __global__ void initRandStates(curandState * states, unsigned long seed, int n)
 /// Each thread handles one pixel (beam × column).
 /// Input layout: depth_buf[beam * W + col] = depth in metres (inf = miss).
 /// Output: range in mm, signal via 1/r² model, reflectivity from retro.
+///
+/// Noise model:
+///   Range:        Gaussian, σ linearly interpolated from min_std..max_std over [0, max_range]
+///   Signal:       Poisson-approximated shot noise: σ = sqrt(signal) * scale
+///   Near-IR:      Same Poisson model on retro channel
+///   Dropouts:     Uniform random < linearly-interpolated dropout probability → zero return
+///   Edge suppression: if any cardinal neighbor depth differs by > threshold → suppress
 __global__ void rayProcessKernel(
     const float * __restrict__   depth,
     const float * __restrict__   retro,   // may be nullptr
     uint32_t * __restrict__      range_out,
     uint16_t * __restrict__      signal_out,
     uint8_t *  __restrict__      refl_out,
-    int n,
+    int H, int W,
     float base_signal,
     float base_reflectivity,
-    float noise_std,
+    float range_noise_min_std,
+    float range_noise_max_std,
+    float max_range,
+    float signal_noise_scale,
+    float dropout_rate_close,
+    float dropout_rate_far,
+    float edge_discon_threshold,
     curandState * __restrict__   rand_states)
 {
+    const int n = H * W;
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
 
@@ -65,15 +79,62 @@ __global__ void rayProcessKernel(
         return;
     }
 
-    // Optional Gaussian range noise
-    if (noise_std > 0.f && rand_states != nullptr) {
-        d = fmaxf(d + curand_normal(&rand_states[idx]) * noise_std, 0.f);
+    curandState * rs = (rand_states != nullptr) ? &rand_states[idx] : nullptr;
+
+    // ── Depth-discontinuity suppression ──────────────────────────────────────
+    // Suppress returns at depth edges where a cardinal neighbor is much farther
+    // or missing.  This mimics the mixed-return rejection in real Ouster firmware.
+    if (edge_discon_threshold > 0.f) {
+        const int beam = idx / W;
+        const int col  = idx % W;
+        bool suppress = false;
+
+        auto checkNeighbor = [&](int nb, int nc) {
+            if (nb < 0 || nb >= H || nc < 0 || nc >= W) return;
+            float nd = depth[nb * W + nc];
+            if (!isfinite(nd) || nd < 0.001f || fabsf(nd - d) > edge_discon_threshold)
+                suppress = true;
+        };
+        checkNeighbor(beam - 1, col);
+        checkNeighbor(beam + 1, col);
+        checkNeighbor(beam, col - 1);
+        checkNeighbor(beam, col + 1);
+
+        if (suppress && rs != nullptr) {
+            // 50% chance of suppression at depth edges
+            if (curand_uniform(rs) < 0.5f) {
+                range_out[idx]  = 0u;
+                signal_out[idx] = 0u;
+                refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+                return;
+            }
+        }
+    }
+
+    // ── Random dropouts ──────────────────────────────────────────────────────
+    // Dropout probability increases linearly with range.
+    if (rs != nullptr && (dropout_rate_close > 0.f || dropout_rate_far > 0.f)) {
+        float t = fminf(d / fmaxf(max_range, 0.1f), 1.f);
+        float p_dropout = dropout_rate_close + t * (dropout_rate_far - dropout_rate_close);
+        if (curand_uniform(rs) < p_dropout) {
+            range_out[idx]  = 0u;
+            signal_out[idx] = 0u;
+            refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+            return;
+        }
+    }
+
+    // ── Range noise (Gaussian, σ scales with range) ──────────────────────────
+    if (rs != nullptr && (range_noise_min_std > 0.f || range_noise_max_std > 0.f)) {
+        float t = fminf(d / fmaxf(max_range, 0.1f), 1.f);
+        float sigma = range_noise_min_std + t * (range_noise_max_std - range_noise_min_std);
+        d = fmaxf(d + curand_normal(rs) * sigma, 0.f);
     }
 
     // Range in millimetres
     range_out[idx] = static_cast<uint32_t>(d * 1000.f);
 
-    // Signal: 1/r² model scaled by retro intensity
+    // ── Signal: 1/r² model with Poisson shot noise ──────────────────────────
     float intensity = 1.0f;
     if (retro != nullptr) {
         float r = retro[idx];
@@ -82,10 +143,16 @@ __global__ void rayProcessKernel(
         }
     }
     const float r_sq = d * d;
-    const float sig = fminf(base_signal * intensity / fmaxf(r_sq, 0.0001f), 65535.f);
-    signal_out[idx] = static_cast<uint16_t>(sig);
+    float sig = base_signal * intensity / fmaxf(r_sq, 0.0001f);
 
-    // Reflectivity from retro
+    // Shot noise: σ = √(signal) × scale
+    if (rs != nullptr && signal_noise_scale > 0.f) {
+        float sigma_sig = sqrtf(fmaxf(sig, 0.f)) * signal_noise_scale;
+        sig = fmaxf(sig + curand_normal(rs) * sigma_sig, 0.f);
+    }
+    signal_out[idx] = static_cast<uint16_t>(fminf(sig, 65535.f));
+
+    // ── Reflectivity from retro ──────────────────────────────────────────────
     if (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f) {
         refl_out[idx] = static_cast<uint8_t>(fminf(retro[idx] * 1000.f, 255.f));
     } else {
@@ -101,17 +168,20 @@ void launchRayProcessKernel(
     uint32_t *    d_range,
     uint16_t *    d_signal,
     uint8_t *     d_refl,
-    int n,
-    float base_signal,
-    float base_reflectivity,
-    float range_noise_std,
+    const RayProcessParams & p,
     void *        d_rand_states,
     void *        stream)
 {
+    const int n = p.H * p.W;
     const int grid = (n + kBlock - 1) / kBlock;
     rayProcessKernel<<<grid, kBlock, 0, static_cast<cudaStream_t>(stream)>>>(
         d_depth, d_retro, d_range, d_signal, d_refl,
-        n, base_signal, base_reflectivity, range_noise_std,
+        p.H, p.W,
+        p.base_signal, p.base_reflectivity,
+        p.range_noise_min_std, p.range_noise_max_std, p.max_range,
+        p.signal_noise_scale,
+        p.dropout_rate_close, p.dropout_rate_far,
+        p.edge_discon_threshold,
         static_cast<curandState *>(d_rand_states));
     CUDA_CHECK(cudaGetLastError());
 }
@@ -190,7 +260,11 @@ void CudaRayProcessor::process(
     auto stream = static_cast<cudaStream_t>(stream_);
 
     ensureBuffers(n);
-    if (p.range_noise_std > 0.f) ensureRandStates(n);
+    bool need_rand = p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
+                     p.signal_noise_scale > 0.f ||
+                     p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
+                     p.edge_discon_threshold > 0.f;
+    if (need_rand) ensureRandStates(n);
 
     // H2D: depth (always) and retro (if available)
     CUDA_CHECK(cudaMemcpyAsync(
@@ -212,8 +286,8 @@ void CudaRayProcessor::process(
         static_cast<uint32_t *>(d_range_),
         static_cast<uint16_t *>(d_signal_),
         static_cast<uint8_t *>(d_refl_),
-        n, p.base_signal, p.base_reflectivity, p.range_noise_std,
-        (p.range_noise_std > 0.f) ? d_rand_states_ : nullptr,
+        p,
+        need_rand ? d_rand_states_ : nullptr,
         stream_);
 
     // D2H: results

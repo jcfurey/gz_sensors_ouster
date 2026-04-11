@@ -11,10 +11,7 @@ void launchRayProcessKernel(
     uint32_t *    d_range,
     uint16_t *    d_signal,
     uint8_t *     d_refl,
-    int n,
-    float base_signal,
-    float base_reflectivity,
-    float range_noise_std,
+    const RayProcessParams & p,
     void *        d_rand_states,
     void *        stream);
 

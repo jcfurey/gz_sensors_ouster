@@ -59,6 +59,17 @@ private:
     std::string world_name_;
     double lidar_hz_ = 10.0;
 
+    // ── Noise model parameters (SDF-configurable, Ouster-like defaults) ──────
+    double range_noise_min_std_ = 0.005;   // 5 mm σ at close range
+    double range_noise_max_std_ = 0.03;    // 30 mm σ at max range
+    double signal_noise_scale_  = 1.0;     // Poisson shot noise (1 = physical)
+    double nearir_noise_scale_  = 1.0;     // Near-IR shot noise
+    double dropout_rate_close_  = 0.001;   // 0.1% dropout probability at 0 m
+    double dropout_rate_far_    = 0.05;    // 5% dropout probability at max range
+    double edge_discon_threshold_ = 0.5;   // Suppress returns at >0.5 m depth jumps
+    double base_signal_ = 500.0;           // Baseline signal (photons·m²)
+    double base_reflectivity_ = 50.0;      // Default reflectivity [0–255]
+
     // ── Ouster metadata ──────────────────────────────────────────────────────
     std::string metadata_str_;
     int H_ = 0;                     // pixels_per_column (beam count)

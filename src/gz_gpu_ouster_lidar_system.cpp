@@ -87,6 +87,35 @@ void GzGpuOusterLidarSystem::Configure(
         lidar_hz_ = sdf->Get<double>("lidar_hz");
     }
 
+    // Noise model SDF parameters (all optional, with sensible Ouster defaults)
+    if (sdf->HasElement("range_noise_min_std")) {
+        range_noise_min_std_ = sdf->Get<double>("range_noise_min_std");
+    }
+    if (sdf->HasElement("range_noise_max_std")) {
+        range_noise_max_std_ = sdf->Get<double>("range_noise_max_std");
+    }
+    if (sdf->HasElement("signal_noise_scale")) {
+        signal_noise_scale_ = sdf->Get<double>("signal_noise_scale");
+    }
+    if (sdf->HasElement("nearir_noise_scale")) {
+        nearir_noise_scale_ = sdf->Get<double>("nearir_noise_scale");
+    }
+    if (sdf->HasElement("dropout_rate_close")) {
+        dropout_rate_close_ = sdf->Get<double>("dropout_rate_close");
+    }
+    if (sdf->HasElement("dropout_rate_far")) {
+        dropout_rate_far_ = sdf->Get<double>("dropout_rate_far");
+    }
+    if (sdf->HasElement("edge_discon_threshold")) {
+        edge_discon_threshold_ = sdf->Get<double>("edge_discon_threshold");
+    }
+    if (sdf->HasElement("base_signal")) {
+        base_signal_ = sdf->Get<double>("base_signal");
+    }
+    if (sdf->HasElement("base_reflectivity")) {
+        base_reflectivity_ = sdf->Get<double>("base_reflectivity");
+    }
+
     if (metadata_path_.empty()) {
         std::cerr << "[GzGpuOusterLidar] 'metadata_path' SDF parameter is required\n";
         return;
@@ -149,7 +178,12 @@ void GzGpuOusterLidarSystem::Configure(
     std::cout << "[GzGpuOusterLidar] Configured: H=" << H_ << " W=" << W_
           << " cpp=" << cpp_ << " sensor_name=" << sensor_name_
           << " gz_sensor=" << lidar_frame_name_
-          << " hz=" << lidar_hz_ << "\n";
+          << " hz=" << lidar_hz_
+          << "\n  noise: range_σ=[" << range_noise_min_std_ << "," << range_noise_max_std_ << "]m"
+          << " signal_noise=" << signal_noise_scale_
+          << " dropout=[" << dropout_rate_close_ << "," << dropout_rate_far_ << "]"
+          << " edge_discon=" << edge_discon_threshold_ << "m"
+          << "\n";
 }
 
 // ── Metadata loading ─────────────────────────────────────────────────────────
@@ -496,9 +530,16 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     RayProcessParams params;
     params.H = H_;
     params.W = W_;
-    params.base_signal = 500.0f;
-    params.base_reflectivity = 50.0f;
-    params.range_noise_std = 0.0f;
+    params.base_signal = static_cast<float>(base_signal_);
+    params.base_reflectivity = static_cast<float>(base_reflectivity_);
+    params.range_noise_min_std = static_cast<float>(range_noise_min_std_);
+    params.range_noise_max_std = static_cast<float>(range_noise_max_std_);
+    params.max_range = gpu_rays_ ? static_cast<float>(gpu_rays_->FarClipPlane()) : 50.0f;
+    params.signal_noise_scale = static_cast<float>(signal_noise_scale_);
+    params.nearir_noise_scale = static_cast<float>(nearir_noise_scale_);
+    params.dropout_rate_close = static_cast<float>(dropout_rate_close_);
+    params.dropout_rate_far = static_cast<float>(dropout_rate_far_);
+    params.edge_discon_threshold = static_cast<float>(edge_discon_threshold_);
     params.dt_per_col_ns = static_cast<uint64_t>(
         static_cast<int64_t>(1e9 / lidar_hz_) / W_);
 
@@ -619,12 +660,22 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
 
     // Near-IR image: GpuRays retro channel → uint16
     // Retro represents surface reflectance; closest sim analogue to ambient IR.
+    // Apply Poisson-approximated shot noise if nearir_noise_scale > 0.
     if (nearir_image_pub_->get_subscription_count() > 0) {
         auto msg = make_image();
         auto * pixels = reinterpret_cast<uint16_t *>(msg.data.data());
+        const float nir_scale = static_cast<float>(nearir_noise_scale_);
         for (size_t i = 0; i < n; ++i) {
-            const float v = std::clamp(retro_buf_[i] * 256.0f, 0.0f, 65535.0f);
-            pixels[i] = static_cast<uint16_t>(v);
+            float v = retro_buf_[i] * 256.0f;
+            if (nir_scale > 0.f && v > 0.f) {
+                // Approximate Poisson noise: σ = √v * scale
+                // Use a simple hash-based dither since we're on CPU here
+                // (good enough for display-only images)
+                float noise = (static_cast<float>((i * 2654435761u) & 0xFFFFu) / 65535.0f - 0.5f)
+                              * 2.0f * std::sqrt(v) * nir_scale;
+                v = v + noise;
+            }
+            pixels[i] = static_cast<uint16_t>(std::clamp(v, 0.0f, 65535.0f));
         }
         nearir_image_pub_->publish(std::move(msg));
     }
