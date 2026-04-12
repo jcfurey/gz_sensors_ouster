@@ -55,6 +55,15 @@ if(NOT EXISTS "${_ouster_sdk_src}/ouster_client/include")
     "Ensure ouster-ros submodule is initialized: git submodule update --init --recursive")
 endif()
 
+# OpenMP (optional): parallelise CPU-side bilinear resampling for high-density
+# sensors.  Falls back to single-threaded if not found.
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+  message(STATUS "${PROJECT_NAME}: OpenMP enabled (beam resampling parallelised)")
+else()
+  message(STATUS "${PROJECT_NAME}: OpenMP not found; beam resampling single-threaded")
+endif()
+
 # ── CUDA static library ──────────────────────────────────────────────────────
 add_subdirectory(cuda)
 
@@ -77,6 +86,7 @@ target_link_libraries(${PROJECT_NAME}
   gz-plugin2::register
   Eigen3::Eigen
   gz_gpu_ouster_lidar_cuda
+  $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
 
 ament_target_dependencies(${PROJECT_NAME}

@@ -702,8 +702,13 @@ void GzGpuOusterLidarSystem::onNewFrame(
     const int half_W = W_ / 2;  // azimuth remapping offset
     const double deg_per_col = 360.0 / static_cast<double>(W_);
     const double beam_origin_m = beam_origin_mm_ / 1000.0;
+    const int beam_count = std::min(H_, static_cast<int>(beam_alt_angles_.size()));
+    const int col_count = std::min(W_, gpu_W);
 
-    for (int beam = 0; beam < H_ && beam < static_cast<int>(beam_alt_angles_.size()); ++beam) {
+    // Outer loop over beams is parallelised with OpenMP.  Each beam writes
+    // to a distinct row slice of depth_buf_/retro_buf_, so no data races.
+    #pragma omp parallel for schedule(static) if(beam_count * col_count > 65536)
+    for (int beam = 0; beam < beam_count; ++beam) {
         const double beam_angle = beam_alt_angles_[static_cast<size_t>(beam)];
 
         // Fractional row in the GpuRays grid (vertical interpolation).
@@ -726,7 +731,7 @@ void GzGpuOusterLidarSystem::onNewFrame(
         const float beam_origin_correction =
             static_cast<float>(beam_origin_m * std::cos(elev_rad));
 
-        for (int col = 0; col < W_ && col < gpu_W; ++col) {
+        for (int col = 0; col < col_count; ++col) {
             // Apply per-beam azimuth offset to column lookup.
             const double col_f = static_cast<double>(col) + az_offset_cols;
 
