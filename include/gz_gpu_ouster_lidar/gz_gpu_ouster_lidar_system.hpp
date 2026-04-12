@@ -59,15 +59,19 @@ private:
     std::string world_name_;
     double lidar_hz_ = 10.0;
 
-    // ── Noise model parameters (SDF-configurable, Ouster-like defaults) ──────
-    double range_noise_min_std_ = 0.005;   // 5 mm σ at close range
-    double range_noise_max_std_ = 0.03;    // 30 mm σ at max range
-    double signal_noise_scale_  = 1.0;     // Poisson shot noise (1 = physical)
-    double nearir_noise_scale_  = 1.0;     // Near-IR shot noise
-    double dropout_rate_close_  = 0.001;   // 0.1% dropout probability at 0 m
-    double dropout_rate_far_    = 0.05;    // 5% dropout probability at max range
-    double edge_discon_threshold_ = 0.5;   // Suppress returns at >0.5 m depth jumps
-    double base_signal_ = 500.0;           // Baseline signal (photons·m²)
+    // ── Noise model parameters (SDF-configurable) ─────────────────────────────
+    // Defaults tuned to OS1 rev6 (real hardware on this platform).
+    // OS1 has tighter beams and longer range than OS0, yielding better
+    // range precision and less mixed-pixel noise.  Override via SDF for
+    // OS0 (wider beams, shorter range) or OS2 (narrower beams, longer range).
+    double range_noise_min_std_ = 0.002;   // 2 mm σ — OS1 repeatability ≤10 m
+    double range_noise_max_std_ = 0.008;   // 8 mm σ — OS1 at ~120 m max range
+    double signal_noise_scale_  = 1.0;     // Poisson shot noise (physically correct)
+    double nearir_noise_scale_  = 1.0;     // Near-IR follows same photon statistics
+    double dropout_rate_close_  = 0.0002;  // 0.02% — OS1 near-zero at short range
+    double dropout_rate_far_    = 0.015;   // 1.5% — low-reflectivity misses at max range
+    double edge_discon_threshold_ = 0.15;  // 0.15 m — OS1 narrow beams, tighter rejection
+    double base_signal_ = 800.0;           // OS1 higher photon budget than OS0
     double base_reflectivity_ = 50.0;      // Default reflectivity [0–255]
 
     // ── Ouster metadata ──────────────────────────────────────────────────────
