@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check license headers (SPDX)
+        run: |
+          missing=""
+          for f in $(find src include cuda -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.cu' -o -name '*.cuh' -o -name '*.h' \)); do
+            if ! head -2 "$f" | grep -q 'SPDX-License-Identifier'; then
+              missing="$missing $f"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "Missing SPDX header:$missing"
+            exit 1
+          fi
+          echo "All source files have SPDX headers."
+
+      - name: Check clang-format config exists
+        run: test -f .clang-format
+
+  build:
+    name: Build (CPU fallback)
+    runs-on: ubuntu-latest
+    container:
+      image: osrf/ros:jazzy-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq \
+            ros-${ROS_DISTRO}-gz-sim-vendor \
+            ros-${ROS_DISTRO}-gz-rendering-vendor \
+            ros-${ROS_DISTRO}-gz-sensors-vendor \
+            ros-${ROS_DISTRO}-gz-plugin-vendor \
+            ros-${ROS_DISTRO}-ouster-sensor-msgs \
+            ros-${ROS_DISTRO}-ouster-ros \
+            libeigen3-dev
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/${ROS_DISTRO}/setup.bash
+          colcon build --packages-select gz_gpu_ouster_lidar \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release

@@ -21,3 +21,8 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 compile_commands.json
+
+# CUDA build artifacts
+*.ptx
+*.cubin
+*.fatbin

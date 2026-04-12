@@ -1,3 +1,6 @@
+// Copyright 2026 John C. Furey
+// SPDX-License-Identifier: Apache-2.0
+
 #include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
 
 #include <algorithm>

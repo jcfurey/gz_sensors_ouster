@@ -1,27 +1,59 @@
 <plugin
   filename="libgz_gpu_ouster_lidar.so"
   name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
-  <metadata_path>/home/robot/data/ouster/os0_16_sim.json</metadata_path>
-  <sensor_name>os_sensor</sensor_name>
+
+  <!-- ─── Required ────────────────────────────────────────────────── -->
+
+  <!-- Path to Ouster calibration JSON (absolute, relative to SDF, or URI).
+       Replace with your actual metadata file. -->
+  <metadata_path>os1_64_sim.json</metadata_path>
+
+  <!-- ROS topic prefix — all topics are published under this namespace -->
+  <sensor_name>/sensor/lidar/lidar0</sensor_name>
+
+  <!-- Lidar scan rate in Hz (common values: 10, 20) -->
   <lidar_hz>10.0</lidar_hz>
 
-  <!-- Max sensing range in metres (default: 120.0 for OS1) -->
+  <!-- ─── Lidar (optional) ────────────────────────────────────────── -->
+
+  <!-- Max sensing range in metres. Sets GPU far clip and noise scaling.
+       OS0: 50, OS1: 120 (default), OS2: 240 -->
   <!-- <max_range>120.0</max_range> -->
 
-  <!-- Noise model parameters (defaults tuned for OS1 rev6) -->
+  <!-- ─── Noise Model (optional, defaults tuned for OS1-64 rev6) ──── -->
+
+  <!-- Range noise: Gaussian, sigma interpolated linearly from min to max
+       with distance. Units: metres. -->
   <!-- <range_noise_min_std>0.002</range_noise_min_std> -->
   <!-- <range_noise_max_std>0.008</range_noise_max_std> -->
-  <!-- <signal_noise_scale>1.0</signal_noise_scale> -->
-  <!-- <nearir_noise_scale>1.0</nearir_noise_scale> -->
-  <!-- <dropout_rate_close>0.0002</dropout_rate_close> -->
-  <!-- <dropout_rate_far>0.015</dropout_rate_far> -->
-  <!-- <edge_discon_threshold>0.15</edge_discon_threshold> -->
+
+  <!-- Signal intensity model: photon budget for the 1/r^2 model.
+       Higher = brighter returns. OS0: ~400, OS1: ~800. -->
   <!-- <base_signal>800.0</base_signal> -->
+
+  <!-- Poisson shot noise on signal channel. 0 = off, 1.0 = physical. -->
+  <!-- <signal_noise_scale>1.0</signal_noise_scale> -->
+
+  <!-- Poisson noise on the near-IR image topic. 0 = off. -->
+  <!-- <nearir_noise_scale>1.0</nearir_noise_scale> -->
+
+  <!-- Default reflectivity value (0-255) when surface has no retro. -->
   <!-- <base_reflectivity>50.0</base_reflectivity> -->
 
-  <!-- IMU simulation (optional — omit imu_name to disable) -->
-  <!-- Requires gz-sim-imu-system plugin and an IMU sensor in SDF/URDF -->
+  <!-- Random dropouts: probability of a missed return, increasing with
+       distance. 0 = never miss, 1 = always miss. -->
+  <!-- <dropout_rate_close>0.0002</dropout_rate_close> -->
+  <!-- <dropout_rate_far>0.015</dropout_rate_far> -->
+
+  <!-- Depth-discontinuity suppression: reject returns at depth edges
+       where a neighbor differs by more than this threshold. 0 = off. -->
+  <!-- <edge_discon_threshold>0.15</edge_discon_threshold> -->
+
+  <!-- ─── IMU (optional) ──────────────────────────────────────────── -->
+  <!-- Requires gz-sim-imu-system plugin and a matching IMU sensor in
+       your SDF/URDF. Omit imu_name to disable. -->
   <!-- <imu_name>imu0</imu_name> -->
   <!-- <imu_hz>100.0</imu_hz> -->
   <!-- <publish_imu_msg>true</publish_imu_msg> -->
+
 </plugin>
