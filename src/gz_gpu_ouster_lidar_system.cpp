@@ -41,6 +41,7 @@
 #include <ouster/types.h>
 
 #include <rclcpp/rclcpp.hpp>
+#include <builtin_interfaces/msg/time.hpp>
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
 #include <std_msgs/msg/string.hpp>
 
@@ -603,6 +604,7 @@ void GzGpuOusterLidarSystem::onNewFrame(
     max_alt += margin_deg;
 
     const double v_range = max_alt - min_alt;  // degrees
+    if (v_range <= 0.0) return;  // degenerate beam angles
 
     // For each Ouster beam (row), find the depth at its exact elevation AND
     // azimuth angle by 2D bilinear interpolation of the uniform GpuRays grid.
@@ -639,7 +641,7 @@ void GzGpuOusterLidarSystem::onNewFrame(
         // Precompute cos(elevation) for beam origin correction.
         // Real hardware measures range from the beam emitter, offset along
         // the beam axis by lidar_origin_to_beam_origin_mm from sensor origin.
-        const double elev_rad = beam_angle * M_PI / 180.0;
+        const double elev_rad = beam_angle * GZ_PI / 180.0;
         const float beam_origin_correction =
             static_cast<float>(beam_origin_m * std::cos(elev_rad));
 

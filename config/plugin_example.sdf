@@ -4,11 +4,12 @@
 
   <!-- ─── Required ────────────────────────────────────────────────── -->
 
-  <!-- Path to Ouster calibration JSON (absolute, relative to SDF, or URI) -->
-  <metadata_path>/home/robot/data/ouster/os0_16_sim.json</metadata_path>
+  <!-- Path to Ouster calibration JSON (absolute, relative to SDF, or URI).
+       Replace with your actual metadata file. -->
+  <metadata_path>os1_64_sim.json</metadata_path>
 
   <!-- ROS topic prefix — all topics are published under this namespace -->
-  <sensor_name>os_sensor</sensor_name>
+  <sensor_name>/sensor/lidar/lidar0</sensor_name>
 
   <!-- Lidar scan rate in Hz (common values: 10, 20) -->
   <lidar_hz>10.0</lidar_hz>
