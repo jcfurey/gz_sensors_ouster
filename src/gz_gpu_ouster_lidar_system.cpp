@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -82,14 +83,16 @@ void GzGpuOusterLidarSystem::Configure(
     // Read SDF parameters
     if (sdf->HasElement("metadata_path")) {
         metadata_path_ = sdf->Get<std::string>("metadata_path");
-        // Resolve relative paths against the SDF file's directory.
-        if (!metadata_path_.empty() && metadata_path_[0] != '/') {
-            std::string sdf_dir = sdf->FilePath();
-            if (!sdf_dir.empty()) {
-                auto slash = sdf_dir.rfind('/');
-                if (slash != std::string::npos) {
-                    sdf_dir = sdf_dir.substr(0, slash);
-                    metadata_path_ = sdf_dir + "/" + metadata_path_;
+        // Resolve relative filesystem paths against the SDF file's directory.
+        // Skip resolution for absolute paths and URI schemes (model://, package://, etc.).
+        if (!metadata_path_.empty() &&
+            metadata_path_.find("://") == std::string::npos &&
+            !std::filesystem::path(metadata_path_).is_absolute()) {
+            std::string sdf_file = sdf->FilePath();
+            if (!sdf_file.empty()) {
+                auto parent = std::filesystem::path(sdf_file).parent_path();
+                if (!parent.empty()) {
+                    metadata_path_ = (parent / metadata_path_).string();
                 }
             }
         }
@@ -261,33 +264,41 @@ bool GzGpuOusterLidarSystem::loadMetadata()
     ss << fs.rdbuf();
     metadata_str_ = ss.str();
 
-    // Parse via Ouster SDK for PacketWriter
-    ouster::sdk::core::SensorInfo info(metadata_str_);
-    ouster::sdk::core::PacketFormat pf(info);
-    pw_ = std::make_unique<ouster::sdk::core::impl::PacketWriter>(pf);
+    // Parse via Ouster SDK for PacketWriter.
+    // SensorInfo / PacketFormat / PacketWriter can throw on malformed or
+    // incompatible metadata; catch here to avoid unwinding into Gazebo.
+    try {
+        ouster::sdk::core::SensorInfo info(metadata_str_);
+        ouster::sdk::core::PacketFormat pf(info);
+        pw_ = std::make_unique<ouster::sdk::core::impl::PacketWriter>(pf);
 
-    H_   = pw_->pixels_per_column;
-    W_   = static_cast<int>(info.format.columns_per_frame);
-    cpp_ = pw_->columns_per_packet;
+        H_   = pw_->pixels_per_column;
+        W_   = static_cast<int>(info.format.columns_per_frame);
+        cpp_ = pw_->columns_per_packet;
 
-    if (cpp_ <= 0 || W_ % cpp_ != 0) {
-        std::cerr << "[GzGpuOusterLidar] columns_per_frame (" << W_
-              << ") not divisible by columns_per_packet (" << cpp_ << ")\n";
+        if (cpp_ <= 0 || W_ % cpp_ != 0) {
+            std::cerr << "[GzGpuOusterLidar] columns_per_frame (" << W_
+                  << ") not divisible by columns_per_packet (" << cpp_ << ")\n";
+            return false;
+        }
+
+        pkt_buf_.resize(pw_->lidar_packet_size, 0);
+
+        // IMU packet buffer (used only when imu_enabled_)
+        imu_packet_size_ = pf.imu_packet_size;
+        if (imu_enabled_ && imu_packet_size_ > 0) {
+            imu_pkt_buf_.resize(imu_packet_size_, 0);
+        }
+
+        // Beam intrinsics are available directly on SensorInfo.
+        beam_alt_angles_ = info.beam_altitude_angles;
+        beam_az_offsets_ = info.beam_azimuth_angles;
+        beam_origin_mm_  = info.lidar_origin_to_beam_origin_mm;
+    } catch (const std::exception & e) {
+        std::cerr << "[GzGpuOusterLidar] Failed to parse metadata: "
+                  << e.what() << "\n";
         return false;
     }
-
-    pkt_buf_.resize(pw_->lidar_packet_size, 0);
-
-    // IMU packet buffer (used only when imu_enabled_)
-    imu_packet_size_ = pf.imu_packet_size;
-    if (imu_enabled_ && imu_packet_size_ > 0) {
-        imu_pkt_buf_.resize(imu_packet_size_, 0);
-    }
-
-    // Beam intrinsics are available directly on SensorInfo.
-    beam_alt_angles_ = info.beam_altitude_angles;
-    beam_az_offsets_ = info.beam_azimuth_angles;
-    beam_origin_mm_  = info.lidar_origin_to_beam_origin_mm;
 
     if (beam_alt_angles_.empty() || static_cast<int>(beam_alt_angles_.size()) != H_) {
         std::cerr << "[GzGpuOusterLidar] beam_altitude_angles size ("
