@@ -23,6 +23,8 @@
 #include <gz/sim/components/ParentEntity.hh>
 #include <gz/sim/components/Sensor.hh>
 #include <gz/sim/components/World.hh>
+#include <gz/sim/components/AngularVelocity.hh>
+#include <gz/sim/components/LinearAcceleration.hh>
 #include <gz/math/Pose3.hh>
 #include <gz/rendering/GpuRays.hh>
 #include <gz/rendering/RenderEngine.hh>
@@ -131,6 +133,18 @@ void GzGpuOusterLidarSystem::Configure(
         max_range_ = sdf->Get<double>("max_range");
     }
 
+    // ── IMU parameters (optional — omit imu_name to disable) ─────────────────
+    if (sdf->HasElement("imu_name")) {
+        imu_name_ = sdf->Get<std::string>("imu_name");
+        imu_enabled_ = !imu_name_.empty();
+    }
+    if (sdf->HasElement("imu_hz")) {
+        imu_hz_ = sdf->Get<double>("imu_hz");
+    }
+    if (sdf->HasElement("publish_imu_msg")) {
+        publish_imu_msg_ = sdf->Get<bool>("publish_imu_msg");
+    }
+
     // ── Validate parameters ────────────────────────────────────────────────────
     range_noise_min_std_   = std::max(0.0, range_noise_min_std_);
     range_noise_max_std_   = std::max(0.0, range_noise_max_std_);
@@ -145,6 +159,10 @@ void GzGpuOusterLidarSystem::Configure(
     if (lidar_hz_ <= 0.0) {
         std::cerr << "[GzGpuOusterLidar] lidar_hz must be > 0, got " << lidar_hz_ << "; defaulting to 10\n";
         lidar_hz_ = 10.0;
+    }
+    if (imu_enabled_ && imu_hz_ <= 0.0) {
+        std::cerr << "[GzGpuOusterLidar] imu_hz must be > 0, got " << imu_hz_ << "; defaulting to 100\n";
+        imu_hz_ = 100.0;
     }
 
     if (metadata_path_.empty()) {
@@ -208,6 +226,7 @@ void GzGpuOusterLidarSystem::Configure(
 
     // Image frame_id: match the URDF lidar frame (e.g. "lidar0/lidar_frame")
     image_frame_id_ = lidar_id + "/lidar_frame";
+    imu_frame_id_ = lidar_id + "/imu_frame";
 
     std::cout << "[GzGpuOusterLidar] Configured: H=" << H_ << " W=" << W_
           << " cpp=" << cpp_ << " sensor_name=" << sensor_name_
@@ -219,6 +238,12 @@ void GzGpuOusterLidarSystem::Configure(
           << " edge_discon=" << edge_discon_threshold_ << "m"
           << " max_range=" << max_range_ << "m"
           << "\n";
+    if (imu_enabled_) {
+        std::cout << "  IMU: sensor=" << imu_name_
+                  << " hz=" << imu_hz_
+                  << " publish_imu_msg=" << (publish_imu_msg_ ? "true" : "false")
+                  << "\n";
+    }
 }
 
 // ── Metadata loading ─────────────────────────────────────────────────────────
@@ -251,6 +276,12 @@ bool GzGpuOusterLidarSystem::loadMetadata()
     }
 
     pkt_buf_.resize(pw_->lidar_packet_size, 0);
+
+    // IMU packet buffer (used only when imu_enabled_)
+    imu_packet_size_ = pf.imu_packet_size;
+    if (imu_enabled_ && imu_packet_size_ > 0) {
+        imu_pkt_buf_.resize(imu_packet_size_, 0);
+    }
 
     // Beam intrinsics are available directly on SensorInfo.
     beam_alt_angles_ = info.beam_altitude_angles;
@@ -303,6 +334,16 @@ void GzGpuOusterLidarSystem::initRosInterface()
         abs_prefix + "/reflec_image", qos);
     nearir_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
         abs_prefix + "/nearir_image", qos);
+
+    // IMU publishers (only if imu_name was provided in SDF)
+    if (imu_enabled_) {
+        imu_pkt_pub_ = ros_node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
+            abs_prefix + "/imu_packets", qos);
+        if (publish_imu_msg_) {
+            imu_msg_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Imu>(
+                abs_prefix + "/imu", qos);
+        }
+    }
 
     // Spin the node on a background thread so Zenoh completes peer discovery.
     // Without this, rmw_zenoh_cpp never processes incoming control messages
@@ -475,6 +516,23 @@ void GzGpuOusterLidarSystem::PostUpdate(
             });
     }
 
+    // ── Locate the IMU sensor entity (once) ────────────────────────────────
+    if (imu_enabled_ && !imu_entity_found_) {
+        ecm.Each<::gz::sim::components::Name, ::gz::sim::components::Sensor>(
+            [this](const ::gz::sim::Entity & ent,
+                   const ::gz::sim::components::Name * name,
+                   const ::gz::sim::components::Sensor *) -> bool {
+                if (name->Data() == imu_name_) {
+                    imu_entity_ = ent;
+                    imu_entity_found_ = true;
+                    std::cout << "[GzGpuOusterLidar] Found IMU entity: "
+                              << imu_name_ << " (id=" << ent << ")\n";
+                    return false;  // stop iteration
+                }
+                return true;  // continue
+            });
+    }
+
     // ── Cache world pose for the rendering thread ────────────────────────────
     if (lidar_frame_found_) {
         auto worldPose = ::gz::sim::worldPose(lidar_frame_entity_, ecm);
@@ -495,6 +553,11 @@ void GzGpuOusterLidarSystem::PostUpdate(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 info.simTime).count();
         encodeAndPublish(stamp_ns);
+    }
+
+    // ── Publish IMU at configured rate ──────────────────────────────────────
+    if (imu_enabled_ && imu_entity_found_) {
+        publishImu(info, ecm);
     }
 }
 
@@ -804,6 +867,82 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
             pixels[i] = static_cast<uint16_t>(std::clamp(v, 0.0f, 65535.0f));
         }
         nearir_image_pub_->publish(std::move(msg));
+    }
+}
+
+// ── IMU publishing ──────────────────────────────────────────────────────────
+
+void GzGpuOusterLidarSystem::publishImu(
+    const ::gz::sim::UpdateInfo & info,
+    const ::gz::sim::EntityComponentManager & ecm)
+{
+    // ── Rate limiting (sim time) ─────────────────────────────────────────
+    const auto sim_now = std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+    const auto imu_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(1.0 / imu_hz_));
+
+    if (sim_now - last_imu_sim_time_ < imu_period) return;
+    last_imu_sim_time_ = sim_now;
+
+    // ── Read IMU data from ECM ───────────────────────────────────────────
+    auto * angVelComp = ecm.Component<::gz::sim::components::AngularVelocity>(imu_entity_);
+    auto * linAccComp = ecm.Component<::gz::sim::components::LinearAcceleration>(imu_entity_);
+
+    if (!angVelComp || !linAccComp) return;  // IMU data not yet available
+
+    const auto & av = angVelComp->Data();   // rad/s, body frame
+    const auto & la = linAccComp->Data();   // m/s², body frame, includes gravity
+
+    const int64_t stamp_ns = sim_now.count();
+
+    // ── Encode Ouster IMU PacketMsg ──────────────────────────────────────
+    if (imu_pkt_pub_ && imu_pkt_pub_->get_subscription_count() > 0 &&
+        !imu_pkt_buf_.empty()) {
+        std::fill(imu_pkt_buf_.begin(), imu_pkt_buf_.end(), 0);
+
+        pw_->set_imu_nmea_ts(imu_pkt_buf_.data(), static_cast<uint64_t>(stamp_ns));
+
+        pw_->set_imu_la_x(imu_pkt_buf_.data(), static_cast<float>(la.X()));
+        pw_->set_imu_la_y(imu_pkt_buf_.data(), static_cast<float>(la.Y()));
+        pw_->set_imu_la_z(imu_pkt_buf_.data(), static_cast<float>(la.Z()));
+        pw_->set_imu_av_x(imu_pkt_buf_.data(), static_cast<float>(av.X()));
+        pw_->set_imu_av_y(imu_pkt_buf_.data(), static_cast<float>(av.Y()));
+        pw_->set_imu_av_z(imu_pkt_buf_.data(), static_cast<float>(av.Z()));
+
+        ouster_sensor_msgs::msg::PacketMsg pkt;
+        pkt.buf.assign(imu_pkt_buf_.begin(), imu_pkt_buf_.end());
+        imu_pkt_pub_->publish(std::move(pkt));
+    }
+
+    // ── Publish sensor_msgs/Imu for convenience ─────────────────────────
+    if (publish_imu_msg_ && imu_msg_pub_ &&
+        imu_msg_pub_->get_subscription_count() > 0) {
+        sensor_msgs::msg::Imu msg;
+        msg.header.stamp.sec  = static_cast<int32_t>(stamp_ns / 1000000000LL);
+        msg.header.stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000LL);
+        msg.header.frame_id = imu_frame_id_;
+
+        msg.angular_velocity.x = av.X();
+        msg.angular_velocity.y = av.Y();
+        msg.angular_velocity.z = av.Z();
+
+        msg.linear_acceleration.x = la.X();
+        msg.linear_acceleration.y = la.Y();
+        msg.linear_acceleration.z = la.Z();
+
+        // Covariance: match ouster_ros os_cloud defaults
+        msg.angular_velocity_covariance[0] = 6e-4;
+        msg.angular_velocity_covariance[4] = 6e-4;
+        msg.angular_velocity_covariance[8] = 6e-4;
+
+        msg.linear_acceleration_covariance[0] = 0.01;
+        msg.linear_acceleration_covariance[4] = 0.01;
+        msg.linear_acceleration_covariance[8] = 0.01;
+
+        // Orientation unknown (per REP-145: first element = -1)
+        msg.orientation_covariance[0] = -1.0;
+
+        imu_msg_pub_->publish(std::move(msg));
     }
 }
 

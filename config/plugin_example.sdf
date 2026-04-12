@@ -18,4 +18,10 @@
   <!-- <edge_discon_threshold>0.15</edge_discon_threshold> -->
   <!-- <base_signal>800.0</base_signal> -->
   <!-- <base_reflectivity>50.0</base_reflectivity> -->
+
+  <!-- IMU simulation (optional — omit imu_name to disable) -->
+  <!-- Requires gz-sim-imu-system plugin and an IMU sensor in SDF/URDF -->
+  <!-- <imu_name>imu0</imu_name> -->
+  <!-- <imu_hz>100.0</imu_hz> -->
+  <!-- <publish_imu_msg>true</publish_imu_msg> -->
 </plugin>
