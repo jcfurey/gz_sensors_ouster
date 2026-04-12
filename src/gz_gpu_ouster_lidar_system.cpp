@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -251,10 +252,6 @@ void GzGpuOusterLidarSystem::initRosInterface()
     meta_pub_ = ros_node_->create_publisher<std_msgs::msg::String>(
         abs_prefix + "/metadata", meta_qos);
 
-    std_msgs::msg::String meta_msg;
-    meta_msg.data = metadata_str_;
-    meta_pub_->publish(meta_msg);
-
     // Packet publisher
     const auto qos = rclcpp::SensorDataQoS();
     pkt_pub_ = ros_node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
@@ -277,6 +274,15 @@ void GzGpuOusterLidarSystem::initRosInterface()
     ros_spin_thread_ = std::thread([this]() {
         ros_executor_.spin();
     });
+
+    // Publish initial metadata AFTER executor is spinning (Zenoh requires
+    // the executor to process outgoing messages).
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std_msgs::msg::String meta_msg;
+    meta_msg.data = metadata_str_;
+    meta_pub_->publish(meta_msg);
+    std::cout << "[GzGpuOusterLidar] Initial metadata published on "
+              << abs_prefix << "/metadata\n";
 }
 
 // ── Rendering-thread callback ────────────────────────────────────────────────
@@ -287,16 +293,24 @@ void GzGpuOusterLidarSystem::initRosInterface()
 void GzGpuOusterLidarSystem::OnRender()
 {
     if (sensor_initialized_.load(std::memory_order_acquire)) {
-        // Republish metadata on every render tick until os_cloud subscribes.
-        // Zenoh's transient_local does not replay to late subscribers without
-        // a running executor, so we push the message repeatedly until confirmed.
+        // Republish metadata periodically until os_cloud confirms receipt.
+        // rmw_zenoh_cpp transient_local replay is unreliable across processes,
+        // and get_subscription_count() may lag behind actual Zenoh peer state.
+        // Republish every ~1s (assuming render ticks at sensor hz) until we
+        // see a subscriber AND have published at least a few times.
         if (!metadata_published_) {
-            std_msgs::msg::String meta_msg;
-            meta_msg.data = metadata_str_;
-            meta_pub_->publish(meta_msg);
-            if (meta_pub_->get_subscription_count() > 0) {
+            ++metadata_pub_count_;
+            // Throttle: republish roughly every 1 second worth of render ticks
+            if (metadata_pub_count_ <= 5 || metadata_pub_count_ % static_cast<int>(lidar_hz_) == 0) {
+                std_msgs::msg::String meta_msg;
+                meta_msg.data = metadata_str_;
+                meta_pub_->publish(meta_msg);
+            }
+            // Only stop after subscriber detected AND we've sent enough for Zenoh to settle
+            if (meta_pub_->get_subscription_count() > 0 && metadata_pub_count_ > static_cast<int>(lidar_hz_) * 2) {
                 metadata_published_ = true;
-                std::cout << "[GzGpuOusterLidar] metadata delivered to os_cloud\n";
+                std::cout << "[GzGpuOusterLidar] metadata delivered to os_cloud (after "
+                          << metadata_pub_count_ << " publishes)\n";
             }
         }
 
@@ -470,49 +484,121 @@ void GzGpuOusterLidarSystem::onNewFrame(
 
     const double v_range = max_alt - min_alt;  // degrees
 
-    // For each Ouster beam (row), find the depth at its exact elevation angle
-    // by interpolating the uniform GpuRays grid.
+    // For each Ouster beam (row), find the depth at its exact elevation AND
+    // azimuth angle by 2D bilinear interpolation of the uniform GpuRays grid.
+    //
+    // Real Ouster hardware has:
+    //   - Per-beam elevation angles (beam_altitude_angles)
+    //   - Per-beam azimuth offsets  (beam_azimuth_angles) — typically −3° to −3.3°
+    //   - Beam origin offset (lidar_origin_to_beam_origin_mm) — range is measured
+    //     from the beam emitter, not from sensor_frame origin
+    //
+    // GpuRays measures range from the sensor origin.  We correct for the beam
+    // origin offset so that the encoded range matches what real hardware reports.
+
     const int half_W = W_ / 2;  // azimuth remapping offset
+    const double deg_per_col = 360.0 / static_cast<double>(W_);
+    const double beam_origin_m = beam_origin_mm_ / 1000.0;
 
     for (int beam = 0; beam < H_ && beam < static_cast<int>(beam_alt_angles_.size()); ++beam) {
         const double beam_angle = beam_alt_angles_[static_cast<size_t>(beam)];
 
-        // Fractional row in the GpuRays grid.
+        // Fractional row in the GpuRays grid (vertical interpolation).
         // GpuRays row 0 = VerticalAngleMin (bottom), row gpu_H-1 = VerticalAngleMax (top).
-        const double frac = (beam_angle - min_alt) / v_range;
-        const double row_f = frac * (gpu_H - 1);
+        const double v_frac = (beam_angle - min_alt) / v_range;
+        const double row_f = v_frac * (gpu_H - 1);
         const int row_lo = std::clamp(static_cast<int>(std::floor(row_f)), 0, gpu_H - 1);
         const int row_hi = std::clamp(row_lo + 1, 0, gpu_H - 1);
-        const float alpha = static_cast<float>(row_f - row_lo);
+        const float v_alpha = static_cast<float>(row_f - row_lo);
+
+        // Per-beam azimuth offset → fractional column shift in GpuRays grid.
+        const double az_offset_deg = (beam < static_cast<int>(beam_az_offsets_.size()))
+            ? beam_az_offsets_[static_cast<size_t>(beam)] : 0.0;
+        const double az_offset_cols = az_offset_deg / deg_per_col;
+
+        // Precompute cos(elevation) for beam origin correction.
+        // Real hardware measures range from the beam emitter, offset along
+        // the beam axis by lidar_origin_to_beam_origin_mm from sensor origin.
+        const double elev_rad = beam_angle * M_PI / 180.0;
+        const float beam_origin_correction =
+            static_cast<float>(beam_origin_m * std::cos(elev_rad));
 
         for (int col = 0; col < W_ && col < gpu_W; ++col) {
-            const int idx_lo = (row_lo * gpu_W + col) * gpu_chan;
-            const int idx_hi = (row_hi * gpu_W + col) * gpu_chan;
+            // Apply per-beam azimuth offset to column lookup.
+            const double col_f = static_cast<double>(col) + az_offset_cols;
 
-            // Bilinear interpolation of depth
-            const float d_lo = data[idx_lo];
-            const float d_hi = data[idx_hi];
+            // Wrap and clamp to valid GpuRays columns (azimuth is cyclic).
+            double col_wrapped = std::fmod(col_f + gpu_W, static_cast<double>(gpu_W));
+            if (col_wrapped < 0) col_wrapped += gpu_W;
+            const int col_lo = static_cast<int>(std::floor(col_wrapped)) % gpu_W;
+            const int col_hi = (col_lo + 1) % gpu_W;
+            const float h_alpha = static_cast<float>(col_wrapped - std::floor(col_wrapped));
 
+            // 2D bilinear interpolation: four corner samples
+            const int idx_00 = (row_lo * gpu_W + col_lo) * gpu_chan;
+            const int idx_01 = (row_lo * gpu_W + col_hi) * gpu_chan;
+            const int idx_10 = (row_hi * gpu_W + col_lo) * gpu_chan;
+            const int idx_11 = (row_hi * gpu_W + col_hi) * gpu_chan;
+
+            const float d00 = data[idx_00];
+            const float d01 = data[idx_01];
+            const float d10 = data[idx_10];
+            const float d11 = data[idx_11];
+
+            // Count valid (non-inf) samples for robust interpolation.
             float depth;
-            if (std::isinf(d_lo) || std::isinf(d_hi)) {
-                // Either beam missed — use whichever is valid, or inf if both miss
-                depth = std::isinf(d_lo) ? d_hi : d_lo;
+            const bool v00 = !std::isinf(d00), v01 = !std::isinf(d01);
+            const bool v10 = !std::isinf(d10), v11 = !std::isinf(d11);
+            const int n_valid = v00 + v01 + v10 + v11;
+
+            if (n_valid == 0) {
+                depth = std::numeric_limits<float>::infinity();
+            } else if (n_valid == 4) {
+                // Full 2D bilinear
+                const float d_top = d00 * (1.0f - h_alpha) + d01 * h_alpha;
+                const float d_bot = d10 * (1.0f - h_alpha) + d11 * h_alpha;
+                depth = d_top * (1.0f - v_alpha) + d_bot * v_alpha;
             } else {
-                depth = d_lo * (1.0f - alpha) + d_hi * alpha;
+                // Partial validity — average only valid samples
+                float sum = 0.0f;
+                if (v00) sum += d00;
+                if (v01) sum += d01;
+                if (v10) sum += d10;
+                if (v11) sum += d11;
+                depth = sum / static_cast<float>(n_valid);
+            }
+
+            // Apply beam origin correction: convert sensor-origin range to
+            // beam-origin range (what real Ouster hardware reports).
+            if (!std::isinf(depth) && beam_origin_m > 0.0) {
+                depth = std::max(0.0f, depth - beam_origin_correction);
             }
 
             // Azimuth remapping: Gazebo col 0 = −π, Ouster m_id 0 = encoder 0 (+X_lidar).
-            // Formula mirrors gz_ouster_packet_bridge: m_id = (W/2 − col + W) % W
             const int m_id = (half_W - col + W_) % W_;
             const int ouster_idx = beam * W_ + m_id;
             depth_buf_[static_cast<size_t>(ouster_idx)] = depth;
 
-            // Retro (intensity) channel
+            // Retro (intensity) channel — same 2D bilinear
             if (gpu_chan >= 2) {
-                const float r_lo = data[idx_lo + 1];
-                const float r_hi = data[idx_hi + 1];
-                retro_buf_[static_cast<size_t>(ouster_idx)] =
-                    r_lo * (1.0f - alpha) + r_hi * alpha;
+                const float r00 = data[idx_00 + 1], r01 = data[idx_01 + 1];
+                const float r10 = data[idx_10 + 1], r11 = data[idx_11 + 1];
+                if (n_valid == 4) {
+                    const float r_top = r00 * (1.0f - h_alpha) + r01 * h_alpha;
+                    const float r_bot = r10 * (1.0f - h_alpha) + r11 * h_alpha;
+                    retro_buf_[static_cast<size_t>(ouster_idx)] =
+                        r_top * (1.0f - v_alpha) + r_bot * v_alpha;
+                } else if (n_valid > 0) {
+                    float sum = 0.0f;
+                    if (v00) sum += r00;
+                    if (v01) sum += r01;
+                    if (v10) sum += r10;
+                    if (v11) sum += r11;
+                    retro_buf_[static_cast<size_t>(ouster_idx)] =
+                        sum / static_cast<float>(n_valid);
+                } else {
+                    retro_buf_[static_cast<size_t>(ouster_idx)] = 0.0f;
+                }
             }
         }
     }

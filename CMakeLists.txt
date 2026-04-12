@@ -48,7 +48,7 @@ else()
 endif()
 
 # ── Ouster SDK headers (same pattern as gz_ouster_packet_bridge) ──────────────
-set(_ouster_sdk_src "${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/ouster-ros/ouster-sdk")
+set(_ouster_sdk_src "${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/ouster-ros/ouster-ros/ouster-sdk")
 if(NOT EXISTS "${_ouster_sdk_src}/ouster_client/include")
   message(FATAL_ERROR
     "Ouster SDK not found at ${_ouster_sdk_src}. "

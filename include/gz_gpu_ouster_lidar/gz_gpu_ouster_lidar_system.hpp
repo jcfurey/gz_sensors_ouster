@@ -133,6 +133,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr nearir_image_pub_;
     std::string image_frame_id_;
     bool metadata_published_ = false;   // true once a subscriber has acked
+    int metadata_pub_count_ = 0;       // render ticks since sensor init
 
     // ── Drain thread ─────────────────────────────────────────────────────────
     std::vector<ouster_sensor_msgs::msg::PacketMsg> drain_pkts_;
