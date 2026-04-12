@@ -8,6 +8,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <chrono>
@@ -73,6 +74,13 @@ private:
     double edge_discon_threshold_ = 0.15;  // 0.15 m — OS1 narrow beams, tighter rejection
     double base_signal_ = 800.0;           // OS1 higher photon budget than OS0
     double base_reflectivity_ = 50.0;      // Default reflectivity [0–255]
+    double max_range_ = 120.0;             // Sensor max range (metres), default OS1
+
+    // ── IMU configuration (SDF-optional) ─────────────────────────────────────
+    std::string imu_name_;                  // Gazebo IMU sensor entity name
+    double imu_hz_ = 100.0;                // IMU publish rate (Hz)
+    bool imu_enabled_ = false;             // true if <imu_name> was provided
+    bool publish_imu_msg_ = true;          // also publish sensor_msgs/Imu
 
     // ── Ouster metadata ──────────────────────────────────────────────────────
     std::string metadata_str_;
@@ -82,6 +90,10 @@ private:
     std::vector<double> beam_alt_angles_;   // per-beam elevation (degrees)
     std::vector<double> beam_az_offsets_;   // per-beam azimuth offset (degrees)
     double beam_origin_mm_ = 0.0;          // lidar_origin_to_beam_origin_mm
+
+    // ── IMU packet format ────────────────────────────────────────────────────
+    size_t imu_packet_size_ = 0;
+    std::vector<uint8_t> imu_pkt_buf_;
 
     // ── Packet writer ────────────────────────────────────────────────────────
     std::unique_ptr<ouster::sdk::core::impl::PacketWriter> pw_;
@@ -104,6 +116,10 @@ private:
     std::mutex pose_mtx_;
     ::gz::math::Pose3d cached_pose_;
 
+    // ── IMU entity tracking ──────────────────────────────────────────────────
+    ::gz::sim::Entity imu_entity_{::gz::sim::kNullEntity};
+    bool imu_entity_found_ = false;
+
     // ── Rendering-thread event connection ────────────────────────────────────
     ::gz::sim::EventManager *event_mgr_{nullptr};
     gz::common::ConnectionPtr render_conn_;
@@ -118,12 +134,13 @@ private:
     std::vector<uint32_t> range_buf_;
     std::vector<uint16_t> signal_buf_;
     std::vector<uint8_t>  reflectivity_buf_;
+    std::vector<uint16_t> nearir_buf_;          // NEAR_IR channel for packet encoding
 
     // Raw GpuRays callback buffer
     std::vector<float> depth_buf_;
     std::vector<float> retro_buf_;
     std::mutex frame_mtx_;
-    bool frame_ready_ = false;
+    std::atomic<bool> frame_ready_{false};
 
     // ── ROS 2 node & publishers ──────────────────────────────────────────────
     rclcpp::Node::SharedPtr ros_node_;
@@ -135,7 +152,10 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr signal_image_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr reflec_image_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr nearir_image_pub_;
+    rclcpp::Publisher<ouster_sensor_msgs::msg::PacketMsg>::SharedPtr imu_pkt_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_msg_pub_;
     std::string image_frame_id_;
+    std::string imu_frame_id_;
     bool metadata_published_ = false;   // true once a subscriber has acked
     int metadata_pub_count_ = 0;       // render ticks since sensor init
 
@@ -147,14 +167,19 @@ private:
     std::atomic<bool> drain_ready_{false};
     std::atomic<bool> shutdown_{false};
 
+    // ── IMU timing ───────────────────────────────────────────────────────────
+    std::chrono::nanoseconds last_imu_sim_time_{0};
+
     // ── Private methods ──────────────────────────────────────────────────────
-    void loadMetadata();
+    bool loadMetadata();
     void initRosInterface();
     void onNewFrame(const float * data, unsigned int width,
                     unsigned int height, unsigned int channels,
                     const std::string & format);
     void encodeAndPublish(int64_t stamp_ns);
     void publishImages(int64_t stamp_ns);
+    void publishImu(const ::gz::sim::UpdateInfo & info,
+                    const ::gz::sim::EntityComponentManager & ecm);
     void drainThreadFunc();
 };
 

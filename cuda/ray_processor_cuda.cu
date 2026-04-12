@@ -150,7 +150,7 @@ __global__ void rayProcessKernel(
         float sigma_sig = sqrtf(fmaxf(sig, 0.f)) * signal_noise_scale;
         sig = fmaxf(sig + curand_normal(rs) * sigma_sig, 0.f);
     }
-    signal_out[idx] = static_cast<uint16_t>(fminf(sig, 65535.f));
+    signal_out[idx] = static_cast<uint16_t>(fminf(fmaxf(sig, 0.f), 65535.f));
 
     // ── Reflectivity from retro ──────────────────────────────────────────────
     if (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f) {

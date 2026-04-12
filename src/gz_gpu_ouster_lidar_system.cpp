@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -23,6 +24,8 @@
 #include <gz/sim/components/ParentEntity.hh>
 #include <gz/sim/components/Sensor.hh>
 #include <gz/sim/components/World.hh>
+#include <gz/sim/components/AngularVelocity.hh>
+#include <gz/sim/components/LinearAcceleration.hh>
 #include <gz/math/Pose3.hh>
 #include <gz/rendering/GpuRays.hh>
 #include <gz/rendering/RenderEngine.hh>
@@ -80,6 +83,19 @@ void GzGpuOusterLidarSystem::Configure(
     // Read SDF parameters
     if (sdf->HasElement("metadata_path")) {
         metadata_path_ = sdf->Get<std::string>("metadata_path");
+        // Resolve relative filesystem paths against the SDF file's directory.
+        // Skip resolution for absolute paths and URI schemes (model://, package://, etc.).
+        if (!metadata_path_.empty() &&
+            metadata_path_.find("://") == std::string::npos &&
+            !std::filesystem::path(metadata_path_).is_absolute()) {
+            std::string sdf_file = sdf->FilePath();
+            if (!sdf_file.empty()) {
+                auto parent = std::filesystem::path(sdf_file).parent_path();
+                if (!parent.empty()) {
+                    metadata_path_ = (parent / metadata_path_).string();
+                }
+            }
+        }
     }
     if (sdf->HasElement("sensor_name")) {
         sensor_name_ = sdf->Get<std::string>("sensor_name");
@@ -116,6 +132,41 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("base_reflectivity")) {
         base_reflectivity_ = sdf->Get<double>("base_reflectivity");
     }
+    if (sdf->HasElement("max_range")) {
+        max_range_ = sdf->Get<double>("max_range");
+    }
+
+    // ── IMU parameters (optional — omit imu_name to disable) ─────────────────
+    if (sdf->HasElement("imu_name")) {
+        imu_name_ = sdf->Get<std::string>("imu_name");
+        imu_enabled_ = !imu_name_.empty();
+    }
+    if (sdf->HasElement("imu_hz")) {
+        imu_hz_ = sdf->Get<double>("imu_hz");
+    }
+    if (sdf->HasElement("publish_imu_msg")) {
+        publish_imu_msg_ = sdf->Get<bool>("publish_imu_msg");
+    }
+
+    // ── Validate parameters ────────────────────────────────────────────────────
+    range_noise_min_std_   = std::max(0.0, range_noise_min_std_);
+    range_noise_max_std_   = std::max(0.0, range_noise_max_std_);
+    signal_noise_scale_    = std::max(0.0, signal_noise_scale_);
+    nearir_noise_scale_    = std::max(0.0, nearir_noise_scale_);
+    dropout_rate_close_    = std::clamp(dropout_rate_close_, 0.0, 1.0);
+    dropout_rate_far_      = std::clamp(dropout_rate_far_,   0.0, 1.0);
+    edge_discon_threshold_ = std::max(0.0, edge_discon_threshold_);
+    base_signal_           = std::max(0.0, base_signal_);
+    base_reflectivity_     = std::clamp(base_reflectivity_, 0.0, 255.0);
+    max_range_             = std::max(1.0, max_range_);
+    if (lidar_hz_ <= 0.0) {
+        std::cerr << "[GzGpuOusterLidar] lidar_hz must be > 0, got " << lidar_hz_ << "; defaulting to 10\n";
+        lidar_hz_ = 10.0;
+    }
+    if (imu_enabled_ && imu_hz_ <= 0.0) {
+        std::cerr << "[GzGpuOusterLidar] imu_hz must be > 0, got " << imu_hz_ << "; defaulting to 100\n";
+        imu_hz_ = 100.0;
+    }
 
     if (metadata_path_.empty()) {
         std::cerr << "[GzGpuOusterLidar] 'metadata_path' SDF parameter is required\n";
@@ -134,7 +185,10 @@ void GzGpuOusterLidarSystem::Configure(
     sensor_entity_ = entity;
 
     // Load Ouster metadata and beam angles
-    loadMetadata();
+    if (!loadMetadata()) {
+        std::cerr << "[GzGpuOusterLidar] Metadata loading failed; plugin disabled\n";
+        return;
+    }
 
     // Initialise CUDA processor
     cuda_processor_ = std::make_unique<CudaRayProcessor>();
@@ -144,6 +198,7 @@ void GzGpuOusterLidarSystem::Configure(
     range_buf_.resize(static_cast<size_t>(n), 0);
     signal_buf_.resize(static_cast<size_t>(n), 0);
     reflectivity_buf_.resize(static_cast<size_t>(n), 50);
+    nearir_buf_.resize(static_cast<size_t>(n), 0);
     depth_buf_.resize(static_cast<size_t>(n), 0.0f);
     retro_buf_.resize(static_cast<size_t>(n), 0.0f);
 
@@ -175,6 +230,7 @@ void GzGpuOusterLidarSystem::Configure(
 
     // Image frame_id: match the URDF lidar frame (e.g. "lidar0/lidar_frame")
     image_frame_id_ = lidar_id + "/lidar_frame";
+    imu_frame_id_ = lidar_id + "/imu_frame";
 
     std::cout << "[GzGpuOusterLidar] Configured: H=" << H_ << " W=" << W_
           << " cpp=" << cpp_ << " sensor_name=" << sensor_name_
@@ -184,49 +240,73 @@ void GzGpuOusterLidarSystem::Configure(
           << " signal_noise=" << signal_noise_scale_
           << " dropout=[" << dropout_rate_close_ << "," << dropout_rate_far_ << "]"
           << " edge_discon=" << edge_discon_threshold_ << "m"
+          << " max_range=" << max_range_ << "m"
           << "\n";
+    if (imu_enabled_) {
+        std::cout << "  IMU: sensor=" << imu_name_
+                  << " hz=" << imu_hz_
+                  << " publish_imu_msg=" << (publish_imu_msg_ ? "true" : "false")
+                  << "\n";
+    }
 }
 
 // ── Metadata loading ─────────────────────────────────────────────────────────
 
-void GzGpuOusterLidarSystem::loadMetadata()
+bool GzGpuOusterLidarSystem::loadMetadata()
 {
     // Read raw JSON
     std::ifstream fs(metadata_path_);
     if (!fs.is_open()) {
         std::cerr << "[GzGpuOusterLidar] Cannot open metadata: " << metadata_path_ << "\n";
-        return;
+        return false;
     }
     std::ostringstream ss;
     ss << fs.rdbuf();
     metadata_str_ = ss.str();
 
-    // Parse via Ouster SDK for PacketWriter
-    ouster::sdk::core::SensorInfo info(metadata_str_);
-    ouster::sdk::core::PacketFormat pf(info);
-    pw_ = std::make_unique<ouster::sdk::core::impl::PacketWriter>(pf);
+    // Parse via Ouster SDK for PacketWriter.
+    // SensorInfo / PacketFormat / PacketWriter can throw on malformed or
+    // incompatible metadata; catch here to avoid unwinding into Gazebo.
+    try {
+        ouster::sdk::core::SensorInfo info(metadata_str_);
+        ouster::sdk::core::PacketFormat pf(info);
+        pw_ = std::make_unique<ouster::sdk::core::impl::PacketWriter>(pf);
 
-    H_   = pw_->pixels_per_column;
-    W_   = static_cast<int>(info.format.columns_per_frame);
-    cpp_ = pw_->columns_per_packet;
+        H_   = pw_->pixels_per_column;
+        W_   = static_cast<int>(info.format.columns_per_frame);
+        cpp_ = pw_->columns_per_packet;
 
-    if (cpp_ <= 0 || W_ % cpp_ != 0) {
-        std::cerr << "[GzGpuOusterLidar] columns_per_frame (" << W_
-              << ") not divisible by columns_per_packet (" << cpp_ << ")\n";
-        return;
+        if (cpp_ <= 0 || W_ % cpp_ != 0) {
+            std::cerr << "[GzGpuOusterLidar] columns_per_frame (" << W_
+                  << ") not divisible by columns_per_packet (" << cpp_ << ")\n";
+            return false;
+        }
+
+        pkt_buf_.resize(pw_->lidar_packet_size, 0);
+
+        // IMU packet buffer (used only when imu_enabled_)
+        imu_packet_size_ = pf.imu_packet_size;
+        if (imu_enabled_ && imu_packet_size_ > 0) {
+            imu_pkt_buf_.resize(imu_packet_size_, 0);
+        }
+
+        // Beam intrinsics are available directly on SensorInfo.
+        beam_alt_angles_ = info.beam_altitude_angles;
+        beam_az_offsets_ = info.beam_azimuth_angles;
+        beam_origin_mm_  = info.lidar_origin_to_beam_origin_mm;
+    } catch (const std::exception & e) {
+        std::cerr << "[GzGpuOusterLidar] Failed to parse metadata: "
+                  << e.what() << "\n";
+        return false;
     }
 
-    pkt_buf_.resize(pw_->lidar_packet_size, 0);
-
-    // Beam intrinsics are available directly on SensorInfo.
-    beam_alt_angles_ = info.beam_altitude_angles;
-    beam_az_offsets_ = info.beam_azimuth_angles;
-    beam_origin_mm_  = info.lidar_origin_to_beam_origin_mm;
-
-    if (static_cast<int>(beam_alt_angles_.size()) != H_) {
+    if (beam_alt_angles_.empty() || static_cast<int>(beam_alt_angles_.size()) != H_) {
         std::cerr << "[GzGpuOusterLidar] beam_altitude_angles size ("
               << beam_alt_angles_.size() << ") != H (" << H_ << ")\n";
+        return false;
     }
+
+    return true;
 }
 
 // ── ROS 2 interface init ─────────────────────────────────────────────────────
@@ -248,7 +328,7 @@ void GzGpuOusterLidarSystem::initRosInterface()
 
     // Latched metadata publisher
     rclcpp::QoS meta_qos{1};
-    meta_qos.transient_local();
+    meta_qos.reliable().transient_local();
     meta_pub_ = ros_node_->create_publisher<std_msgs::msg::String>(
         abs_prefix + "/metadata", meta_qos);
 
@@ -266,6 +346,16 @@ void GzGpuOusterLidarSystem::initRosInterface()
         abs_prefix + "/reflec_image", qos);
     nearir_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
         abs_prefix + "/nearir_image", qos);
+
+    // IMU publishers (only if imu_name was provided in SDF)
+    if (imu_enabled_) {
+        imu_pkt_pub_ = ros_node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
+            abs_prefix + "/imu_packets", qos);
+        if (publish_imu_msg_) {
+            imu_msg_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Imu>(
+                abs_prefix + "/imu", qos);
+        }
+    }
 
     // Spin the node on a background thread so Zenoh completes peer discovery.
     // Without this, rmw_zenoh_cpp never processes incoming control messages
@@ -338,6 +428,9 @@ void GzGpuOusterLidarSystem::OnRender()
     }
 
     // ── Lazy GpuRays sensor initialisation ───────────────────────────────────
+    // Guard: metadata must have loaded successfully (beam angles populated).
+    if (beam_alt_angles_.empty()) return;
+
     // Wait until the Sensors system has created the OGRE2 scene.
     auto * engine = ::gz::rendering::engine("ogre2");
     if (!engine) return;
@@ -381,7 +474,7 @@ void GzGpuOusterLidarSystem::OnRender()
     gpuRays->SetVerticalRayCount(v_samples);
 
     gpuRays->SetNearClipPlane(0.3);
-    gpuRays->SetFarClipPlane(50.0);
+    gpuRays->SetFarClipPlane(max_range_);
 
     // Attach to scene root; world pose is set from ECM each frame in OnRender().
     auto root = scene->RootVisual();
@@ -435,6 +528,23 @@ void GzGpuOusterLidarSystem::PostUpdate(
             });
     }
 
+    // ── Locate the IMU sensor entity (once) ────────────────────────────────
+    if (imu_enabled_ && !imu_entity_found_) {
+        ecm.Each<::gz::sim::components::Name, ::gz::sim::components::Sensor>(
+            [this](const ::gz::sim::Entity & ent,
+                   const ::gz::sim::components::Name * name,
+                   const ::gz::sim::components::Sensor *) -> bool {
+                if (name->Data() == imu_name_) {
+                    imu_entity_ = ent;
+                    imu_entity_found_ = true;
+                    std::cout << "[GzGpuOusterLidar] Found IMU entity: "
+                              << imu_name_ << " (id=" << ent << ")\n";
+                    return false;  // stop iteration
+                }
+                return true;  // continue
+            });
+    }
+
     // ── Cache world pose for the rendering thread ────────────────────────────
     if (lidar_frame_found_) {
         auto worldPose = ::gz::sim::worldPose(lidar_frame_entity_, ecm);
@@ -456,6 +566,11 @@ void GzGpuOusterLidarSystem::PostUpdate(
                 info.simTime).count();
         encodeAndPublish(stamp_ns);
     }
+
+    // ── Publish IMU at configured rate ──────────────────────────────────────
+    if (imu_enabled_ && imu_entity_found_) {
+        publishImu(info, ecm);
+    }
 }
 
 // ── GpuRays frame callback ──────────────────────────────────────────────────
@@ -468,6 +583,8 @@ void GzGpuOusterLidarSystem::onNewFrame(
     // GpuRays returns width × height × channels floats.
     // Channels: [0]=depth, [1]=retro, [2]=unused
     // We need to resample vertical from the uniform grid to exact beam angles.
+
+    if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0) return;
 
     const int gpu_H      = static_cast<int>(height);
     const int gpu_W      = static_cast<int>(width);
@@ -620,14 +737,11 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     params.base_reflectivity = static_cast<float>(base_reflectivity_);
     params.range_noise_min_std = static_cast<float>(range_noise_min_std_);
     params.range_noise_max_std = static_cast<float>(range_noise_max_std_);
-    params.max_range = gpu_rays_ ? static_cast<float>(gpu_rays_->FarClipPlane()) : 50.0f;
+    params.max_range = static_cast<float>(max_range_);
     params.signal_noise_scale = static_cast<float>(signal_noise_scale_);
-    params.nearir_noise_scale = static_cast<float>(nearir_noise_scale_);
     params.dropout_rate_close = static_cast<float>(dropout_rate_close_);
     params.dropout_rate_far = static_cast<float>(dropout_rate_far_);
     params.edge_discon_threshold = static_cast<float>(edge_discon_threshold_);
-    params.dt_per_col_ns = static_cast<uint64_t>(
-        static_cast<int64_t>(1e9 / lidar_hz_) / W_);
 
     cuda_processor_->process(
         depth_buf_.data(),
@@ -636,6 +750,15 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
         signal_buf_.data(),
         reflectivity_buf_.data(),
         params);
+
+    // ── Compute NEAR_IR channel from retro ─────────────────────────────────
+    // GpuRays retro channel → uint16 photon-count analogue for the packet.
+    // This matches what publishImages() does for the nearir_image topic.
+    const auto n_px = static_cast<size_t>(H_ * W_);
+    for (size_t i = 0; i < n_px; ++i) {
+        nearir_buf_[i] = static_cast<uint16_t>(
+            std::clamp(retro_buf_[i] * 256.0f, 0.0f, 65535.0f));
+    }
 
     // ── Build packets ────────────────────────────────────────────────────────
     const int n_packets = W_ / cpp_;
@@ -647,12 +770,14 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     using RangeMatrix = Eigen::Map<ouster::sdk::core::img_t<uint32_t>>;
     using SignalMatrix = Eigen::Map<ouster::sdk::core::img_t<uint16_t>>;
     using ReflMatrix = Eigen::Map<ouster::sdk::core::img_t<uint8_t>>;
+    using NirMatrix = Eigen::Map<ouster::sdk::core::img_t<uint16_t>>;
 
     RangeMatrix  range_mat(range_buf_.data(), H_, W_);
     SignalMatrix  signal_mat(signal_buf_.data(), H_, W_);
     ReflMatrix    refl_mat(reflectivity_buf_.data(), H_, W_);
+    NirMatrix     nearir_mat(nearir_buf_.data(), H_, W_);
 
-    drain_pkts_.resize(static_cast<size_t>(n_packets));
+    std::vector<ouster_sensor_msgs::msg::PacketMsg> new_pkts(static_cast<size_t>(n_packets));
 
     for (int p = 0; p < n_packets; ++p) {
         std::fill(pkt_buf_.begin(), pkt_buf_.end(), 0);
@@ -672,8 +797,9 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
         pw_->set_block<uint32_t>(range_mat,  ouster::sdk::core::ChanField::RANGE,        pkt_buf_.data());
         pw_->set_block<uint16_t>(signal_mat, ouster::sdk::core::ChanField::SIGNAL,       pkt_buf_.data());
         pw_->set_block<uint8_t> (refl_mat,   ouster::sdk::core::ChanField::REFLECTIVITY, pkt_buf_.data());
+        pw_->set_block<uint16_t>(nearir_mat, ouster::sdk::core::ChanField::NEAR_IR,      pkt_buf_.data());
 
-        drain_pkts_[static_cast<size_t>(p)].buf.assign(pkt_buf_.begin(), pkt_buf_.end());
+        new_pkts[static_cast<size_t>(p)].buf.assign(pkt_buf_.begin(), pkt_buf_.end());
     }
 
     ++frame_id_;
@@ -684,6 +810,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     // ── Wake drain thread ────────────────────────────────────────────────────
     {
         std::lock_guard<std::mutex> lk(drain_mtx_);
+        drain_pkts_.swap(new_pkts);
         drain_ready_.store(true, std::memory_order_release);
     }
     drain_cv_.notify_one();
@@ -757,7 +884,7 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
                 // Approximate Poisson noise: σ = √v * scale
                 // Use a simple hash-based dither since we're on CPU here
                 // (good enough for display-only images)
-                float noise = (static_cast<float>((i * 2654435761u) & 0xFFFFu) / 65535.0f - 0.5f)
+                float noise = (static_cast<float>(((i ^ (static_cast<size_t>(frame_id_) * 2246822519u)) * 2654435761u) & 0xFFFFu) / 65535.0f - 0.5f)
                               * 2.0f * std::sqrt(v) * nir_scale;
                 v = v + noise;
             }
@@ -767,10 +894,102 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
     }
 }
 
+// ── IMU publishing ──────────────────────────────────────────────────────────
+
+void GzGpuOusterLidarSystem::publishImu(
+    const ::gz::sim::UpdateInfo & info,
+    const ::gz::sim::EntityComponentManager & ecm)
+{
+    // ── Rate limiting (sim time) ─────────────────────────────────────────
+    const auto sim_now = std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+    const auto imu_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(1.0 / imu_hz_));
+
+    if (sim_now - last_imu_sim_time_ < imu_period) return;
+    last_imu_sim_time_ = sim_now;
+
+    // ── Read IMU data from ECM ───────────────────────────────────────────
+    auto * angVelComp = ecm.Component<::gz::sim::components::AngularVelocity>(imu_entity_);
+    auto * linAccComp = ecm.Component<::gz::sim::components::LinearAcceleration>(imu_entity_);
+
+    if (!angVelComp || !linAccComp) return;  // IMU data not yet available
+
+    const auto & av = angVelComp->Data();   // rad/s, body frame
+    const auto & la = linAccComp->Data();   // m/s², body frame, includes gravity
+
+    const int64_t stamp_ns = sim_now.count();
+
+    // ── Encode Ouster IMU PacketMsg ──────────────────────────────────────
+    if (imu_pkt_pub_ && imu_pkt_pub_->get_subscription_count() > 0 &&
+        !imu_pkt_buf_.empty()) {
+        std::fill(imu_pkt_buf_.begin(), imu_pkt_buf_.end(), 0);
+        uint8_t * buf = imu_pkt_buf_.data();
+        const uint64_t ts = static_cast<uint64_t>(stamp_ns);
+
+        // LEGACY IMU profile (48 bytes): timestamps at fixed offsets.
+        // PacketWriter only exposes set_imu_nmea_ts (for ACCEL32_GYRO32_NMEA),
+        // so we write the LEGACY sys_ts/accel_ts/gyro_ts directly.
+        // os_cloud reads imu_gyro_ts (offset 16) for the ROS message timestamp.
+        if (imu_pkt_buf_.size() >= 48) {
+            std::memcpy(buf + 0,  &ts, sizeof(uint64_t));  // sys_ts
+            std::memcpy(buf + 8,  &ts, sizeof(uint64_t));  // accel_ts
+            std::memcpy(buf + 16, &ts, sizeof(uint64_t));  // gyro_ts
+        }
+
+        // ACCEL32_GYRO32_NMEA profile: use PacketWriter setters.
+        pw_->set_imu_nmea_ts(buf, ts);
+
+        // Accel/gyro values — PacketWriter writes at profile-correct offsets.
+        pw_->set_imu_la_x(buf, static_cast<float>(la.X()));
+        pw_->set_imu_la_y(buf, static_cast<float>(la.Y()));
+        pw_->set_imu_la_z(buf, static_cast<float>(la.Z()));
+        pw_->set_imu_av_x(buf, static_cast<float>(av.X()));
+        pw_->set_imu_av_y(buf, static_cast<float>(av.Y()));
+        pw_->set_imu_av_z(buf, static_cast<float>(av.Z()));
+
+        ouster_sensor_msgs::msg::PacketMsg pkt;
+        pkt.buf.assign(imu_pkt_buf_.begin(), imu_pkt_buf_.end());
+        imu_pkt_pub_->publish(std::move(pkt));
+    }
+
+    // ── Publish sensor_msgs/Imu for convenience ─────────────────────────
+    if (publish_imu_msg_ && imu_msg_pub_ &&
+        imu_msg_pub_->get_subscription_count() > 0) {
+        sensor_msgs::msg::Imu msg;
+        msg.header.stamp.sec  = static_cast<int32_t>(stamp_ns / 1000000000LL);
+        msg.header.stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000LL);
+        msg.header.frame_id = imu_frame_id_;
+
+        msg.angular_velocity.x = av.X();
+        msg.angular_velocity.y = av.Y();
+        msg.angular_velocity.z = av.Z();
+
+        msg.linear_acceleration.x = la.X();
+        msg.linear_acceleration.y = la.Y();
+        msg.linear_acceleration.z = la.Z();
+
+        // Covariance: match ouster_ros os_cloud defaults
+        msg.angular_velocity_covariance[0] = 6e-4;
+        msg.angular_velocity_covariance[4] = 6e-4;
+        msg.angular_velocity_covariance[8] = 6e-4;
+
+        msg.linear_acceleration_covariance[0] = 0.01;
+        msg.linear_acceleration_covariance[4] = 0.01;
+        msg.linear_acceleration_covariance[8] = 0.01;
+
+        // Orientation unknown (per REP-145: first element = -1)
+        msg.orientation_covariance[0] = -1.0;
+
+        imu_msg_pub_->publish(std::move(msg));
+    }
+}
+
 // ── Drain thread ─────────────────────────────────────────────────────────────
 
 void GzGpuOusterLidarSystem::drainThreadFunc()
 {
+    std::vector<ouster_sensor_msgs::msg::PacketMsg> local_pkts;
+
     while (!shutdown_.load(std::memory_order_acquire)) {
         {
             std::unique_lock<std::mutex> lk(drain_mtx_);
@@ -780,18 +999,19 @@ void GzGpuOusterLidarSystem::drainThreadFunc()
             });
             if (shutdown_.load(std::memory_order_acquire)) break;
             drain_ready_.store(false, std::memory_order_release);
+            local_pkts.swap(drain_pkts_);
         }
 
-        if (drain_pkts_.empty()) continue;
+        if (local_pkts.empty()) continue;
 
         const auto spacing = std::chrono::nanoseconds(
             static_cast<int64_t>(1e9 / lidar_hz_) /
-            static_cast<int64_t>(drain_pkts_.size()));
+            static_cast<int64_t>(local_pkts.size()));
 
-        for (size_t i = 0; i < drain_pkts_.size(); ++i) {
+        for (size_t i = 0; i < local_pkts.size(); ++i) {
             if (shutdown_.load(std::memory_order_acquire)) return;
-            pkt_pub_->publish(drain_pkts_[i]);
-            if (i + 1 < drain_pkts_.size()) {
+            pkt_pub_->publish(local_pkts[i]);
+            if (i + 1 < local_pkts.size()) {
                 std::this_thread::sleep_for(spacing);
             }
         }
