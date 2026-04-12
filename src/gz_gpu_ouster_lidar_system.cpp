@@ -205,9 +205,6 @@ void GzGpuOusterLidarSystem::Configure(
     // Initialise ROS 2 node and publishers
     initRosInterface();
 
-    // Start drain thread
-    drain_thread_ = std::thread(&GzGpuOusterLidarSystem::drainThreadFunc, this);
-
     // Connect to the rendering-thread Render event (fires after scene->PreRender()
     // at Sensors.cc:496) so that GpuRays initialisation and Render() happen on
     // the correct (EGL) thread with the scene already set up.
@@ -248,6 +245,9 @@ void GzGpuOusterLidarSystem::Configure(
                   << " publish_imu_msg=" << (publish_imu_msg_ ? "true" : "false")
                   << "\n";
     }
+
+    // Start drain thread last — all state is fully initialised above.
+    drain_thread_ = std::thread(&GzGpuOusterLidarSystem::drainThreadFunc, this);
 }
 
 // ── Metadata loading ─────────────────────────────────────────────────────────
@@ -728,6 +728,7 @@ void GzGpuOusterLidarSystem::onNewFrame(
 void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
 {
     if (stamp_ns <= 0) return;
+    if (!pw_ || pkt_buf_.empty()) return;
 
     // ── CUDA post-processing ─────────────────────────────────────────────────
     RayProcessParams params;
@@ -900,6 +901,8 @@ void GzGpuOusterLidarSystem::publishImu(
     const ::gz::sim::UpdateInfo & info,
     const ::gz::sim::EntityComponentManager & ecm)
 {
+    if (!pw_) return;
+
     // ── Rate limiting (sim time) ─────────────────────────────────────────
     const auto sim_now = std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
     const auto imu_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
