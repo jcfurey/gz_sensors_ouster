@@ -56,6 +56,7 @@ __global__ void rayProcessKernel(
     uint32_t * __restrict__      range_out,
     uint16_t * __restrict__      signal_out,
     uint8_t *  __restrict__      refl_out,
+    uint16_t * __restrict__      nearir_out,
     int H, int W,
     float base_signal,
     float base_reflectivity,
@@ -63,6 +64,7 @@ __global__ void rayProcessKernel(
     float range_noise_max_std,
     float max_range,
     float signal_noise_scale,
+    float nearir_noise_scale,
     float dropout_rate_close,
     float dropout_rate_far,
     float edge_discon_threshold,
@@ -79,6 +81,7 @@ __global__ void rayProcessKernel(
         range_out[idx]  = 0u;
         signal_out[idx] = 0u;
         refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+        nearir_out[idx] = 0u;
         return;
     }
 
@@ -109,6 +112,7 @@ __global__ void rayProcessKernel(
                 range_out[idx]  = 0u;
                 signal_out[idx] = 0u;
                 refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+                nearir_out[idx] = 0u;
                 return;
             }
         }
@@ -123,6 +127,7 @@ __global__ void rayProcessKernel(
             range_out[idx]  = 0u;
             signal_out[idx] = 0u;
             refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+            nearir_out[idx] = 0u;
             return;
         }
     }
@@ -161,6 +166,15 @@ __global__ void rayProcessKernel(
     } else {
         refl_out[idx] = static_cast<uint8_t>(base_reflectivity);
     }
+
+    // ── Near-IR: retro → uint16 photon-count analogue with Poisson noise ────
+    float nir = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
+        ? retro[idx] * 256.f : 0.f;
+    if (rs != nullptr && nearir_noise_scale > 0.f && nir > 0.f) {
+        float sigma_nir = sqrtf(fmaxf(nir, 0.f)) * nearir_noise_scale;
+        nir = fmaxf(nir + curand_normal(rs) * sigma_nir, 0.f);
+    }
+    nearir_out[idx] = static_cast<uint16_t>(fminf(fmaxf(nir, 0.f), 65535.f));
 }
 
 // ── Launcher wrappers (called from .cpp via .cuh) ────────────────────────────
@@ -171,6 +185,7 @@ void launchRayProcessKernel(
     uint32_t *    d_range,
     uint16_t *    d_signal,
     uint8_t *     d_refl,
+    uint16_t *    d_nearir,
     const RayProcessParams & p,
     void *        d_rand_states,
     void *        stream)
@@ -178,11 +193,11 @@ void launchRayProcessKernel(
     const int n = p.H * p.W;
     const int grid = (n + kBlock - 1) / kBlock;
     rayProcessKernel<<<grid, kBlock, 0, static_cast<cudaStream_t>(stream)>>>(
-        d_depth, d_retro, d_range, d_signal, d_refl,
+        d_depth, d_retro, d_range, d_signal, d_refl, d_nearir,
         p.H, p.W,
         p.base_signal, p.base_reflectivity,
         p.range_noise_min_std, p.range_noise_max_std, p.max_range,
-        p.signal_noise_scale,
+        p.signal_noise_scale, p.nearir_noise_scale,
         p.dropout_rate_close, p.dropout_rate_far,
         p.edge_discon_threshold,
         static_cast<curandState *>(d_rand_states));
@@ -214,6 +229,7 @@ CudaRayProcessor::~CudaRayProcessor()
     if (d_range_)       cudaFree(d_range_);
     if (d_signal_)      cudaFree(d_signal_);
     if (d_refl_)        cudaFree(d_refl_);
+    if (d_nearir_)      cudaFree(d_nearir_);
     if (d_rand_states_) cudaFree(d_rand_states_);
     if (stream_)        cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
 }
@@ -232,6 +248,7 @@ void CudaRayProcessor::ensureBuffers(int n)
     realloc(d_range_,  static_cast<size_t>(n) * sizeof(uint32_t));
     realloc(d_signal_, static_cast<size_t>(n) * sizeof(uint16_t));
     realloc(d_refl_,   static_cast<size_t>(n) * sizeof(uint8_t));
+    realloc(d_nearir_, static_cast<size_t>(n) * sizeof(uint16_t));
 
     buf_n_ = n;
 }
@@ -257,6 +274,7 @@ void CudaRayProcessor::process(
     uint32_t *    range_out,
     uint16_t *    signal_out,
     uint8_t *     reflectivity_out,
+    uint16_t *    nearir_out,
     const RayProcessParams & p)
 {
     const int n = p.H * p.W;
@@ -264,7 +282,7 @@ void CudaRayProcessor::process(
 
     ensureBuffers(n);
     bool need_rand = p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
-                     p.signal_noise_scale > 0.f ||
+                     p.signal_noise_scale > 0.f || p.nearir_noise_scale > 0.f ||
                      p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
                      p.edge_discon_threshold > 0.f;
     if (need_rand) ensureRandStates(n);
@@ -289,6 +307,7 @@ void CudaRayProcessor::process(
         static_cast<uint32_t *>(d_range_),
         static_cast<uint16_t *>(d_signal_),
         static_cast<uint8_t *>(d_refl_),
+        static_cast<uint16_t *>(d_nearir_),
         p,
         need_rand ? d_rand_states_ : nullptr,
         stream_);
@@ -305,6 +324,10 @@ void CudaRayProcessor::process(
     CUDA_CHECK(cudaMemcpyAsync(
         reflectivity_out, d_refl_,
         static_cast<size_t>(n) * sizeof(uint8_t),
+        cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        nearir_out, d_nearir_,
+        static_cast<size_t>(n) * sizeof(uint16_t),
         cudaMemcpyDeviceToHost, stream));
 
     CUDA_CHECK(cudaStreamSynchronize(stream));

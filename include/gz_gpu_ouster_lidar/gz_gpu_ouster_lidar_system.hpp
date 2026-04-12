@@ -80,6 +80,7 @@ private:
     double base_signal_ = 800.0;           // OS1 higher photon budget than OS0
     double base_reflectivity_ = 50.0;      // Default reflectivity [0–255]
     double max_range_ = 120.0;             // Sensor max range (metres), default OS1
+    bool max_range_explicit_ = false;      // true if set via SDF (don't auto-derive)
 
     // ── IMU configuration (SDF-optional) ─────────────────────────────────────
     std::string imu_name_;                  // Gazebo IMU sensor entity name
@@ -175,6 +176,9 @@ private:
 
     // ── IMU timing ───────────────────────────────────────────────────────────
     std::chrono::nanoseconds last_imu_sim_time_{0};
+
+    // ── Pause/resume detection ───────────────────────────────────────────────
+    bool was_paused_ = false;
 
     // ── Private methods ──────────────────────────────────────────────────────
     bool loadMetadata();

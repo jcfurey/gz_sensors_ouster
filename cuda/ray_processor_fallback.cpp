@@ -24,6 +24,7 @@ void CudaRayProcessor::process(
     uint32_t *    range_out,
     uint16_t *    signal_out,
     uint8_t *     reflectivity_out,
+    uint16_t *    nearir_out,
     const RayProcessParams & p)
 {
     const int H = p.H;
@@ -36,7 +37,7 @@ void CudaRayProcessor::process(
     std::uniform_real_distribution<float> uni(0.0f, 1.0f);
 
     const bool has_noise = p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
-                           p.signal_noise_scale > 0.f ||
+                           p.signal_noise_scale > 0.f || p.nearir_noise_scale > 0.f ||
                            p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
                            p.edge_discon_threshold > 0.f;
 
@@ -48,6 +49,7 @@ void CudaRayProcessor::process(
             range_out[idx] = 0u;
             signal_out[idx] = 0u;
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+            nearir_out[idx] = 0u;
             continue;
         }
 
@@ -73,6 +75,7 @@ void CudaRayProcessor::process(
                 range_out[idx] = 0u;
                 signal_out[idx] = 0u;
                 reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+                nearir_out[idx] = 0u;
                 continue;
             }
         }
@@ -85,6 +88,7 @@ void CudaRayProcessor::process(
                 range_out[idx] = 0u;
                 signal_out[idx] = 0u;
                 reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+                nearir_out[idx] = 0u;
                 continue;
             }
         }
@@ -120,6 +124,15 @@ void CudaRayProcessor::process(
         } else {
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
         }
+
+        // ── Near-IR with Poisson shot noise ──────────────────────────────────
+        float nir = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f)
+            ? retro_host[idx] * 256.0f : 0.0f;
+        if (has_noise && p.nearir_noise_scale > 0.f && nir > 0.f) {
+            float sigma_nir = std::sqrt(std::max(nir, 0.0f)) * p.nearir_noise_scale;
+            nir = std::max(nir + norm(rng) * sigma_nir, 0.0f);
+        }
+        nearir_out[idx] = static_cast<uint16_t>(std::clamp(nir, 0.0f, 65535.0f));
     }
 }
 

@@ -23,6 +23,7 @@ struct RayProcessParams {
 
     // ── Photon / signal noise ────────────────────────────────────────────────
     float signal_noise_scale;  ///< Signal Poisson noise scale (0 = off, 1 = physical)
+    float nearir_noise_scale;  ///< Near-IR Poisson noise scale (0 = off, 1 = physical)
 
     // ── Random dropouts ──────────────────────────────────────────────────────
     float dropout_rate_close;  ///< Dropout probability at 0 m (e.g. 0.001)
@@ -33,7 +34,7 @@ struct RayProcessParams {
 };
 
 /// CUDA ray post-processor: converts GpuRays float buffer → Ouster-compatible
-/// channel arrays (range_mm, signal, reflectivity).
+/// channel arrays (range_mm, signal, reflectivity, near_ir).
 class CudaRayProcessor {
 public:
     CudaRayProcessor();
@@ -43,18 +44,20 @@ public:
     CudaRayProcessor & operator=(const CudaRayProcessor &) = delete;
 
     /// Process raw GpuRays depth buffer.
-    /// @param depth_host     H×W float array (depth in metres, row-major)
-    /// @param retro_host     H×W float array (retro intensity, row-major), may be nullptr
-    /// @param range_out      H×W uint32 output (range in mm, Ouster row/col order)
-    /// @param signal_out     H×W uint16 output
+    /// @param depth_host       H×W float array (depth in metres, row-major)
+    /// @param retro_host       H×W float array (retro intensity, row-major), may be nullptr
+    /// @param range_out        H×W uint32 output (range in mm, Ouster row/col order)
+    /// @param signal_out       H×W uint16 output
     /// @param reflectivity_out H×W uint8 output
-    /// @param p              Processing parameters
+    /// @param nearir_out       H×W uint16 output (near-IR photon count)
+    /// @param p                Processing parameters
     void process(
         const float * depth_host,
         const float * retro_host,
         uint32_t *    range_out,
         uint16_t *    signal_out,
         uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
         const RayProcessParams & p);
 
 private:
@@ -69,6 +72,7 @@ private:
     void * d_range_   = nullptr;
     void * d_signal_  = nullptr;
     void * d_refl_    = nullptr;
+    void * d_nearir_  = nullptr;
     void * d_rand_states_ = nullptr;
 
     int buf_n_  = 0;

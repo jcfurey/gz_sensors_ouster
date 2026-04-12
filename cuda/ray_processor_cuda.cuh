@@ -14,6 +14,7 @@ void launchRayProcessKernel(
     uint32_t *    d_range,
     uint16_t *    d_signal,
     uint8_t *     d_refl,
+    uint16_t *    d_nearir,
     const RayProcessParams & p,
     void *        d_rand_states,
     void *        stream);

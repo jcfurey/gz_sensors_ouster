@@ -140,6 +140,7 @@ void GzGpuOusterLidarSystem::Configure(
     }
     if (sdf->HasElement("max_range")) {
         max_range_ = sdf->Get<double>("max_range");
+        max_range_explicit_ = true;
     }
 
     // ── IMU parameters (optional — omit imu_name to disable) ─────────────────
@@ -289,6 +290,17 @@ bool GzGpuOusterLidarSystem::loadMetadata()
         imu_packet_size_ = pf.imu_packet_size;
         if (imu_enabled_ && imu_packet_size_ > 0) {
             imu_pkt_buf_.resize(imu_packet_size_, 0);
+        }
+
+        // Derive max_range from product line if not explicitly set via SDF.
+        if (!max_range_explicit_ && !info.prod_line.empty()) {
+            const auto & pl = info.prod_line;
+            if (pl.find("OS0") != std::string::npos)      max_range_ = 50.0;
+            else if (pl.find("OS1") != std::string::npos)  max_range_ = 120.0;
+            else if (pl.find("OS2") != std::string::npos)  max_range_ = 240.0;
+            // OSDome and others keep the default 120m
+            RCLCPP_INFO(kLogger, "Derived max_range=%.0fm from prod_line=%s",
+                max_range_, pl.c_str());
         }
 
         // Beam intrinsics are available directly on SensorInfo.
@@ -557,7 +569,18 @@ void GzGpuOusterLidarSystem::PostUpdate(
     const ::gz::sim::UpdateInfo & info,
     const ::gz::sim::EntityComponentManager & ecm)
 {
-    if (info.paused) return;
+    if (info.paused) {
+        was_paused_ = true;
+        return;
+    }
+
+    // Reset timing state after sim resumes to prevent stale data burst.
+    if (was_paused_) {
+        was_paused_ = false;
+        last_imu_sim_time_ = std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+        last_render_time_ = std::chrono::steady_clock::now();
+    }
+
     if (!sensor_initialized_.load(std::memory_order_acquire)) return;
 
     // ── Locate the gpu_lidar sensor entity (once) ────────────────────────────
@@ -583,13 +606,22 @@ void GzGpuOusterLidarSystem::PostUpdate(
 
     // ── Locate the IMU sensor entity (once) ────────────────────────────────
     if (imu_enabled_ && !imu_entity_found_) {
+        const bool auto_detect = (imu_name_ == "auto");
         ecm.Each<::gz::sim::components::Name, ::gz::sim::components::Sensor>(
-            [this](const ::gz::sim::Entity & ent,
+            [this, auto_detect](const ::gz::sim::Entity & ent,
                    const ::gz::sim::components::Name * name,
-                   const ::gz::sim::components::Sensor *) -> bool {
-                if (name->Data() == imu_name_) {
+                   const ::gz::sim::components::Sensor * sensor) -> bool {
+                bool match = false;
+                if (auto_detect) {
+                    // Accept the first IMU-type sensor found.
+                    match = (sensor->Data().Type() == sdf::SensorType::IMU);
+                } else {
+                    match = (name->Data() == imu_name_);
+                }
+                if (match) {
                     imu_entity_ = ent;
                     imu_entity_found_ = true;
+                    imu_name_ = name->Data();  // resolve "auto" to actual name
                     RCLCPP_INFO(kLogger, "Found IMU entity: %s (id=%lu)",
                         imu_name_.c_str(), static_cast<unsigned long>(ent));
                     return false;  // stop iteration
@@ -814,6 +846,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     params.range_noise_max_std = static_cast<float>(snap_range_noise_max_std);
     params.max_range = static_cast<float>(snap_max_range);
     params.signal_noise_scale = static_cast<float>(snap_signal_noise_scale);
+    params.nearir_noise_scale = static_cast<float>(snap_nearir_noise_scale);
     params.dropout_rate_close = static_cast<float>(snap_dropout_rate_close);
     params.dropout_rate_far = static_cast<float>(snap_dropout_rate_far);
     params.edge_discon_threshold = static_cast<float>(snap_edge_discon_threshold);
@@ -824,16 +857,8 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
         range_buf_.data(),
         signal_buf_.data(),
         reflectivity_buf_.data(),
+        nearir_buf_.data(),
         params);
-
-    // ── Compute NEAR_IR channel from retro ─────────────────────────────────
-    // GpuRays retro channel → uint16 photon-count analogue for the packet.
-    // This matches what publishImages() does for the nearir_image topic.
-    const auto n_px = static_cast<size_t>(H_ * W_);
-    for (size_t i = 0; i < n_px; ++i) {
-        nearir_buf_[i] = static_cast<uint16_t>(
-            std::clamp(retro_buf_[i] * 256.0f, 0.0f, 65535.0f));
-    }
 
     // ── Build packets ────────────────────────────────────────────────────────
     const int n_packets = W_ / cpp_;
@@ -946,25 +971,10 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
         reflec_image_pub_->publish(std::move(msg));
     }
 
-    // Near-IR image: GpuRays retro channel → uint16
-    // Retro represents surface reflectance; closest sim analogue to ambient IR.
-    // Apply Poisson-approximated shot noise if nearir_noise_scale > 0.
+    // Near-IR image: produced by CUDA kernel with Poisson noise via nearir_noise_scale.
     if (nearir_image_pub_->get_subscription_count() > 0) {
         auto msg = make_image();
-        auto * pixels = reinterpret_cast<uint16_t *>(msg.data.data());
-        float nir_scale;
-        { std::lock_guard<std::mutex> lk(noise_mtx_); nir_scale = static_cast<float>(nearir_noise_scale_); }
-        for (size_t i = 0; i < n; ++i) {
-            float v = retro_buf_[i] * 256.0f;
-            if (nir_scale > 0.f && v > 0.f) {
-                // Approximate Poisson noise: σ = √v * scale
-                // Use a simple hash-based dither since we're on CPU here
-                // (good enough for display-only images)
-                float noise = (static_cast<float>(((i ^ (static_cast<size_t>(frame_id_) * 2246822519u)) * 2654435761u) & 0xFFFFu) / 65535.0f - 0.5f)
-                              * 2.0f * std::sqrt(v) * nir_scale;
-                v = v + noise;
-            }
-            pixels[i] = static_cast<uint16_t>(std::clamp(v, 0.0f, 65535.0f));
+        std::memcpy(msg.data.data(), nearir_buf_.data(), n * sizeof(uint16_t));
         }
         nearir_image_pub_->publish(std::move(msg));
     }

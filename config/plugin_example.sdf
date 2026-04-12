@@ -51,8 +51,9 @@
 
   <!-- ─── IMU (optional) ──────────────────────────────────────────── -->
   <!-- Requires gz-sim-imu-system plugin and a matching IMU sensor in
-       your SDF/URDF. Omit imu_name to disable. -->
-  <!-- <imu_name>imu0</imu_name> -->
+       your SDF/URDF. Omit imu_name to disable.
+       Set to "auto" to use the first IMU sensor found on the model. -->
+  <!-- <imu_name>auto</imu_name> -->
   <!-- <imu_hz>100.0</imu_hz> -->
   <!-- <publish_imu_msg>true</publish_imu_msg> -->
 
