@@ -376,7 +376,7 @@ void GzGpuOusterLidarSystem::initRosInterface()
     ros_node_->declare_parameter("base_signal", base_signal_);
     ros_node_->declare_parameter("base_reflectivity", base_reflectivity_);
 
-    ros_node_->add_on_set_parameters_callback(
+    param_cb_handle_ = ros_node_->add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> & params)
             -> rcl_interfaces::msg::SetParametersResult {
             for (const auto & p : params) {
@@ -388,16 +388,22 @@ void GzGpuOusterLidarSystem::initRosInterface()
                     r.reason = name + " cannot be changed at runtime";
                     return r;
                 }
-                // Apply noise model updates.
-                if (name == "range_noise_min_std")   range_noise_min_std_   = std::max(0.0, p.as_double());
-                else if (name == "range_noise_max_std") range_noise_max_std_ = std::max(0.0, p.as_double());
-                else if (name == "signal_noise_scale")  signal_noise_scale_  = std::max(0.0, p.as_double());
-                else if (name == "nearir_noise_scale")  nearir_noise_scale_  = std::max(0.0, p.as_double());
-                else if (name == "dropout_rate_close")  dropout_rate_close_  = std::clamp(p.as_double(), 0.0, 1.0);
-                else if (name == "dropout_rate_far")    dropout_rate_far_    = std::clamp(p.as_double(), 0.0, 1.0);
-                else if (name == "edge_discon_threshold") edge_discon_threshold_ = std::max(0.0, p.as_double());
-                else if (name == "base_signal")         base_signal_         = std::max(0.0, p.as_double());
-                else if (name == "base_reflectivity")   base_reflectivity_   = std::clamp(p.as_double(), 0.0, 255.0);
+            }
+            // Apply noise model updates under lock (sim thread reads these).
+            {
+                std::lock_guard<std::mutex> lk(noise_mtx_);
+                for (const auto & p : params) {
+                    const auto & name = p.get_name();
+                    if (name == "range_noise_min_std")       range_noise_min_std_     = std::max(0.0, p.as_double());
+                    else if (name == "range_noise_max_std")  range_noise_max_std_     = std::max(0.0, p.as_double());
+                    else if (name == "signal_noise_scale")   signal_noise_scale_      = std::max(0.0, p.as_double());
+                    else if (name == "nearir_noise_scale")   nearir_noise_scale_      = std::max(0.0, p.as_double());
+                    else if (name == "dropout_rate_close")   dropout_rate_close_      = std::clamp(p.as_double(), 0.0, 1.0);
+                    else if (name == "dropout_rate_far")     dropout_rate_far_        = std::clamp(p.as_double(), 0.0, 1.0);
+                    else if (name == "edge_discon_threshold") edge_discon_threshold_   = std::max(0.0, p.as_double());
+                    else if (name == "base_signal")          base_signal_             = std::max(0.0, p.as_double());
+                    else if (name == "base_reflectivity")    base_reflectivity_       = std::clamp(p.as_double(), 0.0, 255.0);
+                }
             }
             rcl_interfaces::msg::SetParametersResult r;
             r.successful = true;
@@ -436,14 +442,16 @@ void GzGpuOusterLidarSystem::OnRender()
         // see a subscriber AND have published at least a few times.
         if (!metadata_published_) {
             ++metadata_pub_count_;
-            // Throttle: republish roughly every 1 second worth of render ticks
-            if (metadata_pub_count_ <= 5 || metadata_pub_count_ % static_cast<int>(lidar_hz_) == 0) {
+            // Throttle: republish roughly every 1 second worth of render ticks.
+            // Clamp ticks-per-second to >= 1 to avoid division by zero when lidar_hz < 1.
+            const int ticks_per_sec = std::max(1, static_cast<int>(lidar_hz_));
+            if (metadata_pub_count_ <= 5 || metadata_pub_count_ % ticks_per_sec == 0) {
                 std_msgs::msg::String meta_msg;
                 meta_msg.data = metadata_str_;
                 meta_pub_->publish(meta_msg);
             }
             // Only stop after subscriber detected AND we've sent enough for Zenoh to settle
-            if (meta_pub_->get_subscription_count() > 0 && metadata_pub_count_ > static_cast<int>(lidar_hz_) * 2) {
+            if (meta_pub_->get_subscription_count() > 0 && metadata_pub_count_ > ticks_per_sec * 2) {
                 metadata_published_ = true;
                 RCLCPP_INFO(kLogger, "metadata delivered to os_cloud (after %d publishes)",
                     metadata_pub_count_);
@@ -776,19 +784,39 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     if (stamp_ns <= 0) return;
     if (!pw_ || pkt_buf_.empty()) return;
 
+    // ── Snapshot noise parameters (may be updated by ROS param callback) ───
+    double snap_range_noise_min_std, snap_range_noise_max_std;
+    double snap_signal_noise_scale, snap_nearir_noise_scale;
+    double snap_dropout_rate_close, snap_dropout_rate_far;
+    double snap_edge_discon_threshold, snap_base_signal, snap_base_reflectivity;
+    double snap_max_range;
+    {
+        std::lock_guard<std::mutex> lk(noise_mtx_);
+        snap_range_noise_min_std  = range_noise_min_std_;
+        snap_range_noise_max_std  = range_noise_max_std_;
+        snap_signal_noise_scale   = signal_noise_scale_;
+        snap_nearir_noise_scale   = nearir_noise_scale_;
+        snap_dropout_rate_close   = dropout_rate_close_;
+        snap_dropout_rate_far     = dropout_rate_far_;
+        snap_edge_discon_threshold = edge_discon_threshold_;
+        snap_base_signal          = base_signal_;
+        snap_base_reflectivity    = base_reflectivity_;
+        snap_max_range            = max_range_;
+    }
+
     // ── CUDA post-processing ─────────────────────────────────────────────────
     RayProcessParams params;
     params.H = H_;
     params.W = W_;
-    params.base_signal = static_cast<float>(base_signal_);
-    params.base_reflectivity = static_cast<float>(base_reflectivity_);
-    params.range_noise_min_std = static_cast<float>(range_noise_min_std_);
-    params.range_noise_max_std = static_cast<float>(range_noise_max_std_);
-    params.max_range = static_cast<float>(max_range_);
-    params.signal_noise_scale = static_cast<float>(signal_noise_scale_);
-    params.dropout_rate_close = static_cast<float>(dropout_rate_close_);
-    params.dropout_rate_far = static_cast<float>(dropout_rate_far_);
-    params.edge_discon_threshold = static_cast<float>(edge_discon_threshold_);
+    params.base_signal = static_cast<float>(snap_base_signal);
+    params.base_reflectivity = static_cast<float>(snap_base_reflectivity);
+    params.range_noise_min_std = static_cast<float>(snap_range_noise_min_std);
+    params.range_noise_max_std = static_cast<float>(snap_range_noise_max_std);
+    params.max_range = static_cast<float>(snap_max_range);
+    params.signal_noise_scale = static_cast<float>(snap_signal_noise_scale);
+    params.dropout_rate_close = static_cast<float>(snap_dropout_rate_close);
+    params.dropout_rate_far = static_cast<float>(snap_dropout_rate_far);
+    params.edge_discon_threshold = static_cast<float>(snap_edge_discon_threshold);
 
     cuda_processor_->process(
         depth_buf_.data(),
@@ -924,7 +952,8 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
     if (nearir_image_pub_->get_subscription_count() > 0) {
         auto msg = make_image();
         auto * pixels = reinterpret_cast<uint16_t *>(msg.data.data());
-        const float nir_scale = static_cast<float>(nearir_noise_scale_);
+        float nir_scale;
+        { std::lock_guard<std::mutex> lk(noise_mtx_); nir_scale = static_cast<float>(nearir_noise_scale_); }
         for (size_t i = 0; i < n; ++i) {
             float v = retro_buf_[i] * 256.0f;
             if (nir_scale > 0.f && v > 0.f) {

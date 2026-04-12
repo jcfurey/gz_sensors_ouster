@@ -68,6 +68,8 @@ private:
     // OS1 has tighter beams and longer range than OS0, yielding better
     // range precision and less mixed-pixel noise.  Override via SDF for
     // OS0 (wider beams, shorter range) or OS2 (narrower beams, longer range).
+    // Guarded by noise_mtx_ (written by ROS param callback, read by sim thread).
+    mutable std::mutex noise_mtx_;
     double range_noise_min_std_ = 0.002;   // 2 mm σ — OS1 repeatability ≤10 m
     double range_noise_max_std_ = 0.008;   // 8 mm σ — OS1 at ~120 m max range
     double signal_noise_scale_  = 1.0;     // Poisson shot noise (physically correct)
@@ -159,6 +161,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_msg_pub_;
     std::string image_frame_id_;
     std::string imu_frame_id_;
+    rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
     bool metadata_published_ = false;   // true once a subscriber has acked
     int metadata_pub_count_ = 0;       // render ticks since sensor init
 

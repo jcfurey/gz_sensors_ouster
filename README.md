@@ -19,18 +19,18 @@ hardware -- no driver changes needed.
 
 ## Published Topics
 
-All topics are prefixed with `<sensor_name>` (e.g. `/sensor/lidar/lidar0`).
+All topics are published under `<sensor_name>` (e.g. `/sensor/lidar/lidar0`).
 
-| Topic | Type | Rate | Description |
-|-------|------|------|-------------|
-| `/lidar_packets` | `ouster_sensor_msgs/PacketMsg` | lidar_hz | Native Ouster lidar packets |
-| `/metadata` | `std_msgs/String` | Latched | Ouster calibration JSON |
-| `/range_image` | `sensor_msgs/Image` | lidar_hz | Range in mm (mono16) |
-| `/signal_image` | `sensor_msgs/Image` | lidar_hz | Signal photon counts (mono16) |
-| `/reflec_image` | `sensor_msgs/Image` | lidar_hz | Reflectivity (mono16) |
-| `/nearir_image` | `sensor_msgs/Image` | lidar_hz | Near-IR (mono16) |
-| `/imu_packets` | `ouster_sensor_msgs/PacketMsg` | imu_hz | Native Ouster IMU packets |
-| `/imu` | `sensor_msgs/Imu` | imu_hz | Standard IMU message |
+| Topic suffix | Type | Rate | Description |
+|--------------|------|------|-------------|
+| `<sensor_name>/lidar_packets` | `ouster_sensor_msgs/PacketMsg` | lidar_hz | Native Ouster lidar packets |
+| `<sensor_name>/metadata` | `std_msgs/String` | Latched | Ouster calibration JSON |
+| `<sensor_name>/range_image` | `sensor_msgs/Image` | lidar_hz | Range in mm (mono16) |
+| `<sensor_name>/signal_image` | `sensor_msgs/Image` | lidar_hz | Signal photon counts (mono16) |
+| `<sensor_name>/reflec_image` | `sensor_msgs/Image` | lidar_hz | Reflectivity (mono16) |
+| `<sensor_name>/nearir_image` | `sensor_msgs/Image` | lidar_hz | Near-IR (mono16) |
+| `<sensor_name>/imu_packets` | `ouster_sensor_msgs/PacketMsg` | imu_hz | Native Ouster IMU packets |
+| `<sensor_name>/imu` | `sensor_msgs/Imu` | imu_hz | Standard IMU message |
 
 Image and IMU topics are only published when subscribers are present.
 
