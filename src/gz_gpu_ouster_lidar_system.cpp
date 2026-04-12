@@ -80,6 +80,17 @@ void GzGpuOusterLidarSystem::Configure(
     // Read SDF parameters
     if (sdf->HasElement("metadata_path")) {
         metadata_path_ = sdf->Get<std::string>("metadata_path");
+        // Resolve relative paths against the SDF file's directory.
+        if (!metadata_path_.empty() && metadata_path_[0] != '/') {
+            std::string sdf_dir = sdf->FilePath();
+            if (!sdf_dir.empty()) {
+                auto slash = sdf_dir.rfind('/');
+                if (slash != std::string::npos) {
+                    sdf_dir = sdf_dir.substr(0, slash);
+                    metadata_path_ = sdf_dir + "/" + metadata_path_;
+                }
+            }
+        }
     }
     if (sdf->HasElement("sensor_name")) {
         sensor_name_ = sdf->Get<std::string>("sensor_name");
@@ -116,6 +127,25 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("base_reflectivity")) {
         base_reflectivity_ = sdf->Get<double>("base_reflectivity");
     }
+    if (sdf->HasElement("max_range")) {
+        max_range_ = sdf->Get<double>("max_range");
+    }
+
+    // ── Validate parameters ────────────────────────────────────────────────────
+    range_noise_min_std_   = std::max(0.0, range_noise_min_std_);
+    range_noise_max_std_   = std::max(0.0, range_noise_max_std_);
+    signal_noise_scale_    = std::max(0.0, signal_noise_scale_);
+    nearir_noise_scale_    = std::max(0.0, nearir_noise_scale_);
+    dropout_rate_close_    = std::clamp(dropout_rate_close_, 0.0, 1.0);
+    dropout_rate_far_      = std::clamp(dropout_rate_far_,   0.0, 1.0);
+    edge_discon_threshold_ = std::max(0.0, edge_discon_threshold_);
+    base_signal_           = std::max(0.0, base_signal_);
+    base_reflectivity_     = std::clamp(base_reflectivity_, 0.0, 255.0);
+    max_range_             = std::max(1.0, max_range_);
+    if (lidar_hz_ <= 0.0) {
+        std::cerr << "[GzGpuOusterLidar] lidar_hz must be > 0, got " << lidar_hz_ << "; defaulting to 10\n";
+        lidar_hz_ = 10.0;
+    }
 
     if (metadata_path_.empty()) {
         std::cerr << "[GzGpuOusterLidar] 'metadata_path' SDF parameter is required\n";
@@ -134,7 +164,10 @@ void GzGpuOusterLidarSystem::Configure(
     sensor_entity_ = entity;
 
     // Load Ouster metadata and beam angles
-    loadMetadata();
+    if (!loadMetadata()) {
+        std::cerr << "[GzGpuOusterLidar] Metadata loading failed; plugin disabled\n";
+        return;
+    }
 
     // Initialise CUDA processor
     cuda_processor_ = std::make_unique<CudaRayProcessor>();
@@ -184,18 +217,19 @@ void GzGpuOusterLidarSystem::Configure(
           << " signal_noise=" << signal_noise_scale_
           << " dropout=[" << dropout_rate_close_ << "," << dropout_rate_far_ << "]"
           << " edge_discon=" << edge_discon_threshold_ << "m"
+          << " max_range=" << max_range_ << "m"
           << "\n";
 }
 
 // ── Metadata loading ─────────────────────────────────────────────────────────
 
-void GzGpuOusterLidarSystem::loadMetadata()
+bool GzGpuOusterLidarSystem::loadMetadata()
 {
     // Read raw JSON
     std::ifstream fs(metadata_path_);
     if (!fs.is_open()) {
         std::cerr << "[GzGpuOusterLidar] Cannot open metadata: " << metadata_path_ << "\n";
-        return;
+        return false;
     }
     std::ostringstream ss;
     ss << fs.rdbuf();
@@ -213,7 +247,7 @@ void GzGpuOusterLidarSystem::loadMetadata()
     if (cpp_ <= 0 || W_ % cpp_ != 0) {
         std::cerr << "[GzGpuOusterLidar] columns_per_frame (" << W_
               << ") not divisible by columns_per_packet (" << cpp_ << ")\n";
-        return;
+        return false;
     }
 
     pkt_buf_.resize(pw_->lidar_packet_size, 0);
@@ -223,10 +257,13 @@ void GzGpuOusterLidarSystem::loadMetadata()
     beam_az_offsets_ = info.beam_azimuth_angles;
     beam_origin_mm_  = info.lidar_origin_to_beam_origin_mm;
 
-    if (static_cast<int>(beam_alt_angles_.size()) != H_) {
+    if (beam_alt_angles_.empty() || static_cast<int>(beam_alt_angles_.size()) != H_) {
         std::cerr << "[GzGpuOusterLidar] beam_altitude_angles size ("
               << beam_alt_angles_.size() << ") != H (" << H_ << ")\n";
+        return false;
     }
+
+    return true;
 }
 
 // ── ROS 2 interface init ─────────────────────────────────────────────────────
@@ -338,6 +375,9 @@ void GzGpuOusterLidarSystem::OnRender()
     }
 
     // ── Lazy GpuRays sensor initialisation ───────────────────────────────────
+    // Guard: metadata must have loaded successfully (beam angles populated).
+    if (beam_alt_angles_.empty()) return;
+
     // Wait until the Sensors system has created the OGRE2 scene.
     auto * engine = ::gz::rendering::engine("ogre2");
     if (!engine) return;
@@ -381,7 +421,7 @@ void GzGpuOusterLidarSystem::OnRender()
     gpuRays->SetVerticalRayCount(v_samples);
 
     gpuRays->SetNearClipPlane(0.3);
-    gpuRays->SetFarClipPlane(50.0);
+    gpuRays->SetFarClipPlane(max_range_);
 
     // Attach to scene root; world pose is set from ECM each frame in OnRender().
     auto root = scene->RootVisual();
@@ -468,6 +508,8 @@ void GzGpuOusterLidarSystem::onNewFrame(
     // GpuRays returns width × height × channels floats.
     // Channels: [0]=depth, [1]=retro, [2]=unused
     // We need to resample vertical from the uniform grid to exact beam angles.
+
+    if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0) return;
 
     const int gpu_H      = static_cast<int>(height);
     const int gpu_W      = static_cast<int>(width);
@@ -620,14 +662,11 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     params.base_reflectivity = static_cast<float>(base_reflectivity_);
     params.range_noise_min_std = static_cast<float>(range_noise_min_std_);
     params.range_noise_max_std = static_cast<float>(range_noise_max_std_);
-    params.max_range = gpu_rays_ ? static_cast<float>(gpu_rays_->FarClipPlane()) : 50.0f;
+    params.max_range = static_cast<float>(max_range_);
     params.signal_noise_scale = static_cast<float>(signal_noise_scale_);
-    params.nearir_noise_scale = static_cast<float>(nearir_noise_scale_);
     params.dropout_rate_close = static_cast<float>(dropout_rate_close_);
     params.dropout_rate_far = static_cast<float>(dropout_rate_far_);
     params.edge_discon_threshold = static_cast<float>(edge_discon_threshold_);
-    params.dt_per_col_ns = static_cast<uint64_t>(
-        static_cast<int64_t>(1e9 / lidar_hz_) / W_);
 
     cuda_processor_->process(
         depth_buf_.data(),
@@ -652,7 +691,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     SignalMatrix  signal_mat(signal_buf_.data(), H_, W_);
     ReflMatrix    refl_mat(reflectivity_buf_.data(), H_, W_);
 
-    drain_pkts_.resize(static_cast<size_t>(n_packets));
+    std::vector<ouster_sensor_msgs::msg::PacketMsg> new_pkts(static_cast<size_t>(n_packets));
 
     for (int p = 0; p < n_packets; ++p) {
         std::fill(pkt_buf_.begin(), pkt_buf_.end(), 0);
@@ -673,7 +712,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
         pw_->set_block<uint16_t>(signal_mat, ouster::sdk::core::ChanField::SIGNAL,       pkt_buf_.data());
         pw_->set_block<uint8_t> (refl_mat,   ouster::sdk::core::ChanField::REFLECTIVITY, pkt_buf_.data());
 
-        drain_pkts_[static_cast<size_t>(p)].buf.assign(pkt_buf_.begin(), pkt_buf_.end());
+        new_pkts[static_cast<size_t>(p)].buf.assign(pkt_buf_.begin(), pkt_buf_.end());
     }
 
     ++frame_id_;
@@ -684,6 +723,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     // ── Wake drain thread ────────────────────────────────────────────────────
     {
         std::lock_guard<std::mutex> lk(drain_mtx_);
+        drain_pkts_.swap(new_pkts);
         drain_ready_.store(true, std::memory_order_release);
     }
     drain_cv_.notify_one();
@@ -757,7 +797,7 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
                 // Approximate Poisson noise: σ = √v * scale
                 // Use a simple hash-based dither since we're on CPU here
                 // (good enough for display-only images)
-                float noise = (static_cast<float>((i * 2654435761u) & 0xFFFFu) / 65535.0f - 0.5f)
+                float noise = (static_cast<float>(((i ^ (static_cast<size_t>(frame_id_) * 2246822519u)) * 2654435761u) & 0xFFFFu) / 65535.0f - 0.5f)
                               * 2.0f * std::sqrt(v) * nir_scale;
                 v = v + noise;
             }
@@ -771,6 +811,8 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
 
 void GzGpuOusterLidarSystem::drainThreadFunc()
 {
+    std::vector<ouster_sensor_msgs::msg::PacketMsg> local_pkts;
+
     while (!shutdown_.load(std::memory_order_acquire)) {
         {
             std::unique_lock<std::mutex> lk(drain_mtx_);
@@ -780,18 +822,19 @@ void GzGpuOusterLidarSystem::drainThreadFunc()
             });
             if (shutdown_.load(std::memory_order_acquire)) break;
             drain_ready_.store(false, std::memory_order_release);
+            local_pkts.swap(drain_pkts_);
         }
 
-        if (drain_pkts_.empty()) continue;
+        if (local_pkts.empty()) continue;
 
         const auto spacing = std::chrono::nanoseconds(
             static_cast<int64_t>(1e9 / lidar_hz_) /
-            static_cast<int64_t>(drain_pkts_.size()));
+            static_cast<int64_t>(local_pkts.size()));
 
-        for (size_t i = 0; i < drain_pkts_.size(); ++i) {
+        for (size_t i = 0; i < local_pkts.size(); ++i) {
             if (shutdown_.load(std::memory_order_acquire)) return;
-            pkt_pub_->publish(drain_pkts_[i]);
-            if (i + 1 < drain_pkts_.size()) {
+            pkt_pub_->publish(local_pkts[i]);
+            if (i + 1 < local_pkts.size()) {
                 std::this_thread::sleep_for(spacing);
             }
         }

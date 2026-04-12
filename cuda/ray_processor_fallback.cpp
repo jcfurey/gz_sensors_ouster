@@ -26,7 +26,6 @@ void CudaRayProcessor::process(
     const int H = p.H;
     const int W = p.W;
     const int n = H * W;
-    (void)p.dt_per_col_ns;
 
     // Thread-local RNG for CPU fallback
     static thread_local std::mt19937 rng{std::random_device{}()};
@@ -109,7 +108,7 @@ void CudaRayProcessor::process(
             float sigma_sig = std::sqrt(std::max(sig, 0.0f)) * p.signal_noise_scale;
             sig = std::max(sig + norm(rng) * sigma_sig, 0.0f);
         }
-        signal_out[idx] = static_cast<uint16_t>(std::min(sig, 65535.0f));
+        signal_out[idx] = static_cast<uint16_t>(std::clamp(sig, 0.0f, 65535.0f));
 
         // ── Reflectivity ─────────────────────────────────────────────────────
         if (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f) {

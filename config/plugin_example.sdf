@@ -4,4 +4,18 @@
   <metadata_path>/home/robot/data/ouster/os0_16_sim.json</metadata_path>
   <sensor_name>os_sensor</sensor_name>
   <lidar_hz>10.0</lidar_hz>
+
+  <!-- Max sensing range in metres (default: 120.0 for OS1) -->
+  <!-- <max_range>120.0</max_range> -->
+
+  <!-- Noise model parameters (defaults tuned for OS1 rev6) -->
+  <!-- <range_noise_min_std>0.002</range_noise_min_std> -->
+  <!-- <range_noise_max_std>0.008</range_noise_max_std> -->
+  <!-- <signal_noise_scale>1.0</signal_noise_scale> -->
+  <!-- <nearir_noise_scale>1.0</nearir_noise_scale> -->
+  <!-- <dropout_rate_close>0.0002</dropout_rate_close> -->
+  <!-- <dropout_rate_far>0.015</dropout_rate_far> -->
+  <!-- <edge_discon_threshold>0.15</edge_discon_threshold> -->
+  <!-- <base_signal>800.0</base_signal> -->
+  <!-- <base_reflectivity>50.0</base_reflectivity> -->
 </plugin>

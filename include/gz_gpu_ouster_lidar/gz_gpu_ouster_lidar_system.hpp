@@ -73,6 +73,7 @@ private:
     double edge_discon_threshold_ = 0.15;  // 0.15 m — OS1 narrow beams, tighter rejection
     double base_signal_ = 800.0;           // OS1 higher photon budget than OS0
     double base_reflectivity_ = 50.0;      // Default reflectivity [0–255]
+    double max_range_ = 120.0;             // Sensor max range (metres), default OS1
 
     // ── Ouster metadata ──────────────────────────────────────────────────────
     std::string metadata_str_;
@@ -123,7 +124,7 @@ private:
     std::vector<float> depth_buf_;
     std::vector<float> retro_buf_;
     std::mutex frame_mtx_;
-    bool frame_ready_ = false;
+    std::atomic<bool> frame_ready_{false};
 
     // ── ROS 2 node & publishers ──────────────────────────────────────────────
     rclcpp::Node::SharedPtr ros_node_;
@@ -148,7 +149,7 @@ private:
     std::atomic<bool> shutdown_{false};
 
     // ── Private methods ──────────────────────────────────────────────────────
-    void loadMetadata();
+    bool loadMetadata();
     void initRosInterface();
     void onNewFrame(const float * data, unsigned int width,
                     unsigned int height, unsigned int channels,

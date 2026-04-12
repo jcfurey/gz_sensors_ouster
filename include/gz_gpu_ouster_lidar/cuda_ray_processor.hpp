@@ -20,7 +20,6 @@ struct RayProcessParams {
 
     // ── Photon / signal noise ────────────────────────────────────────────────
     float signal_noise_scale;  ///< Signal Poisson noise scale (0 = off, 1 = physical)
-    float nearir_noise_scale;  ///< Near-IR Poisson noise scale (0 = off, 1 = physical)
 
     // ── Random dropouts ──────────────────────────────────────────────────────
     float dropout_rate_close;  ///< Dropout probability at 0 m (e.g. 0.001)
@@ -28,9 +27,6 @@ struct RayProcessParams {
 
     // ── Depth-discontinuity suppression ──────────────────────────────────────
     float edge_discon_threshold; ///< Depth jump threshold (metres) to suppress neighbor, 0=off
-
-    // ── Timing ───────────────────────────────────────────────────────────────
-    uint64_t dt_per_col_ns;    ///< Nanoseconds between columns (rolling shutter)
 };
 
 /// CUDA ray post-processor: converts GpuRays float buffer → Ouster-compatible
