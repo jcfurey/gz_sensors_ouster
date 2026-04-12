@@ -4,8 +4,8 @@ if(GZ_GPU_OUSTER_USE_CUDA)
   )
 
   set_target_properties(gz_gpu_ouster_lidar_cuda PROPERTIES
-    # Turing (75), Ampere (80, 86), Ada Lovelace (89).
-    CUDA_ARCHITECTURES "75;80;86;89"
+    # Compile for every architecture the installed CUDA toolkit supports.
+    CUDA_ARCHITECTURES all-major
     POSITION_INDEPENDENT_CODE ON
   )
 else()
