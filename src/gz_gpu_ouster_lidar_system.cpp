@@ -12,7 +12,6 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <iostream>
 #include <sstream>
 #include <stdexcept>
 
@@ -41,11 +40,14 @@
 #include <ouster/types.h>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <builtin_interfaces/msg/time.hpp>
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
 #include <std_msgs/msg/string.hpp>
 
 namespace gz_gpu_ouster_lidar {
+
+static const rclcpp::Logger kLogger = rclcpp::get_logger("gz_gpu_ouster_lidar");
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
@@ -164,16 +166,16 @@ void GzGpuOusterLidarSystem::Configure(
     base_reflectivity_     = std::clamp(base_reflectivity_, 0.0, 255.0);
     max_range_             = std::max(1.0, max_range_);
     if (lidar_hz_ <= 0.0) {
-        std::cerr << "[GzGpuOusterLidar] lidar_hz must be > 0, got " << lidar_hz_ << "; defaulting to 10\n";
+        RCLCPP_WARN(kLogger, "lidar_hz must be > 0, got %f; defaulting to 10", lidar_hz_);
         lidar_hz_ = 10.0;
     }
     if (imu_enabled_ && imu_hz_ <= 0.0) {
-        std::cerr << "[GzGpuOusterLidar] imu_hz must be > 0, got " << imu_hz_ << "; defaulting to 100\n";
+        RCLCPP_WARN(kLogger, "imu_hz must be > 0, got %f; defaulting to 100", imu_hz_);
         imu_hz_ = 100.0;
     }
 
     if (metadata_path_.empty()) {
-        std::cerr << "[GzGpuOusterLidar] 'metadata_path' SDF parameter is required\n";
+        RCLCPP_ERROR(kLogger, "'metadata_path' SDF parameter is required");
         return;
     }
 
@@ -190,7 +192,7 @@ void GzGpuOusterLidarSystem::Configure(
 
     // Load Ouster metadata and beam angles
     if (!loadMetadata()) {
-        std::cerr << "[GzGpuOusterLidar] Metadata loading failed; plugin disabled\n";
+        RCLCPP_ERROR(kLogger, "Metadata loading failed; plugin disabled");
         return;
     }
 
@@ -233,21 +235,16 @@ void GzGpuOusterLidarSystem::Configure(
     image_frame_id_ = lidar_id + "/lidar_frame";
     imu_frame_id_ = lidar_id + "/imu_frame";
 
-    std::cout << "[GzGpuOusterLidar] Configured: H=" << H_ << " W=" << W_
-          << " cpp=" << cpp_ << " sensor_name=" << sensor_name_
-          << " gz_sensor=" << lidar_frame_name_
-          << " hz=" << lidar_hz_
-          << "\n  noise: range_σ=[" << range_noise_min_std_ << "," << range_noise_max_std_ << "]m"
-          << " signal_noise=" << signal_noise_scale_
-          << " dropout=[" << dropout_rate_close_ << "," << dropout_rate_far_ << "]"
-          << " edge_discon=" << edge_discon_threshold_ << "m"
-          << " max_range=" << max_range_ << "m"
-          << "\n";
+    RCLCPP_INFO(kLogger,
+        "Configured: H=%d W=%d cpp=%d sensor_name=%s gz_sensor=%s hz=%.1f"
+        " noise: range_sigma=[%.4f,%.4f]m signal_noise=%.1f"
+        " dropout=[%.4f,%.4f] edge_discon=%.3fm max_range=%.1fm",
+        H_, W_, cpp_, sensor_name_.c_str(), lidar_frame_name_.c_str(), lidar_hz_,
+        range_noise_min_std_, range_noise_max_std_, signal_noise_scale_,
+        dropout_rate_close_, dropout_rate_far_, edge_discon_threshold_, max_range_);
     if (imu_enabled_) {
-        std::cout << "  IMU: sensor=" << imu_name_
-                  << " hz=" << imu_hz_
-                  << " publish_imu_msg=" << (publish_imu_msg_ ? "true" : "false")
-                  << "\n";
+        RCLCPP_INFO(kLogger, "  IMU: sensor=%s hz=%.1f publish_imu_msg=%s",
+            imu_name_.c_str(), imu_hz_, publish_imu_msg_ ? "true" : "false");
     }
 
     // Start drain thread last — all state is fully initialised above.
@@ -261,7 +258,7 @@ bool GzGpuOusterLidarSystem::loadMetadata()
     // Read raw JSON
     std::ifstream fs(metadata_path_);
     if (!fs.is_open()) {
-        std::cerr << "[GzGpuOusterLidar] Cannot open metadata: " << metadata_path_ << "\n";
+        RCLCPP_ERROR(kLogger, "Cannot open metadata: %s", metadata_path_.c_str());
         return false;
     }
     std::ostringstream ss;
@@ -281,8 +278,8 @@ bool GzGpuOusterLidarSystem::loadMetadata()
         cpp_ = pw_->columns_per_packet;
 
         if (cpp_ <= 0 || W_ % cpp_ != 0) {
-            std::cerr << "[GzGpuOusterLidar] columns_per_frame (" << W_
-                  << ") not divisible by columns_per_packet (" << cpp_ << ")\n";
+            RCLCPP_ERROR(kLogger, "columns_per_frame (%d) not divisible by columns_per_packet (%d)",
+                W_, cpp_);
             return false;
         }
 
@@ -299,14 +296,13 @@ bool GzGpuOusterLidarSystem::loadMetadata()
         beam_az_offsets_ = info.beam_azimuth_angles;
         beam_origin_mm_  = info.lidar_origin_to_beam_origin_mm;
     } catch (const std::exception & e) {
-        std::cerr << "[GzGpuOusterLidar] Failed to parse metadata: "
-                  << e.what() << "\n";
+        RCLCPP_ERROR(kLogger, "Failed to parse metadata: %s", e.what());
         return false;
     }
 
     if (beam_alt_angles_.empty() || static_cast<int>(beam_alt_angles_.size()) != H_) {
-        std::cerr << "[GzGpuOusterLidar] beam_altitude_angles size ("
-              << beam_alt_angles_.size() << ") != H (" << H_ << ")\n";
+        RCLCPP_ERROR(kLogger, "beam_altitude_angles size (%zu) != H (%d)",
+            beam_alt_angles_.size(), H_);
         return false;
     }
 
@@ -361,6 +357,53 @@ void GzGpuOusterLidarSystem::initRosInterface()
         }
     }
 
+    // ── Declare ROS 2 parameters ──────────────────────────────────────────
+    // Read-only structural parameters (informational, cannot change at runtime).
+    ros_node_->declare_parameter("lidar_hz", lidar_hz_);
+    ros_node_->declare_parameter("max_range", max_range_);
+    if (imu_enabled_) {
+        ros_node_->declare_parameter("imu_hz", imu_hz_);
+    }
+
+    // Dynamically reconfigurable noise model parameters.
+    ros_node_->declare_parameter("range_noise_min_std", range_noise_min_std_);
+    ros_node_->declare_parameter("range_noise_max_std", range_noise_max_std_);
+    ros_node_->declare_parameter("signal_noise_scale", signal_noise_scale_);
+    ros_node_->declare_parameter("nearir_noise_scale", nearir_noise_scale_);
+    ros_node_->declare_parameter("dropout_rate_close", dropout_rate_close_);
+    ros_node_->declare_parameter("dropout_rate_far", dropout_rate_far_);
+    ros_node_->declare_parameter("edge_discon_threshold", edge_discon_threshold_);
+    ros_node_->declare_parameter("base_signal", base_signal_);
+    ros_node_->declare_parameter("base_reflectivity", base_reflectivity_);
+
+    ros_node_->add_on_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter> & params)
+            -> rcl_interfaces::msg::SetParametersResult {
+            for (const auto & p : params) {
+                const auto & name = p.get_name();
+                // Reject changes to structural parameters.
+                if (name == "lidar_hz" || name == "max_range" || name == "imu_hz") {
+                    rcl_interfaces::msg::SetParametersResult r;
+                    r.successful = false;
+                    r.reason = name + " cannot be changed at runtime";
+                    return r;
+                }
+                // Apply noise model updates.
+                if (name == "range_noise_min_std")   range_noise_min_std_   = std::max(0.0, p.as_double());
+                else if (name == "range_noise_max_std") range_noise_max_std_ = std::max(0.0, p.as_double());
+                else if (name == "signal_noise_scale")  signal_noise_scale_  = std::max(0.0, p.as_double());
+                else if (name == "nearir_noise_scale")  nearir_noise_scale_  = std::max(0.0, p.as_double());
+                else if (name == "dropout_rate_close")  dropout_rate_close_  = std::clamp(p.as_double(), 0.0, 1.0);
+                else if (name == "dropout_rate_far")    dropout_rate_far_    = std::clamp(p.as_double(), 0.0, 1.0);
+                else if (name == "edge_discon_threshold") edge_discon_threshold_ = std::max(0.0, p.as_double());
+                else if (name == "base_signal")         base_signal_         = std::max(0.0, p.as_double());
+                else if (name == "base_reflectivity")   base_reflectivity_   = std::clamp(p.as_double(), 0.0, 255.0);
+            }
+            rcl_interfaces::msg::SetParametersResult r;
+            r.successful = true;
+            return r;
+        });
+
     // Spin the node on a background thread so Zenoh completes peer discovery.
     // Without this, rmw_zenoh_cpp never processes incoming control messages
     // and publish() calls go undelivered even when subscribers exist.
@@ -375,8 +418,7 @@ void GzGpuOusterLidarSystem::initRosInterface()
     std_msgs::msg::String meta_msg;
     meta_msg.data = metadata_str_;
     meta_pub_->publish(meta_msg);
-    std::cout << "[GzGpuOusterLidar] Initial metadata published on "
-              << abs_prefix << "/metadata\n";
+    RCLCPP_INFO(kLogger, "Initial metadata published on %s/metadata", abs_prefix.c_str());
 }
 
 // ── Rendering-thread callback ────────────────────────────────────────────────
@@ -403,8 +445,8 @@ void GzGpuOusterLidarSystem::OnRender()
             // Only stop after subscriber detected AND we've sent enough for Zenoh to settle
             if (meta_pub_->get_subscription_count() > 0 && metadata_pub_count_ > static_cast<int>(lidar_hz_) * 2) {
                 metadata_published_ = true;
-                std::cout << "[GzGpuOusterLidar] metadata delivered to os_cloud (after "
-                          << metadata_pub_count_ << " publishes)\n";
+                RCLCPP_INFO(kLogger, "metadata delivered to os_cloud (after %d publishes)",
+                    metadata_pub_count_);
             }
         }
 
@@ -447,7 +489,7 @@ void GzGpuOusterLidarSystem::OnRender()
     // Each beam row gets its own ray with the exact Ouster elevation angle.
     auto gpuRays = scene->CreateGpuRays(sensor_name_ + "_gpu_rays");
     if (!gpuRays) {
-        std::cerr << "[GzGpuOusterLidar] Failed to create GpuRays sensor\n";
+        RCLCPP_ERROR(kLogger, "Failed to create GpuRays sensor");
         return;
     }
 
@@ -497,9 +539,8 @@ void GzGpuOusterLidarSystem::OnRender()
     gpu_rays_ = gpuRays;
     sensor_initialized_.store(true, std::memory_order_release);
 
-    std::cout << "[GzGpuOusterLidar] GpuRays sensor created: "
-              << W_ << "x" << v_samples << " rays, "
-              << "vertical FOV [" << min_alt << ", " << max_alt << "] deg\n";
+    RCLCPP_INFO(kLogger, "GpuRays sensor created: %dx%d rays, vertical FOV [%.1f, %.1f] deg",
+        W_, v_samples, min_alt, max_alt);
 }
 
 // ── ISystemPostUpdate ────────────────────────────────────────────────────────
@@ -524,8 +565,8 @@ void GzGpuOusterLidarSystem::PostUpdate(
                 if (name->Data() == lidar_frame_name_) {
                     lidar_frame_entity_ = ent;
                     lidar_frame_found_ = true;
-                    std::cout << "[GzGpuOusterLidar] Found sensor entity: "
-                              << lidar_frame_name_ << " (id=" << ent << ")\n";
+                    RCLCPP_INFO(kLogger, "Found sensor entity: %s (id=%lu)",
+                        lidar_frame_name_.c_str(), static_cast<unsigned long>(ent));
                     return false;  // stop iteration
                 }
                 return true;  // continue
@@ -541,8 +582,8 @@ void GzGpuOusterLidarSystem::PostUpdate(
                 if (name->Data() == imu_name_) {
                     imu_entity_ = ent;
                     imu_entity_found_ = true;
-                    std::cout << "[GzGpuOusterLidar] Found IMU entity: "
-                              << imu_name_ << " (id=" << ent << ")\n";
+                    RCLCPP_INFO(kLogger, "Found IMU entity: %s (id=%lu)",
+                        imu_name_.c_str(), static_cast<unsigned long>(ent));
                     return false;  // stop iteration
                 }
                 return true;  // continue
