@@ -134,6 +134,7 @@ private:
     std::vector<uint32_t> range_buf_;
     std::vector<uint16_t> signal_buf_;
     std::vector<uint8_t>  reflectivity_buf_;
+    std::vector<uint16_t> nearir_buf_;          // NEAR_IR channel for packet encoding
 
     // Raw GpuRays callback buffer
     std::vector<float> depth_buf_;

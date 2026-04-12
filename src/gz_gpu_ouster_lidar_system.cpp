@@ -195,6 +195,7 @@ void GzGpuOusterLidarSystem::Configure(
     range_buf_.resize(static_cast<size_t>(n), 0);
     signal_buf_.resize(static_cast<size_t>(n), 0);
     reflectivity_buf_.resize(static_cast<size_t>(n), 50);
+    nearir_buf_.resize(static_cast<size_t>(n), 0);
     depth_buf_.resize(static_cast<size_t>(n), 0.0f);
     retro_buf_.resize(static_cast<size_t>(n), 0.0f);
 
@@ -316,7 +317,7 @@ void GzGpuOusterLidarSystem::initRosInterface()
 
     // Latched metadata publisher
     rclcpp::QoS meta_qos{1};
-    meta_qos.transient_local();
+    meta_qos.reliable().transient_local();
     meta_pub_ = ros_node_->create_publisher<std_msgs::msg::String>(
         abs_prefix + "/metadata", meta_qos);
 
@@ -739,6 +740,15 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
         reflectivity_buf_.data(),
         params);
 
+    // ── Compute NEAR_IR channel from retro ─────────────────────────────────
+    // GpuRays retro channel → uint16 photon-count analogue for the packet.
+    // This matches what publishImages() does for the nearir_image topic.
+    const auto n_px = static_cast<size_t>(H_ * W_);
+    for (size_t i = 0; i < n_px; ++i) {
+        nearir_buf_[i] = static_cast<uint16_t>(
+            std::clamp(retro_buf_[i] * 256.0f, 0.0f, 65535.0f));
+    }
+
     // ── Build packets ────────────────────────────────────────────────────────
     const int n_packets = W_ / cpp_;
     const int64_t scan_period_ns = static_cast<int64_t>(1e9 / lidar_hz_);
@@ -749,10 +759,12 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
     using RangeMatrix = Eigen::Map<ouster::sdk::core::img_t<uint32_t>>;
     using SignalMatrix = Eigen::Map<ouster::sdk::core::img_t<uint16_t>>;
     using ReflMatrix = Eigen::Map<ouster::sdk::core::img_t<uint8_t>>;
+    using NirMatrix = Eigen::Map<ouster::sdk::core::img_t<uint16_t>>;
 
     RangeMatrix  range_mat(range_buf_.data(), H_, W_);
     SignalMatrix  signal_mat(signal_buf_.data(), H_, W_);
     ReflMatrix    refl_mat(reflectivity_buf_.data(), H_, W_);
+    NirMatrix     nearir_mat(nearir_buf_.data(), H_, W_);
 
     std::vector<ouster_sensor_msgs::msg::PacketMsg> new_pkts(static_cast<size_t>(n_packets));
 
@@ -774,6 +786,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
         pw_->set_block<uint32_t>(range_mat,  ouster::sdk::core::ChanField::RANGE,        pkt_buf_.data());
         pw_->set_block<uint16_t>(signal_mat, ouster::sdk::core::ChanField::SIGNAL,       pkt_buf_.data());
         pw_->set_block<uint8_t> (refl_mat,   ouster::sdk::core::ChanField::REFLECTIVITY, pkt_buf_.data());
+        pw_->set_block<uint16_t>(nearir_mat, ouster::sdk::core::ChanField::NEAR_IR,      pkt_buf_.data());
 
         new_pkts[static_cast<size_t>(p)].buf.assign(pkt_buf_.begin(), pkt_buf_.end());
     }
@@ -899,15 +912,29 @@ void GzGpuOusterLidarSystem::publishImu(
     if (imu_pkt_pub_ && imu_pkt_pub_->get_subscription_count() > 0 &&
         !imu_pkt_buf_.empty()) {
         std::fill(imu_pkt_buf_.begin(), imu_pkt_buf_.end(), 0);
+        uint8_t * buf = imu_pkt_buf_.data();
+        const uint64_t ts = static_cast<uint64_t>(stamp_ns);
 
-        pw_->set_imu_nmea_ts(imu_pkt_buf_.data(), static_cast<uint64_t>(stamp_ns));
+        // LEGACY IMU profile (48 bytes): timestamps at fixed offsets.
+        // PacketWriter only exposes set_imu_nmea_ts (for ACCEL32_GYRO32_NMEA),
+        // so we write the LEGACY sys_ts/accel_ts/gyro_ts directly.
+        // os_cloud reads imu_gyro_ts (offset 16) for the ROS message timestamp.
+        if (imu_pkt_buf_.size() >= 48) {
+            std::memcpy(buf + 0,  &ts, sizeof(uint64_t));  // sys_ts
+            std::memcpy(buf + 8,  &ts, sizeof(uint64_t));  // accel_ts
+            std::memcpy(buf + 16, &ts, sizeof(uint64_t));  // gyro_ts
+        }
 
-        pw_->set_imu_la_x(imu_pkt_buf_.data(), static_cast<float>(la.X()));
-        pw_->set_imu_la_y(imu_pkt_buf_.data(), static_cast<float>(la.Y()));
-        pw_->set_imu_la_z(imu_pkt_buf_.data(), static_cast<float>(la.Z()));
-        pw_->set_imu_av_x(imu_pkt_buf_.data(), static_cast<float>(av.X()));
-        pw_->set_imu_av_y(imu_pkt_buf_.data(), static_cast<float>(av.Y()));
-        pw_->set_imu_av_z(imu_pkt_buf_.data(), static_cast<float>(av.Z()));
+        // ACCEL32_GYRO32_NMEA profile: use PacketWriter setters.
+        pw_->set_imu_nmea_ts(buf, ts);
+
+        // Accel/gyro values — PacketWriter writes at profile-correct offsets.
+        pw_->set_imu_la_x(buf, static_cast<float>(la.X()));
+        pw_->set_imu_la_y(buf, static_cast<float>(la.Y()));
+        pw_->set_imu_la_z(buf, static_cast<float>(la.Z()));
+        pw_->set_imu_av_x(buf, static_cast<float>(av.X()));
+        pw_->set_imu_av_y(buf, static_cast<float>(av.Y()));
+        pw_->set_imu_av_z(buf, static_cast<float>(av.Z()));
 
         ouster_sensor_msgs::msg::PacketMsg pkt;
         pkt.buf.assign(imu_pkt_buf_.begin(), imu_pkt_buf_.end());
