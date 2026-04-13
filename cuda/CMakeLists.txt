@@ -27,3 +27,8 @@ if(GZ_GPU_OUSTER_USE_CUDA)
     CUDA::curand
   )
 endif()
+
+# OpenMP for CPU resampling in fallback path (and processRaw in CUDA path).
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(gz_gpu_ouster_lidar_cuda OpenMP::OpenMP_CXX)
+endif()

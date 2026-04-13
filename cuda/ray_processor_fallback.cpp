@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <random>
+#include <vector>
 
 namespace gz_gpu_ouster_lidar {
 

@@ -156,9 +156,9 @@ world plugin.
 
 1. **Configure()** loads metadata, creates ROS publishers, declares parameters
 2. **OnRender()** (render thread) lazily creates GpuRays, triggers GPU raycast
-3. **onNewFrame()** resamples uniform GpuRays grid to exact Ouster beam geometry via 2D bilinear interpolation
-4. **PostUpdate()** (sim thread) caches pose, dispatches lidar frames to CUDA, publishes IMU
-5. **encodeAndPublish()** runs CUDA/CPU noise model, encodes packets via PacketWriter
+3. **onNewFrame()** fast-copies the raw GpuRays buffer into a staging area (memcpy only, <1ms)
+4. **PostUpdate()** (sim thread) caches pose, swaps the raw frame out, dispatches to `encodeAndPublish()`, publishes IMU
+5. **encodeAndPublish()** uploads raw frame to GPU, runs resample kernel (bilinear interpolation to exact Ouster beam geometry) → noise kernel (range/signal/reflectivity/near-IR with reflectivity-dependent effects) on a single CUDA stream, downloads results, encodes packets via PacketWriter. CPU fallback uses OpenMP-parallelised resampling + sequential noise.
 6. **drainThreadFunc()** publishes packets with rolling-shutter inter-packet timing
 
 ## License
