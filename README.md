@@ -88,6 +88,37 @@ With IMU auto-detection:
 </plugin>
 ```
 
+### Multiple Sensors
+
+Add one `<plugin>` block per sensor. Each gets its own topics, GpuRays
+instance, CUDA stream, and drain thread. Use different `sensor_name`
+prefixes and metadata files:
+
+```xml
+<!-- Front OS1-64 (primary, with IMU) -->
+<plugin filename="libgz_gpu_ouster_lidar.so"
+        name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
+  <metadata_path>os1_64_front.json</metadata_path>
+  <sensor_name>/sensor/lidar/front</sensor_name>
+  <lidar_hz>10.0</lidar_hz>
+  <imu_name>auto</imu_name>
+</plugin>
+
+<!-- Rear OS0-128 (short-range, no IMU) -->
+<plugin filename="libgz_gpu_ouster_lidar.so"
+        name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
+  <metadata_path>os0_128_rear.json</metadata_path>
+  <sensor_name>/sensor/lidar/rear</sensor_name>
+  <lidar_hz>10.0</lidar_hz>
+  <max_range>50.0</max_range>
+</plugin>
+```
+
+Each sensor adds ~100 MB GPU VRAM (Ogre2 cubemap) and two threads
+(ROS executor + drain). Ogre2 renders sensors sequentially on the
+render thread, so 2-3 sensors at 10 Hz is comfortable. For 4+
+sensors, consider staggering scan rates or reducing beam density.
+
 ## Parameters
 
 All noise model parameters can be changed at runtime via
