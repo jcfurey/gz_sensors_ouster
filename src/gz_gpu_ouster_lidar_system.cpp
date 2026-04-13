@@ -89,10 +89,9 @@ void GzGpuOusterLidarSystem::Configure(
     // Read SDF parameters
     if (sdf->HasElement("metadata_path")) {
         metadata_path_ = sdf->Get<std::string>("metadata_path");
-        // Resolve relative filesystem paths against the SDF file's directory.
-        // Skip resolution for absolute paths and URI schemes (model://, package://, etc.).
+        // Resolve relative paths against the SDF file's directory.
+        // Absolute paths are used as-is.
         if (!metadata_path_.empty() &&
-            metadata_path_.find("://") == std::string::npos &&
             !std::filesystem::path(metadata_path_).is_absolute()) {
             std::string sdf_file = sdf->FilePath();
             if (!sdf_file.empty()) {

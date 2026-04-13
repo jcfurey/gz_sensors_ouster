@@ -65,12 +65,12 @@ colcon build --packages-select gz_gpu_ouster_lidar
 See [`config/plugin_example.sdf`](config/plugin_example.sdf) for the
 full annotated example.
 
-Minimal:
+Minimal (path is relative to the SDF file's directory):
 
 ```xml
 <plugin filename="libgz_gpu_ouster_lidar.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
-  <metadata_path>config/metadata/os1_64_rev7.json</metadata_path>
+  <metadata_path>metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
   <lidar_hz>10.0</lidar_hz>
 </plugin>
@@ -81,12 +81,17 @@ With IMU auto-detection:
 ```xml
 <plugin filename="libgz_gpu_ouster_lidar.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
-  <metadata_path>os1_64_sim.json</metadata_path>
+  <metadata_path>metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
   <lidar_hz>10.0</lidar_hz>
   <imu_name>auto</imu_name>
 </plugin>
 ```
+
+> **Path resolution**: `metadata_path` is resolved relative to the
+> directory of the SDF file containing the `<plugin>` element. Absolute
+> paths are used as-is. The included metadata files install to
+> `share/gz_gpu_ouster_lidar/config/metadata/`.
 
 ### Multiple Sensors
 
@@ -98,7 +103,7 @@ prefixes and metadata files:
 <!-- Front OS1-64 (primary, with IMU) -->
 <plugin filename="libgz_gpu_ouster_lidar.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
-  <metadata_path>os1_64_front.json</metadata_path>
+  <metadata_path>metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/front</sensor_name>
   <lidar_hz>10.0</lidar_hz>
   <imu_name>auto</imu_name>
@@ -107,10 +112,9 @@ prefixes and metadata files:
 <!-- Rear OS0-128 (short-range, no IMU) -->
 <plugin filename="libgz_gpu_ouster_lidar.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
-  <metadata_path>os0_128_rear.json</metadata_path>
+  <metadata_path>metadata/os0_128_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/rear</sensor_name>
   <lidar_hz>10.0</lidar_hz>
-  <max_range>50.0</max_range>
 </plugin>
 ```
 
@@ -150,7 +154,7 @@ All noise model parameters can be changed at runtime via
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `metadata_path` | string | Path to Ouster calibration JSON. Supports absolute paths, relative (resolved against SDF directory), and URI schemes (`model://`, `package://`). |
+| `metadata_path` | string | Path to Ouster calibration JSON. Absolute paths are used as-is; relative paths are resolved against the SDF file's directory. |
 | `sensor_name` | string | ROS topic prefix and node namespace (e.g. `/sensor/lidar/lidar0`). |
 
 ### Lidar
