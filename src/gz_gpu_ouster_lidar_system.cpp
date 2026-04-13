@@ -890,7 +890,6 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
     if (nearir_image_pub_->get_subscription_count() > 0) {
         auto msg = make_image();
         std::memcpy(msg.data.data(), nearir_buf_.data(), n * sizeof(uint16_t));
-        }
         nearir_image_pub_->publish(std::move(msg));
     }
 }
