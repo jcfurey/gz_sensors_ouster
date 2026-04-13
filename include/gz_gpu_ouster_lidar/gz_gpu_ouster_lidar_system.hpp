@@ -66,20 +66,21 @@ private:
     // ── Noise model parameters (SDF-configurable) ─────────────────────────────
     // Defaults tuned to OS1 rev6 (real hardware on this platform).
     // OS1 has tighter beams and longer range than OS0, yielding better
-    // range precision and less mixed-pixel noise.  Override via SDF for
-    // OS0 (wider beams, shorter range) or OS2 (narrower beams, longer range).
+    // Validated against ISPRS accuracy assessment of OS1-64 and Ouster FW 1.13+
+    // datasheets.  Override via SDF for OS0/OS2.
     // Guarded by noise_mtx_ (written by ROS param callback, read by sim thread).
     mutable std::mutex noise_mtx_;
-    double range_noise_min_std_ = 0.002;   // 2 mm σ — OS1 repeatability ≤10 m
-    double range_noise_max_std_ = 0.008;   // 8 mm σ — OS1 at ~120 m max range
+    double range_noise_min_std_ = 0.003;   // 3 mm σ — OS1 FW 1.13+ best precision
+    double range_noise_max_std_ = 0.015;   // 15 mm σ — OS1 empirical at max range
     double signal_noise_scale_  = 1.0;     // Poisson shot noise (physically correct)
     double nearir_noise_scale_  = 1.0;     // Near-IR follows same photon statistics
-    double dropout_rate_close_  = 0.0002;  // 0.02% — OS1 near-zero at short range
-    double dropout_rate_far_    = 0.015;   // 1.5% — low-reflectivity misses at max range
-    double edge_discon_threshold_ = 0.15;  // 0.15 m — OS1 narrow beams, tighter rejection
+    double dropout_rate_close_  = 0.0005;  // 0.05% — OS1 near-zero at short range
+    double dropout_rate_far_    = 0.03;    // 3.0% — low-reflectivity misses at max range
+    double edge_discon_threshold_ = 0.15;  // 0.15 m — 1ns echo delay convention
     double base_signal_ = 800.0;           // OS1 higher photon budget than OS0
     double base_reflectivity_ = 50.0;      // Default reflectivity [0–255]
     double max_range_ = 120.0;             // Sensor max range (metres), default OS1
+    bool max_range_explicit_ = false;      // true if set via SDF (don't auto-derive)
 
     // ── IMU configuration (SDF-optional) ─────────────────────────────────────
     std::string imu_name_;                  // Gazebo IMU sensor entity name
@@ -141,9 +142,13 @@ private:
     std::vector<uint8_t>  reflectivity_buf_;
     std::vector<uint16_t> nearir_buf_;          // NEAR_IR channel for packet encoding
 
-    // Raw GpuRays callback buffer
-    std::vector<float> depth_buf_;
-    std::vector<float> retro_buf_;
+    // Raw GpuRays frame staging buffer (fast memcpy in callback, GPU-processed later)
+    std::vector<float> raw_frame_buf_;
+    int raw_frame_H_ = 0;
+    int raw_frame_W_ = 0;
+    int raw_frame_chan_ = 0;
+    std::vector<float> beam_alt_f_;     // beam_alt_angles_ as float (for GPU upload)
+    std::vector<float> beam_az_f_;      // beam_az_offsets_ as float
     std::mutex frame_mtx_;
     std::atomic<bool> frame_ready_{false};
 
@@ -176,13 +181,17 @@ private:
     // ── IMU timing ───────────────────────────────────────────────────────────
     std::chrono::nanoseconds last_imu_sim_time_{0};
 
+    // ── Pause/resume detection ───────────────────────────────────────────────
+    bool was_paused_ = false;
+
     // ── Private methods ──────────────────────────────────────────────────────
     bool loadMetadata();
     void initRosInterface();
     void onNewFrame(const float * data, unsigned int width,
                     unsigned int height, unsigned int channels,
                     const std::string & format);
-    void encodeAndPublish(int64_t stamp_ns);
+    void encodeAndPublish(int64_t stamp_ns,
+                          const float * raw_data, int gpu_H, int gpu_W, int gpu_chan);
     void publishImages(int64_t stamp_ns);
     void publishImu(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm);

@@ -4,55 +4,66 @@
 
   <!-- ─── Required ────────────────────────────────────────────────── -->
 
-  <!-- Path to Ouster calibration JSON (absolute, relative to SDF, or URI).
-       Replace with your actual metadata file. -->
+  <!-- Path to Ouster calibration JSON.
+       Accepts: absolute path, relative to SDF directory, or URI (model://, package://).
+       Obtain from real hardware via `ouster-cli sensor-info` or the sensor HTTP API. -->
   <metadata_path>os1_64_sim.json</metadata_path>
 
-  <!-- ROS topic prefix — all topics are published under this namespace -->
+  <!-- ROS topic prefix — all topics are published under this namespace.
+       Example topics: /sensor/lidar/lidar0/lidar_packets, .../metadata, .../imu -->
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
 
-  <!-- Lidar scan rate in Hz (common values: 10, 20) -->
+  <!-- Lidar scan rate in Hz (common values: 10, 20). -->
   <lidar_hz>10.0</lidar_hz>
 
   <!-- ─── Lidar (optional) ────────────────────────────────────────── -->
 
   <!-- Max sensing range in metres. Sets GPU far clip and noise scaling.
-       OS0: 50, OS1: 120 (default), OS2: 240 -->
+       Auto-derived from metadata prod_line if omitted (OS0→50, OS1→120, OS2→240).
+       Only set this if you need to override the auto-detected value. -->
   <!-- <max_range>120.0</max_range> -->
 
   <!-- ─── Noise Model (optional, defaults tuned for OS1-64 rev6) ──── -->
+  <!-- All noise parameters can be changed at runtime:
+       ros2 param set /gz_gpu_ouster_lidar range_noise_min_std 0.005 -->
 
   <!-- Range noise: Gaussian, sigma interpolated linearly from min to max
-       with distance. Units: metres. -->
-  <!-- <range_noise_min_std>0.002</range_noise_min_std> -->
-  <!-- <range_noise_max_std>0.008</range_noise_max_std> -->
+       with distance. Also scales with reflectivity (dark surfaces = more noise).
+       Validated against ISPRS OS1-64 accuracy study. Units: metres. -->
+  <!-- <range_noise_min_std>0.003</range_noise_min_std> -->
+  <!-- <range_noise_max_std>0.015</range_noise_max_std> -->
 
   <!-- Signal intensity model: photon budget for the 1/r^2 model.
-       Higher = brighter returns. OS0: ~400, OS1: ~800. -->
+       Higher = brighter returns. OS0: ~400, OS1: ~800, OS2: ~1200. -->
   <!-- <base_signal>800.0</base_signal> -->
 
   <!-- Poisson shot noise on signal channel. 0 = off, 1.0 = physical. -->
   <!-- <signal_noise_scale>1.0</signal_noise_scale> -->
 
-  <!-- Poisson noise on the near-IR image topic. 0 = off. -->
+  <!-- Poisson noise on near-IR channel (both lidar packets and image topic).
+       0 = off, 1.0 = physical. -->
   <!-- <nearir_noise_scale>1.0</nearir_noise_scale> -->
 
-  <!-- Default reflectivity value (0-255) when surface has no retro. -->
+  <!-- Default reflectivity value (0-255) when surface has no retro material. -->
   <!-- <base_reflectivity>50.0</base_reflectivity> -->
 
   <!-- Random dropouts: probability of a missed return, increasing with
-       distance. 0 = never miss, 1 = always miss. -->
-  <!-- <dropout_rate_close>0.0002</dropout_rate_close> -->
-  <!-- <dropout_rate_far>0.015</dropout_rate_far> -->
+       distance. Also scales with surface reflectivity (dark targets drop more).
+       0 = never miss, 1 = always miss. -->
+  <!-- <dropout_rate_close>0.0005</dropout_rate_close> -->
+  <!-- <dropout_rate_far>0.03</dropout_rate_far> -->
 
   <!-- Depth-discontinuity suppression: reject returns at depth edges
-       where a neighbor differs by more than this threshold. 0 = off. -->
+       where a neighbor differs by more than this threshold (metres). 0 = off. -->
   <!-- <edge_discon_threshold>0.15</edge_discon_threshold> -->
 
   <!-- ─── IMU (optional) ──────────────────────────────────────────── -->
-  <!-- Requires gz-sim-imu-system plugin and a matching IMU sensor in
-       your SDF/URDF. Omit imu_name to disable. -->
-  <!-- <imu_name>imu0</imu_name> -->
+  <!-- Publishes: .../imu_packets (Ouster PacketMsg) and .../imu (sensor_msgs/Imu).
+       Requires gz-sim-imu-system plugin loaded in your world SDF:
+         <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+       Set to "auto" to use the first IMU sensor found on the model,
+       or specify an exact entity name (e.g. "imu0"). Omit to disable. -->
+  <!-- <imu_name>auto</imu_name> -->
   <!-- <imu_hz>100.0</imu_hz> -->
   <!-- <publish_imu_msg>true</publish_imu_msg> -->
 
