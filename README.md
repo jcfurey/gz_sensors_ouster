@@ -70,7 +70,7 @@ Minimal:
 ```xml
 <plugin filename="libgz_gpu_ouster_lidar.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
-  <metadata_path>os1_64_sim.json</metadata_path>
+  <metadata_path>config/metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
   <lidar_hz>10.0</lidar_hz>
 </plugin>
@@ -118,6 +118,28 @@ Each sensor adds ~100 MB GPU VRAM (Ogre2 cubemap) and two threads
 (ROS executor + drain). Ogre2 renders sensors sequentially on the
 render thread, so 2-3 sensors at 10 Hz is comfortable. For 4+
 sensors, consider staggering scan rates or reducing beam density.
+
+## Included Metadata Files
+
+Example Ouster calibration JSONs are provided in `config/metadata/` for
+simulation without real hardware:
+
+| File | Sensor | Beams | VFOV | Beam Angles | Notes |
+|------|--------|-------|------|-------------|-------|
+| `os1_64_rev7.json` | OS1-64 | 64 | 33.2° | Real (from SDK source) | Default, recommended for testing |
+| `os0_128_rev7.json` | OS0-128 | 128 | 90° | Nominal (uniform spacing) | Ultra-wide short-range |
+| `os1_128_rev7.json` | OS1-128 | 128 | 45° | Nominal | High-density mid-range |
+| `os2_128_rev7.json` | OS2-128 | 128 | 22.5° | Nominal | Long-range narrow |
+| `osdome_128_rev7.json` | OSDome-128 | 128 | 180° | Nominal | Hemispheric (experimental) |
+
+All files use the `RNG19_RFL8_SIG16_NIR16` lidar profile, `LEGACY` IMU
+profile, and 1024 columns/frame at 10 Hz. `max_range` is auto-derived
+from `prod_line` when not set in SDF.
+
+> **Note**: For production use, replace these with real calibration data
+> from your hardware (`ouster-cli sensor-info` or the sensor HTTP API).
+> Real metadata includes per-unit beam angle calibration that the nominal
+> files approximate.
 
 ## Parameters
 
