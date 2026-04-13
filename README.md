@@ -65,12 +65,12 @@ colcon build --packages-select gz_gpu_ouster_lidar
 See [`config/plugin_example.sdf`](config/plugin_example.sdf) for the
 full annotated example.
 
-Minimal:
+Minimal (path is relative to the SDF file's directory):
 
 ```xml
 <plugin filename="libgz_gpu_ouster_lidar.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
-  <metadata_path>os1_64_sim.json</metadata_path>
+  <metadata_path>metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
   <lidar_hz>10.0</lidar_hz>
 </plugin>
@@ -81,12 +81,69 @@ With IMU auto-detection:
 ```xml
 <plugin filename="libgz_gpu_ouster_lidar.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
-  <metadata_path>os1_64_sim.json</metadata_path>
+  <metadata_path>metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
   <lidar_hz>10.0</lidar_hz>
   <imu_name>auto</imu_name>
 </plugin>
 ```
+
+> **Path resolution**: `metadata_path` is resolved relative to the
+> directory of the SDF file containing the `<plugin>` element. Absolute
+> paths are used as-is. The included metadata files install to
+> `share/gz_gpu_ouster_lidar/config/metadata/`.
+
+### Multiple Sensors
+
+Add one `<plugin>` block per sensor. Each gets its own topics, GpuRays
+instance, CUDA stream, and drain thread. Use different `sensor_name`
+prefixes and metadata files:
+
+```xml
+<!-- Front OS1-64 (primary, with IMU) -->
+<plugin filename="libgz_gpu_ouster_lidar.so"
+        name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
+  <metadata_path>metadata/os1_64_rev7.json</metadata_path>
+  <sensor_name>/sensor/lidar/front</sensor_name>
+  <lidar_hz>10.0</lidar_hz>
+  <imu_name>auto</imu_name>
+</plugin>
+
+<!-- Rear OS0-128 (short-range, no IMU) -->
+<plugin filename="libgz_gpu_ouster_lidar.so"
+        name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
+  <metadata_path>metadata/os0_128_rev7.json</metadata_path>
+  <sensor_name>/sensor/lidar/rear</sensor_name>
+  <lidar_hz>10.0</lidar_hz>
+</plugin>
+```
+
+Each sensor adds ~100 MB GPU VRAM (Ogre2 cubemap) and two threads
+(ROS executor + drain). Ogre2 renders sensors sequentially on the
+render thread, so 2-3 sensors at 10 Hz is comfortable. For 4+
+sensors, consider staggering scan rates or reducing beam density.
+
+## Included Metadata Files
+
+Example Ouster calibration JSONs are provided in `config/metadata/` for
+simulation without real hardware:
+
+| File | Sensor | Beams | VFOV | Beam Angles | Notes |
+|------|--------|-------|------|-------------|-------|
+| `os1_64_rev7.json` | OS1-64 | 64 | 33.2° | Real (from SDK source) | Default, recommended for testing |
+| `os0_128_rev7.json` | OS0-128 | 128 | 90° | Nominal (uniform spacing) | Ultra-wide short-range |
+| `os1_128_rev7.json` | OS1-128 | 128 | 45° | Nominal | High-density mid-range |
+| `os2_128_rev7.json` | OS2-128 | 128 | 22.5° | Nominal | Long-range narrow |
+| `osdome_128_rev7.json` | OSDome-128 | 128 | 180° | Nominal | Hemispheric (experimental) |
+
+All files use the `RNG19_RFL8_SIG16_NIR16` lidar profile, `LEGACY` IMU
+profile, and 1024 columns/frame at 10 Hz. `max_range` is auto-derived
+from `prod_line` when not set in SDF.
+
+> **Note**: For production use, replace these with real calibration data
+> from your hardware (`ouster-cli sensor-info` or the sensor HTTP API).
+> Real metadata includes per-unit beam angle calibration that the nominal
+> files approximate.
 
 ## Parameters
 
@@ -97,7 +154,7 @@ All noise model parameters can be changed at runtime via
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `metadata_path` | string | Path to Ouster calibration JSON. Supports absolute paths, relative (resolved against SDF directory), and URI schemes (`model://`, `package://`). |
+| `metadata_path` | string | Path to Ouster calibration JSON. Absolute paths are used as-is; relative paths are resolved against the SDF file's directory. |
 | `sensor_name` | string | ROS topic prefix and node namespace (e.g. `/sensor/lidar/lidar0`). |
 
 ### Lidar
@@ -151,6 +208,48 @@ world plugin.
 > `max_range` is auto-derived from the metadata JSON's `prod_line` field
 > when not explicitly set. The other values must be overridden in SDF if
 > you are not using the OS1 defaults.
+
+## Performance
+
+The rendering bottleneck is Ogre2's GpuRays cubemap (6 faces per
+frame). Our CUDA pipeline (resample + noise) adds only ~2-3 ms per
+frame regardless of sensor density. All numbers assume a single sensor.
+
+### Estimated max real-time scan rate
+
+| Sensor config | Pixels/frame | RTX 3060 | RTX 3090 | RTX 4090 |
+|---------------|-------------|----------|----------|----------|
+| OS1-64 (512×64) | 33K | 40+ Hz | 40+ Hz | 40+ Hz |
+| OS1-128 (1024×128) | 131K | 30 Hz | 40+ Hz | 40+ Hz |
+| OS0-128 (1024×128) | 131K | 30 Hz | 40+ Hz | 40+ Hz |
+| 2048×128 | 262K | 20 Hz | 30 Hz | 40+ Hz |
+| 4096×128 | 524K | 10 Hz | 15 Hz | 25 Hz |
+| 4096×512 | 2.1M | 5 Hz | 8-10 Hz | 12-15 Hz |
+
+### Per-frame time budget breakdown (4096×512)
+
+| Stage | Time | Notes |
+|-------|------|-------|
+| Ogre2 cubemap (6 faces) | 20-50 ms | **Dominant cost** -- GPU raycast |
+| onNewFrame memcpy | <1 ms | 24 MB raw buffer copy |
+| H2D transfer | ~1 ms | Raw frame to GPU |
+| resampleKernel | ~1 ms | 2M threads, bilinear interp |
+| rayProcessKernel | ~1 ms | 2M threads, noise + channels |
+| D2H transfer | ~1 ms | Final channel results |
+| Packet encoding | 2-3 ms | 256 packets × 4 set_block calls |
+
+### Tips for high-density configs
+
+- **Reduce `v_samples`**: The cubemap resolution scales with vertical
+  ray count. For sensors where some vertical aliasing is acceptable,
+  the `v_samples` calculation in `OnRender()` can be tuned down.
+- **Stagger scan rates**: With multiple sensors, use different
+  `lidar_hz` values (e.g. 10 Hz primary, 5 Hz secondary) to avoid
+  simultaneous cubemap renders.
+- **CPU fallback is viable** for low-density sensors (OS1-16, OS1-32).
+  OpenMP parallelisation keeps resampling under 5 ms for <100K pixels.
+- **GPU VRAM**: Each sensor uses ~100 MB for the Ogre2 cubemap plus
+  ~20 MB for CUDA device buffers.
 
 ## Architecture
 

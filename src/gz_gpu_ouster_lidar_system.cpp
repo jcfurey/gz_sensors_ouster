@@ -89,10 +89,9 @@ void GzGpuOusterLidarSystem::Configure(
     // Read SDF parameters
     if (sdf->HasElement("metadata_path")) {
         metadata_path_ = sdf->Get<std::string>("metadata_path");
-        // Resolve relative filesystem paths against the SDF file's directory.
-        // Skip resolution for absolute paths and URI schemes (model://, package://, etc.).
+        // Resolve relative paths against the SDF file's directory.
+        // Absolute paths are used as-is.
         if (!metadata_path_.empty() &&
-            metadata_path_.find("://") == std::string::npos &&
             !std::filesystem::path(metadata_path_).is_absolute()) {
             std::string sdf_file = sdf->FilePath();
             if (!sdf_file.empty()) {
@@ -620,8 +619,11 @@ void GzGpuOusterLidarSystem::PostUpdate(
                    const ::gz::sim::components::Sensor * sensor) -> bool {
                 bool match = false;
                 if (auto_detect) {
-                    // Accept the first IMU-type sensor found.
-                    match = (sensor->Data().Type() == sdf::SensorType::IMU);
+                    // In gz-sim v8 the Sensor component is a marker (no Data()).
+                    // Match by name containing "imu" (case-insensitive).
+                    const auto & n = name->Data();
+                    match = (n.find("imu") != std::string::npos ||
+                             n.find("IMU") != std::string::npos);
                 } else {
                     match = (name->Data() == imu_name_);
                 }

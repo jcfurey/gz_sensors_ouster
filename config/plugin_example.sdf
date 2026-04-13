@@ -5,9 +5,17 @@
   <!-- ─── Required ────────────────────────────────────────────────── -->
 
   <!-- Path to Ouster calibration JSON.
-       Accepts: absolute path, relative to SDF directory, or URI (model://, package://).
-       Obtain from real hardware via `ouster-cli sensor-info` or the sensor HTTP API. -->
-  <metadata_path>os1_64_sim.json</metadata_path>
+       Absolute paths are used as-is. Relative paths are resolved against
+       the directory of this SDF file. Obtain from real hardware via
+       `ouster-cli sensor-info` or the sensor HTTP API.
+       Example metadata files for simulation are in metadata/ (relative to
+       this file):
+         os1_64_rev7.json     OS1-64  (33.2 VFOV, real beam angles from SDK)
+         os0_128_rev7.json    OS0-128 (90 VFOV,   nominal beam angles)
+         os1_128_rev7.json    OS1-128 (45 VFOV,   nominal beam angles)
+         os2_128_rev7.json    OS2-128 (22.5 VFOV, nominal beam angles)
+         osdome_128_rev7.json OSDome  (180 VFOV,  nominal beam angles) -->
+  <metadata_path>metadata/os1_64_rev7.json</metadata_path>
 
   <!-- ROS topic prefix — all topics are published under this namespace.
        Example topics: /sensor/lidar/lidar0/lidar_packets, .../metadata, .../imu -->
