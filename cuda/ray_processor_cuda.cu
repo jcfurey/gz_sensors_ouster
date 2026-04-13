@@ -246,10 +246,19 @@ __global__ void rayProcessKernel(
     }
 
     // ── Random dropouts ──────────────────────────────────────────────────────
-    // Dropout probability increases linearly with range.
+    // Dropout probability increases with range AND decreases with reflectivity.
+    // Real sensors lose more returns on low-reflectivity targets at distance.
     if (rs != nullptr && (dropout_rate_close > 0.f || dropout_rate_far > 0.f)) {
         float t = fminf(d / fmaxf(max_range, 0.1f), 1.f);
         float p_dropout = dropout_rate_close + t * (dropout_rate_far - dropout_rate_close);
+
+        // Reflectivity factor: low retro (dark surfaces) → up to 3× higher dropout.
+        // Retro ~1.0 = normal, retro ~0.1 (10% reflectivity) → 3× base rate.
+        float retro_val = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
+            ? retro[idx] : 0.5f;
+        float refl_factor = fminf(1.0f / fmaxf(retro_val, 0.33f), 3.0f);
+        p_dropout *= refl_factor;
+
         if (curand_uniform(rs) < p_dropout) {
             range_out[idx]  = 0u;
             signal_out[idx] = 0u;
@@ -259,10 +268,17 @@ __global__ void rayProcessKernel(
         }
     }
 
-    // ── Range noise (Gaussian, σ scales with range) ──────────────────────────
+    // ── Range noise (Gaussian, σ scales with range and reflectivity) ─────────
+    // Lower reflectivity targets produce noisier range measurements.
     if (rs != nullptr && (range_noise_min_std > 0.f || range_noise_max_std > 0.f)) {
         float t = fminf(d / fmaxf(max_range, 0.1f), 1.f);
         float sigma = range_noise_min_std + t * (range_noise_max_std - range_noise_min_std);
+
+        // Scale noise by inverse reflectivity: dark targets get ~2× more noise.
+        float retro_val = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
+            ? retro[idx] : 0.5f;
+        sigma *= fminf(1.0f / fmaxf(retro_val, 0.5f), 2.0f);
+
         d = fmaxf(d + curand_normal(rs) * sigma, 0.f);
     }
 
@@ -287,9 +303,21 @@ __global__ void rayProcessKernel(
     }
     signal_out[idx] = static_cast<uint16_t>(fminf(fmaxf(sig, 0.f), 65535.f));
 
-    // ── Reflectivity from retro ──────────────────────────────────────────────
+    // ── Reflectivity from retro (Ouster calibrated scale) ──────────────────
+    // Ouster reflectivity: 0-100 = Lambertian diffuse (linear),
+    // 101-255 = retroreflective (log-scaled).
+    // Gazebo retro is typically [0,1] for diffuse surfaces, >1 for retro.
     if (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f) {
-        refl_out[idx] = static_cast<uint8_t>(fminf(retro[idx] * 1000.f, 255.f));
+        float rv = retro[idx];
+        uint8_t refl;
+        if (rv <= 1.0f) {
+            // Lambertian: linear map [0,1] → [0,100]
+            refl = static_cast<uint8_t>(fminf(rv * 100.f, 100.f));
+        } else {
+            // Retroreflective: log map (1,∞) → [101,255]
+            refl = static_cast<uint8_t>(fminf(100.f + log2f(rv) * 22.f, 255.f));
+        }
+        refl_out[idx] = refl;
     } else {
         refl_out[idx] = static_cast<uint8_t>(base_reflectivity);
     }

@@ -66,17 +66,17 @@ private:
     // ── Noise model parameters (SDF-configurable) ─────────────────────────────
     // Defaults tuned to OS1 rev6 (real hardware on this platform).
     // OS1 has tighter beams and longer range than OS0, yielding better
-    // range precision and less mixed-pixel noise.  Override via SDF for
-    // OS0 (wider beams, shorter range) or OS2 (narrower beams, longer range).
+    // Validated against ISPRS accuracy assessment of OS1-64 and Ouster FW 1.13+
+    // datasheets.  Override via SDF for OS0/OS2.
     // Guarded by noise_mtx_ (written by ROS param callback, read by sim thread).
     mutable std::mutex noise_mtx_;
-    double range_noise_min_std_ = 0.002;   // 2 mm σ — OS1 repeatability ≤10 m
-    double range_noise_max_std_ = 0.008;   // 8 mm σ — OS1 at ~120 m max range
+    double range_noise_min_std_ = 0.003;   // 3 mm σ — OS1 FW 1.13+ best precision
+    double range_noise_max_std_ = 0.015;   // 15 mm σ — OS1 empirical at max range
     double signal_noise_scale_  = 1.0;     // Poisson shot noise (physically correct)
     double nearir_noise_scale_  = 1.0;     // Near-IR follows same photon statistics
-    double dropout_rate_close_  = 0.0002;  // 0.02% — OS1 near-zero at short range
-    double dropout_rate_far_    = 0.015;   // 1.5% — low-reflectivity misses at max range
-    double edge_discon_threshold_ = 0.15;  // 0.15 m — OS1 narrow beams, tighter rejection
+    double dropout_rate_close_  = 0.0005;  // 0.05% — OS1 near-zero at short range
+    double dropout_rate_far_    = 0.03;    // 3.0% — low-reflectivity misses at max range
+    double edge_discon_threshold_ = 0.15;  // 0.15 m — 1ns echo delay convention
     double base_signal_ = 800.0;           // OS1 higher photon budget than OS0
     double base_reflectivity_ = 50.0;      // Default reflectivity [0–255]
     double max_range_ = 120.0;             // Sensor max range (metres), default OS1

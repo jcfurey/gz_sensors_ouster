@@ -28,9 +28,10 @@
        ros2 param set /gz_gpu_ouster_lidar range_noise_min_std 0.005 -->
 
   <!-- Range noise: Gaussian, sigma interpolated linearly from min to max
-       with distance. Units: metres. -->
-  <!-- <range_noise_min_std>0.002</range_noise_min_std> -->
-  <!-- <range_noise_max_std>0.008</range_noise_max_std> -->
+       with distance. Also scales with reflectivity (dark surfaces = more noise).
+       Validated against ISPRS OS1-64 accuracy study. Units: metres. -->
+  <!-- <range_noise_min_std>0.003</range_noise_min_std> -->
+  <!-- <range_noise_max_std>0.015</range_noise_max_std> -->
 
   <!-- Signal intensity model: photon budget for the 1/r^2 model.
        Higher = brighter returns. OS0: ~400, OS1: ~800, OS2: ~1200. -->
@@ -47,9 +48,10 @@
   <!-- <base_reflectivity>50.0</base_reflectivity> -->
 
   <!-- Random dropouts: probability of a missed return, increasing with
-       distance. 0 = never miss, 1 = always miss. -->
-  <!-- <dropout_rate_close>0.0002</dropout_rate_close> -->
-  <!-- <dropout_rate_far>0.015</dropout_rate_far> -->
+       distance. Also scales with surface reflectivity (dark targets drop more).
+       0 = never miss, 1 = always miss. -->
+  <!-- <dropout_rate_close>0.0005</dropout_rate_close> -->
+  <!-- <dropout_rate_far>0.03</dropout_rate_far> -->
 
   <!-- Depth-discontinuity suppression: reject returns at depth edges
        where a neighbor differs by more than this threshold (metres). 0 = off. -->

@@ -109,19 +109,25 @@ All noise model parameters can be changed at runtime via
 
 ### Noise Model
 
-Defaults are tuned for OS1-64 rev6. All are dynamically reconfigurable.
+Defaults are validated against ISPRS OS1-64 accuracy assessment and
+Ouster FW 1.13+ datasheets. All are dynamically reconfigurable.
+
+Dropout and range noise also scale with surface reflectivity: dark
+surfaces (low retro) get up to 3x higher dropout and 2x more range
+noise. This matches the real sensor behavior where low-reflectivity
+targets produce weaker returns.
 
 | Parameter | Default | Range | Units | Description |
 |-----------|---------|-------|-------|-------------|
-| `range_noise_min_std` | 0.002 | >= 0 | m | Range noise sigma at 0 m. Linearly interpolated to max_std at max_range. |
-| `range_noise_max_std` | 0.008 | >= 0 | m | Range noise sigma at max_range. |
+| `range_noise_min_std` | 0.003 | >= 0 | m | Range noise sigma at 0 m. Linearly interpolated to max_std at max_range. Scales with reflectivity. |
+| `range_noise_max_std` | 0.015 | >= 0 | m | Range noise sigma at max_range. |
 | `signal_noise_scale` | 1.0 | >= 0 | -- | Poisson shot noise on signal channel. 0 = off, 1 = physical. |
 | `nearir_noise_scale` | 1.0 | >= 0 | -- | Poisson noise on near-IR channel (both packet and image). |
 | `base_signal` | 800.0 | >= 0 | photon m^2 | Baseline for 1/r^2 signal model. OS0: ~400, OS1: ~800. |
 | `base_reflectivity` | 50.0 | 0-255 | -- | Default reflectivity when no retro data available. |
-| `dropout_rate_close` | 0.0002 | 0-1 | probability | Random miss rate at 0 m. |
-| `dropout_rate_far` | 0.015 | 0-1 | probability | Random miss rate at max_range. |
-| `edge_discon_threshold` | 0.15 | >= 0 | m | Depth-discontinuity suppression threshold. 0 = off. |
+| `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
+| `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at max_range. |
+| `edge_discon_threshold` | 0.15 | >= 0 | m | Depth-discontinuity suppression threshold (1ns echo delay convention). 0 = off. |
 
 ### IMU (optional)
 
@@ -138,9 +144,9 @@ world plugin.
 
 | Sensor | `max_range` | `base_signal` | `range_noise_min_std` | `range_noise_max_std` | `dropout_rate_far` | `edge_discon_threshold` |
 |--------|-------------|---------------|-----------------------|-----------------------|--------------------|--------------------------|
-| OS0-128 | 50 | 400 | 0.003 | 0.015 | 0.03 | 0.20 |
-| OS1-64 (default) | 120 | 800 | 0.002 | 0.008 | 0.015 | 0.15 |
-| OS2-128 | 240 | 1200 | 0.002 | 0.010 | 0.02 | 0.10 |
+| OS0-128 | 50 | 400 | 0.005 | 0.020 | 0.05 | 0.20 |
+| OS1-64 (default) | 120 | 800 | 0.003 | 0.015 | 0.03 | 0.15 |
+| OS2-128 | 240 | 1200 | 0.003 | 0.020 | 0.04 | 0.10 |
 
 > `max_range` is auto-derived from the metadata JSON's `prod_line` field
 > when not explicitly set. The other values must be overridden in SDF if

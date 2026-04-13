@@ -83,9 +83,16 @@ void CudaRayProcessor::process(
         }
 
         // ── Random dropouts ──────────────────────────────────────────────────
+        // Dropout probability increases with range AND decreases with reflectivity.
         if (has_noise && (p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f)) {
             float t = std::min(d / std::max(p.max_range, 0.1f), 1.0f);
             float p_drop = p.dropout_rate_close + t * (p.dropout_rate_far - p.dropout_rate_close);
+
+            float retro_val = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.f)
+                ? retro_host[idx] : 0.5f;
+            float refl_factor = std::min(1.0f / std::max(retro_val, 0.33f), 3.0f);
+            p_drop *= refl_factor;
+
             if (uni(rng) < p_drop) {
                 range_out[idx] = 0u;
                 signal_out[idx] = 0u;
@@ -95,10 +102,15 @@ void CudaRayProcessor::process(
             }
         }
 
-        // ── Range noise ──────────────────────────────────────────────────────
+        // ── Range noise (scales with range and reflectivity) ─────────────────
         if (has_noise && (p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f)) {
             float t = std::min(d / std::max(p.max_range, 0.1f), 1.0f);
             float sigma = p.range_noise_min_std + t * (p.range_noise_max_std - p.range_noise_min_std);
+
+            float retro_val = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.f)
+                ? retro_host[idx] : 0.5f;
+            sigma *= std::min(1.0f / std::max(retro_val, 0.5f), 2.0f);
+
             d = std::max(d + norm(rng) * sigma, 0.0f);
         }
 
@@ -119,10 +131,17 @@ void CudaRayProcessor::process(
         }
         signal_out[idx] = static_cast<uint16_t>(std::clamp(sig, 0.0f, 65535.0f));
 
-        // ── Reflectivity ─────────────────────────────────────────────────────
+        // ── Reflectivity (Ouster calibrated scale) ─────────────────────────
+        // 0-100 = Lambertian (linear), 101-255 = retroreflective (log).
         if (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f) {
-            const float refl = std::min(retro_host[idx] * 1000.0f, 255.0f);
-            reflectivity_out[idx] = static_cast<uint8_t>(refl);
+            float rv = retro_host[idx];
+            uint8_t refl;
+            if (rv <= 1.0f) {
+                refl = static_cast<uint8_t>(std::min(rv * 100.0f, 100.0f));
+            } else {
+                refl = static_cast<uint8_t>(std::min(100.0f + std::log2(rv) * 22.0f, 255.0f));
+            }
+            reflectivity_out[idx] = refl;
         } else {
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
         }
