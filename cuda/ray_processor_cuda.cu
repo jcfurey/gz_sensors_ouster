@@ -5,6 +5,7 @@
 #include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
 
 #include <cuda_runtime.h>
+#include <math_constants.h>
 #include <curand_kernel.h>
 #include <cstdint>
 #include <ctime>
