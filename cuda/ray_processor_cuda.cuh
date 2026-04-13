@@ -8,6 +8,15 @@
 namespace gz_gpu_ouster_lidar {
 
 // Forward declarations for CUDA internal types — keeps .cuh out of public headers.
+void launchResampleKernel(
+    const float * d_raw_frame,
+    const float * d_beam_alt,
+    const float * d_beam_az,
+    float *       d_depth_out,
+    float *       d_retro_out,
+    const ResampleParams & rp,
+    void * stream);
+
 void launchRayProcessKernel(
     const float * d_depth,
     const float * d_retro,

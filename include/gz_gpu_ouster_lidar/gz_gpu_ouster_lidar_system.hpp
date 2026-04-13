@@ -142,9 +142,13 @@ private:
     std::vector<uint8_t>  reflectivity_buf_;
     std::vector<uint16_t> nearir_buf_;          // NEAR_IR channel for packet encoding
 
-    // Raw GpuRays callback buffer
-    std::vector<float> depth_buf_;
-    std::vector<float> retro_buf_;
+    // Raw GpuRays frame staging buffer (fast memcpy in callback, GPU-processed later)
+    std::vector<float> raw_frame_buf_;
+    int raw_frame_H_ = 0;
+    int raw_frame_W_ = 0;
+    int raw_frame_chan_ = 0;
+    std::vector<float> beam_alt_f_;     // beam_alt_angles_ as float (for GPU upload)
+    std::vector<float> beam_az_f_;      // beam_az_offsets_ as float
     std::mutex frame_mtx_;
     std::atomic<bool> frame_ready_{false};
 
@@ -186,7 +190,8 @@ private:
     void onNewFrame(const float * data, unsigned int width,
                     unsigned int height, unsigned int channels,
                     const std::string & format);
-    void encodeAndPublish(int64_t stamp_ns);
+    void encodeAndPublish(int64_t stamp_ns,
+                          const float * raw_data, int gpu_H, int gpu_W, int gpu_chan);
     void publishImages(int64_t stamp_ns);
     void publishImu(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm);

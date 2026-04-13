@@ -16,6 +16,8 @@ CudaRayProcessor::~CudaRayProcessor() = default;
 
 void CudaRayProcessor::ensureBuffers(int /*n*/) {}
 
+void CudaRayProcessor::ensureResampleBuffers(int /*raw_n*/, int /*out_n*/, int /*H*/) {}
+
 void CudaRayProcessor::ensureRandStates(int /*n*/) {}
 
 void CudaRayProcessor::process(
@@ -134,6 +136,105 @@ void CudaRayProcessor::process(
         }
         nearir_out[idx] = static_cast<uint16_t>(std::clamp(nir, 0.0f, 65535.0f));
     }
+}
+
+void CudaRayProcessor::processRaw(
+    const float * raw_host,
+    const float * beam_alt_host,
+    const float * beam_az_host,
+    const ResampleParams & rp,
+    uint32_t *    range_out,
+    uint16_t *    signal_out,
+    uint8_t *     reflectivity_out,
+    uint16_t *    nearir_out,
+    const RayProcessParams & pp)
+{
+    // CPU fallback: resample on CPU (with OpenMP if available), then process.
+    const int H = rp.H, W = rp.W;
+    const int gpu_H = rp.gpu_H, gpu_W = rp.gpu_W, gpu_chan = rp.gpu_chan;
+    const int out_n = H * W;
+
+    // Temporary depth/retro buffers.
+    std::vector<float> depth_buf(static_cast<size_t>(out_n));
+    std::vector<float> retro_buf(static_cast<size_t>(out_n), 0.0f);
+
+    #pragma omp parallel for schedule(static) if(out_n > 65536)
+    for (int idx = 0; idx < out_n; ++idx) {
+        const int beam = idx / W;
+        const int col  = idx % W;
+
+        const float beam_angle = beam_alt_host[beam];
+        const float v_frac = (beam_angle - rp.min_alt) / rp.v_range;
+        const float row_f  = v_frac * (gpu_H - 1);
+        const int row_lo   = std::clamp(static_cast<int>(std::floor(row_f)), 0, gpu_H - 1);
+        const int row_hi   = std::clamp(row_lo + 1, 0, gpu_H - 1);
+        const float v_alpha = static_cast<float>(row_f - row_lo);
+
+        const float az_offset_cols = beam_az_host[beam] / rp.deg_per_col;
+        float col_wrapped = std::fmod(static_cast<float>(col) + az_offset_cols + gpu_W,
+                                      static_cast<float>(gpu_W));
+        if (col_wrapped < 0.f) col_wrapped += gpu_W;
+        const int col_lo = static_cast<int>(std::floor(col_wrapped)) % gpu_W;
+        const int col_hi = (col_lo + 1) % gpu_W;
+        const float h_alpha = col_wrapped - std::floor(col_wrapped);
+
+        const int idx_00 = (row_lo * gpu_W + col_lo) * gpu_chan;
+        const int idx_01 = (row_lo * gpu_W + col_hi) * gpu_chan;
+        const int idx_10 = (row_hi * gpu_W + col_lo) * gpu_chan;
+        const int idx_11 = (row_hi * gpu_W + col_hi) * gpu_chan;
+
+        const float d00 = raw_host[idx_00], d01 = raw_host[idx_01];
+        const float d10 = raw_host[idx_10], d11 = raw_host[idx_11];
+        const bool v00 = !std::isinf(d00), v01 = !std::isinf(d01);
+        const bool v10 = !std::isinf(d10), v11 = !std::isinf(d11);
+        const int n_valid = v00 + v01 + v10 + v11;
+
+        float depth;
+        if (n_valid == 0) {
+            depth = std::numeric_limits<float>::infinity();
+        } else if (n_valid == 4) {
+            const float d_top = d00 * (1.f - h_alpha) + d01 * h_alpha;
+            const float d_bot = d10 * (1.f - h_alpha) + d11 * h_alpha;
+            depth = d_top * (1.f - v_alpha) + d_bot * v_alpha;
+        } else {
+            float sum = 0.f;
+            if (v00) sum += d00; if (v01) sum += d01;
+            if (v10) sum += d10; if (v11) sum += d11;
+            depth = sum / static_cast<float>(n_valid);
+        }
+
+        if (std::isfinite(depth) && rp.beam_origin_m > 0.f) {
+            const float elev_rad = beam_angle * 3.14159265358979f / 180.f;
+            depth = std::max(0.f, depth - rp.beam_origin_m * std::cos(elev_rad));
+        }
+
+        const int m_id = (rp.half_W - col + W) % W;
+        const int ouster_idx = beam * W + m_id;
+        depth_buf[static_cast<size_t>(ouster_idx)] = depth;
+
+        if (gpu_chan >= 2) {
+            const float r00 = raw_host[idx_00+1], r01 = raw_host[idx_01+1];
+            const float r10 = raw_host[idx_10+1], r11 = raw_host[idx_11+1];
+            float retro;
+            if (n_valid == 4) {
+                const float r_top = r00*(1.f-h_alpha) + r01*h_alpha;
+                const float r_bot = r10*(1.f-h_alpha) + r11*h_alpha;
+                retro = r_top*(1.f-v_alpha) + r_bot*v_alpha;
+            } else if (n_valid > 0) {
+                float sum = 0.f;
+                if (v00) sum += r00; if (v01) sum += r01;
+                if (v10) sum += r10; if (v11) sum += r11;
+                retro = sum / static_cast<float>(n_valid);
+            } else {
+                retro = 0.f;
+            }
+            retro_buf[static_cast<size_t>(ouster_idx)] = retro;
+        }
+    }
+
+    // Feed into existing noise pipeline.
+    process(depth_buf.data(), retro_buf.data(),
+            range_out, signal_out, reflectivity_out, nearir_out, pp);
 }
 
 }  // namespace gz_gpu_ouster_lidar

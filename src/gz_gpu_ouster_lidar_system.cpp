@@ -206,8 +206,15 @@ void GzGpuOusterLidarSystem::Configure(
     signal_buf_.resize(static_cast<size_t>(n), 0);
     reflectivity_buf_.resize(static_cast<size_t>(n), 50);
     nearir_buf_.resize(static_cast<size_t>(n), 0);
-    depth_buf_.resize(static_cast<size_t>(n), 0.0f);
-    retro_buf_.resize(static_cast<size_t>(n), 0.0f);
+    // Convert beam angles to float for GPU upload.
+    beam_alt_f_.resize(beam_alt_angles_.size());
+    beam_az_f_.resize(beam_az_offsets_.size());
+    for (size_t i = 0; i < beam_alt_angles_.size(); ++i)
+        beam_alt_f_[i] = static_cast<float>(beam_alt_angles_[i]);
+    for (size_t i = 0; i < beam_az_offsets_.size(); ++i)
+        beam_az_f_[i] = static_cast<float>(beam_az_offsets_[i]);
+    // Pad beam_az_f_ to H if shorter (some metadata omits azimuth offsets).
+    beam_az_f_.resize(static_cast<size_t>(H_), 0.0f);
 
     // Initialise ROS 2 node and publishers
     initRosInterface();
@@ -639,17 +646,26 @@ void GzGpuOusterLidarSystem::PostUpdate(
 
     // ── Process any pending frame ────────────────────────────────────────────
     bool have_frame = false;
+    std::vector<float> local_raw;
+    int local_raw_H = 0, local_raw_W = 0, local_raw_chan = 0;
     {
         std::lock_guard<std::mutex> lk(frame_mtx_);
         have_frame = frame_ready_;
         frame_ready_ = false;
+        if (have_frame) {
+            local_raw.swap(raw_frame_buf_);
+            local_raw_H    = raw_frame_H_;
+            local_raw_W    = raw_frame_W_;
+            local_raw_chan  = raw_frame_chan_;
+        }
     }
 
-    if (have_frame) {
+    if (have_frame && !local_raw.empty()) {
         const auto stamp_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 info.simTime).count();
-        encodeAndPublish(stamp_ns);
+        encodeAndPublish(stamp_ns, local_raw.data(),
+                         local_raw_H, local_raw_W, local_raw_chan);
     }
 
     // ── Publish IMU at configured rate ──────────────────────────────────────
@@ -665,158 +681,28 @@ void GzGpuOusterLidarSystem::onNewFrame(
     unsigned int height, unsigned int channels,
     const std::string & /*format*/)
 {
-    // GpuRays returns width × height × channels floats.
-    // Channels: [0]=depth, [1]=retro, [2]=unused
-    // We need to resample vertical from the uniform grid to exact beam angles.
+    // Fast path: just memcpy the raw GpuRays buffer into a staging area.
+    // Bilinear resampling is done later on the GPU (CUDA) or CPU (fallback)
+    // in encodeAndPublish(), avoiding heavy computation under this lock.
 
     if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0) return;
 
-    const int gpu_H      = static_cast<int>(height);
-    const int gpu_W      = static_cast<int>(width);
-    const int gpu_chan    = static_cast<int>(channels);
+    const size_t n = static_cast<size_t>(width) * height * channels;
 
     std::lock_guard<std::mutex> lk(frame_mtx_);
-
-    // Compute the vertical angle range of the GpuRays sensor
-    double min_alt = *std::min_element(beam_alt_angles_.begin(), beam_alt_angles_.end());
-    double max_alt = *std::max_element(beam_alt_angles_.begin(), beam_alt_angles_.end());
-    constexpr double margin_deg = 1.0;
-    min_alt -= margin_deg;
-    max_alt += margin_deg;
-
-    const double v_range = max_alt - min_alt;  // degrees
-    if (v_range <= 0.0) return;  // degenerate beam angles
-
-    // For each Ouster beam (row), find the depth at its exact elevation AND
-    // azimuth angle by 2D bilinear interpolation of the uniform GpuRays grid.
-    //
-    // Real Ouster hardware has:
-    //   - Per-beam elevation angles (beam_altitude_angles)
-    //   - Per-beam azimuth offsets  (beam_azimuth_angles) — typically −3° to −3.3°
-    //   - Beam origin offset (lidar_origin_to_beam_origin_mm) — range is measured
-    //     from the beam emitter, not from sensor_frame origin
-    //
-    // GpuRays measures range from the sensor origin.  We correct for the beam
-    // origin offset so that the encoded range matches what real hardware reports.
-
-    const int half_W = W_ / 2;  // azimuth remapping offset
-    const double deg_per_col = 360.0 / static_cast<double>(W_);
-    const double beam_origin_m = beam_origin_mm_ / 1000.0;
-    const int beam_count = std::min(H_, static_cast<int>(beam_alt_angles_.size()));
-    const int col_count = std::min(W_, gpu_W);
-
-    // Outer loop over beams is parallelised with OpenMP.  Each beam writes
-    // to a distinct row slice of depth_buf_/retro_buf_, so no data races.
-    #pragma omp parallel for schedule(static) if(beam_count * col_count > 65536)
-    for (int beam = 0; beam < beam_count; ++beam) {
-        const double beam_angle = beam_alt_angles_[static_cast<size_t>(beam)];
-
-        // Fractional row in the GpuRays grid (vertical interpolation).
-        // GpuRays row 0 = VerticalAngleMin (bottom), row gpu_H-1 = VerticalAngleMax (top).
-        const double v_frac = (beam_angle - min_alt) / v_range;
-        const double row_f = v_frac * (gpu_H - 1);
-        const int row_lo = std::clamp(static_cast<int>(std::floor(row_f)), 0, gpu_H - 1);
-        const int row_hi = std::clamp(row_lo + 1, 0, gpu_H - 1);
-        const float v_alpha = static_cast<float>(row_f - row_lo);
-
-        // Per-beam azimuth offset → fractional column shift in GpuRays grid.
-        const double az_offset_deg = (beam < static_cast<int>(beam_az_offsets_.size()))
-            ? beam_az_offsets_[static_cast<size_t>(beam)] : 0.0;
-        const double az_offset_cols = az_offset_deg / deg_per_col;
-
-        // Precompute cos(elevation) for beam origin correction.
-        // Real hardware measures range from the beam emitter, offset along
-        // the beam axis by lidar_origin_to_beam_origin_mm from sensor origin.
-        const double elev_rad = beam_angle * GZ_PI / 180.0;
-        const float beam_origin_correction =
-            static_cast<float>(beam_origin_m * std::cos(elev_rad));
-
-        for (int col = 0; col < col_count; ++col) {
-            // Apply per-beam azimuth offset to column lookup.
-            const double col_f = static_cast<double>(col) + az_offset_cols;
-
-            // Wrap and clamp to valid GpuRays columns (azimuth is cyclic).
-            double col_wrapped = std::fmod(col_f + gpu_W, static_cast<double>(gpu_W));
-            if (col_wrapped < 0) col_wrapped += gpu_W;
-            const int col_lo = static_cast<int>(std::floor(col_wrapped)) % gpu_W;
-            const int col_hi = (col_lo + 1) % gpu_W;
-            const float h_alpha = static_cast<float>(col_wrapped - std::floor(col_wrapped));
-
-            // 2D bilinear interpolation: four corner samples
-            const int idx_00 = (row_lo * gpu_W + col_lo) * gpu_chan;
-            const int idx_01 = (row_lo * gpu_W + col_hi) * gpu_chan;
-            const int idx_10 = (row_hi * gpu_W + col_lo) * gpu_chan;
-            const int idx_11 = (row_hi * gpu_W + col_hi) * gpu_chan;
-
-            const float d00 = data[idx_00];
-            const float d01 = data[idx_01];
-            const float d10 = data[idx_10];
-            const float d11 = data[idx_11];
-
-            // Count valid (non-inf) samples for robust interpolation.
-            float depth;
-            const bool v00 = !std::isinf(d00), v01 = !std::isinf(d01);
-            const bool v10 = !std::isinf(d10), v11 = !std::isinf(d11);
-            const int n_valid = v00 + v01 + v10 + v11;
-
-            if (n_valid == 0) {
-                depth = std::numeric_limits<float>::infinity();
-            } else if (n_valid == 4) {
-                // Full 2D bilinear
-                const float d_top = d00 * (1.0f - h_alpha) + d01 * h_alpha;
-                const float d_bot = d10 * (1.0f - h_alpha) + d11 * h_alpha;
-                depth = d_top * (1.0f - v_alpha) + d_bot * v_alpha;
-            } else {
-                // Partial validity — average only valid samples
-                float sum = 0.0f;
-                if (v00) sum += d00;
-                if (v01) sum += d01;
-                if (v10) sum += d10;
-                if (v11) sum += d11;
-                depth = sum / static_cast<float>(n_valid);
-            }
-
-            // Apply beam origin correction: convert sensor-origin range to
-            // beam-origin range (what real Ouster hardware reports).
-            if (!std::isinf(depth) && beam_origin_m > 0.0) {
-                depth = std::max(0.0f, depth - beam_origin_correction);
-            }
-
-            // Azimuth remapping: Gazebo col 0 = −π, Ouster m_id 0 = encoder 0 (+X_lidar).
-            const int m_id = (half_W - col + W_) % W_;
-            const int ouster_idx = beam * W_ + m_id;
-            depth_buf_[static_cast<size_t>(ouster_idx)] = depth;
-
-            // Retro (intensity) channel — same 2D bilinear
-            if (gpu_chan >= 2) {
-                const float r00 = data[idx_00 + 1], r01 = data[idx_01 + 1];
-                const float r10 = data[idx_10 + 1], r11 = data[idx_11 + 1];
-                if (n_valid == 4) {
-                    const float r_top = r00 * (1.0f - h_alpha) + r01 * h_alpha;
-                    const float r_bot = r10 * (1.0f - h_alpha) + r11 * h_alpha;
-                    retro_buf_[static_cast<size_t>(ouster_idx)] =
-                        r_top * (1.0f - v_alpha) + r_bot * v_alpha;
-                } else if (n_valid > 0) {
-                    float sum = 0.0f;
-                    if (v00) sum += r00;
-                    if (v01) sum += r01;
-                    if (v10) sum += r10;
-                    if (v11) sum += r11;
-                    retro_buf_[static_cast<size_t>(ouster_idx)] =
-                        sum / static_cast<float>(n_valid);
-                } else {
-                    retro_buf_[static_cast<size_t>(ouster_idx)] = 0.0f;
-                }
-            }
-        }
-    }
-
+    raw_frame_buf_.resize(n);
+    std::memcpy(raw_frame_buf_.data(), data, n * sizeof(float));
+    raw_frame_H_    = static_cast<int>(height);
+    raw_frame_W_    = static_cast<int>(width);
+    raw_frame_chan_ = static_cast<int>(channels);
     frame_ready_ = true;
 }
 
 // ── Encode depth → Ouster packets ───────────────────────────────────────────
 
-void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
+void GzGpuOusterLidarSystem::encodeAndPublish(
+    int64_t stamp_ns,
+    const float * raw_data, int gpu_H, int gpu_W, int gpu_chan)
 {
     if (stamp_ns <= 0) return;
     if (!pw_ || pkt_buf_.empty()) return;
@@ -841,29 +727,53 @@ void GzGpuOusterLidarSystem::encodeAndPublish(int64_t stamp_ns)
         snap_max_range            = max_range_;
     }
 
-    // ── CUDA post-processing ─────────────────────────────────────────────────
-    RayProcessParams params;
-    params.H = H_;
-    params.W = W_;
-    params.base_signal = static_cast<float>(snap_base_signal);
-    params.base_reflectivity = static_cast<float>(snap_base_reflectivity);
-    params.range_noise_min_std = static_cast<float>(snap_range_noise_min_std);
-    params.range_noise_max_std = static_cast<float>(snap_range_noise_max_std);
-    params.max_range = static_cast<float>(snap_max_range);
-    params.signal_noise_scale = static_cast<float>(snap_signal_noise_scale);
-    params.nearir_noise_scale = static_cast<float>(snap_nearir_noise_scale);
-    params.dropout_rate_close = static_cast<float>(snap_dropout_rate_close);
-    params.dropout_rate_far = static_cast<float>(snap_dropout_rate_far);
-    params.edge_discon_threshold = static_cast<float>(snap_edge_discon_threshold);
+    // ── Resample params ──────────────────────────────────────────────────────
+    double min_alt = *std::min_element(beam_alt_angles_.begin(), beam_alt_angles_.end());
+    double max_alt = *std::max_element(beam_alt_angles_.begin(), beam_alt_angles_.end());
+    constexpr double margin_deg = 1.0;
+    min_alt -= margin_deg;
+    max_alt += margin_deg;
+    const double v_range = max_alt - min_alt;
+    if (v_range <= 0.0) return;
 
-    cuda_processor_->process(
-        depth_buf_.data(),
-        retro_buf_.data(),
+    ResampleParams rp;
+    rp.H = H_;
+    rp.W = W_;
+    rp.gpu_H = gpu_H;
+    rp.gpu_W = gpu_W;
+    rp.gpu_chan = gpu_chan;
+    rp.min_alt = static_cast<float>(min_alt);
+    rp.v_range = static_cast<float>(v_range);
+    rp.deg_per_col = 360.0f / static_cast<float>(W_);
+    rp.beam_origin_m = static_cast<float>(beam_origin_mm_ / 1000.0);
+    rp.half_W = W_ / 2;
+
+    // ── Noise params ─────────────────────────────────────────────────────────
+    RayProcessParams pp;
+    pp.H = H_;
+    pp.W = W_;
+    pp.base_signal = static_cast<float>(snap_base_signal);
+    pp.base_reflectivity = static_cast<float>(snap_base_reflectivity);
+    pp.range_noise_min_std = static_cast<float>(snap_range_noise_min_std);
+    pp.range_noise_max_std = static_cast<float>(snap_range_noise_max_std);
+    pp.max_range = static_cast<float>(snap_max_range);
+    pp.signal_noise_scale = static_cast<float>(snap_signal_noise_scale);
+    pp.nearir_noise_scale = static_cast<float>(snap_nearir_noise_scale);
+    pp.dropout_rate_close = static_cast<float>(snap_dropout_rate_close);
+    pp.dropout_rate_far = static_cast<float>(snap_dropout_rate_far);
+    pp.edge_discon_threshold = static_cast<float>(snap_edge_discon_threshold);
+
+    // ── GPU pipeline: resample → noise → channel outputs ─────────────────────
+    cuda_processor_->processRaw(
+        raw_data,
+        beam_alt_f_.data(),
+        beam_az_f_.data(),
+        rp,
         range_buf_.data(),
         signal_buf_.data(),
         reflectivity_buf_.data(),
         nearir_buf_.data(),
-        params);
+        pp);
 
     // ── Build packets ────────────────────────────────────────────────────────
     const int n_packets = W_ / cpp_;

@@ -38,6 +38,133 @@ __global__ void initRandStates(curandState * states, unsigned long seed, int n)
     }
 }
 
+/// Resample GpuRays uniform grid → exact Ouster beam geometry.
+/// One thread per output pixel (beam × col).  Performs 2D bilinear
+/// interpolation with azimuth wrapping and beam-origin correction.
+__global__ void resampleKernel(
+    const float * __restrict__ raw,          // gpu_H × gpu_W × gpu_chan
+    const float * __restrict__ beam_alt,     // H beam altitude angles (degrees)
+    const float * __restrict__ beam_az,      // H beam azimuth offsets (degrees)
+    float * __restrict__       depth_out,    // H × W
+    float * __restrict__       retro_out,    // H × W
+    int H, int W,
+    int gpu_H, int gpu_W, int gpu_chan,
+    float min_alt, float v_range,
+    float deg_per_col, float beam_origin_m,
+    int half_W)
+{
+    const int n = H * W;
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    const int beam = tid / W;
+    const int col  = tid % W;
+
+    const float beam_angle = beam_alt[beam];
+
+    // Fractional row in GpuRays grid (vertical interpolation).
+    const float v_frac = (beam_angle - min_alt) / v_range;
+    const float row_f  = v_frac * (gpu_H - 1);
+    const int row_lo   = max(min(__float2int_rd(row_f), gpu_H - 1), 0);
+    const int row_hi   = min(row_lo + 1, gpu_H - 1);
+    const float v_alpha = row_f - row_lo;
+
+    // Per-beam azimuth offset → fractional column shift.
+    const float az_offset_cols = beam_az[beam] / deg_per_col;
+    float col_wrapped = fmodf(static_cast<float>(col) + az_offset_cols + gpu_W,
+                              static_cast<float>(gpu_W));
+    if (col_wrapped < 0.f) col_wrapped += gpu_W;
+    const int col_lo = __float2int_rd(col_wrapped) % gpu_W;
+    const int col_hi = (col_lo + 1) % gpu_W;
+    const float h_alpha = col_wrapped - floorf(col_wrapped);
+
+    // 2D bilinear: four corner depth samples.
+    const int idx_00 = (row_lo * gpu_W + col_lo) * gpu_chan;
+    const int idx_01 = (row_lo * gpu_W + col_hi) * gpu_chan;
+    const int idx_10 = (row_hi * gpu_W + col_lo) * gpu_chan;
+    const int idx_11 = (row_hi * gpu_W + col_hi) * gpu_chan;
+
+    const float d00 = raw[idx_00], d01 = raw[idx_01];
+    const float d10 = raw[idx_10], d11 = raw[idx_11];
+
+    const bool v00 = !isinf(d00), v01 = !isinf(d01);
+    const bool v10 = !isinf(d10), v11 = !isinf(d11);
+    const int n_valid = v00 + v01 + v10 + v11;
+
+    float depth;
+    if (n_valid == 0) {
+        depth = CUDART_INF_F;
+    } else if (n_valid == 4) {
+        const float d_top = d00 * (1.f - h_alpha) + d01 * h_alpha;
+        const float d_bot = d10 * (1.f - h_alpha) + d11 * h_alpha;
+        depth = d_top * (1.f - v_alpha) + d_bot * v_alpha;
+    } else {
+        float sum = 0.f;
+        if (v00) sum += d00;
+        if (v01) sum += d01;
+        if (v10) sum += d10;
+        if (v11) sum += d11;
+        depth = sum / static_cast<float>(n_valid);
+    }
+
+    // Beam origin correction.
+    if (isfinite(depth) && beam_origin_m > 0.f) {
+        const float elev_rad = beam_angle * 3.14159265358979f / 180.f;
+        depth = fmaxf(0.f, depth - beam_origin_m * cosf(elev_rad));
+    }
+
+    // Azimuth remapping: Gazebo col 0 = −π, Ouster m_id 0 = encoder 0.
+    const int m_id = (half_W - col + W) % W;
+    const int ouster_idx = beam * W + m_id;
+    depth_out[ouster_idx] = depth;
+
+    // Retro channel — same bilinear.
+    if (gpu_chan >= 2) {
+        const float r00 = raw[idx_00 + 1], r01 = raw[idx_01 + 1];
+        const float r10 = raw[idx_10 + 1], r11 = raw[idx_11 + 1];
+        float retro;
+        if (n_valid == 4) {
+            const float r_top = r00 * (1.f - h_alpha) + r01 * h_alpha;
+            const float r_bot = r10 * (1.f - h_alpha) + r11 * h_alpha;
+            retro = r_top * (1.f - v_alpha) + r_bot * v_alpha;
+        } else if (n_valid > 0) {
+            float sum = 0.f;
+            if (v00) sum += r00;
+            if (v01) sum += r01;
+            if (v10) sum += r10;
+            if (v11) sum += r11;
+            retro = sum / static_cast<float>(n_valid);
+        } else {
+            retro = 0.f;
+        }
+        retro_out[ouster_idx] = retro;
+    } else {
+        retro_out[ouster_idx] = 0.f;
+    }
+}
+
+// ── Resample launcher ────────────────────────────────────────────────────────
+
+void launchResampleKernel(
+    const float * d_raw_frame,
+    const float * d_beam_alt,
+    const float * d_beam_az,
+    float *       d_depth_out,
+    float *       d_retro_out,
+    const ResampleParams & rp,
+    void * stream)
+{
+    const int n = rp.H * rp.W;
+    const int grid = (n + kBlock - 1) / kBlock;
+    resampleKernel<<<grid, kBlock, 0, static_cast<cudaStream_t>(stream)>>>(
+        d_raw_frame, d_beam_alt, d_beam_az,
+        d_depth_out, d_retro_out,
+        rp.H, rp.W, rp.gpu_H, rp.gpu_W, rp.gpu_chan,
+        rp.min_alt, rp.v_range,
+        rp.deg_per_col, rp.beam_origin_m, rp.half_W);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 /// Process depth + retro → range_mm, signal, reflectivity.
 ///
 /// Each thread handles one pixel (beam × column).
@@ -230,6 +357,9 @@ CudaRayProcessor::~CudaRayProcessor()
     if (d_signal_)      cudaFree(d_signal_);
     if (d_refl_)        cudaFree(d_refl_);
     if (d_nearir_)      cudaFree(d_nearir_);
+    if (d_raw_frame_)   cudaFree(d_raw_frame_);
+    if (d_beam_alt_)    cudaFree(d_beam_alt_);
+    if (d_beam_az_)     cudaFree(d_beam_az_);
     if (d_rand_states_) cudaFree(d_rand_states_);
     if (stream_)        cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
 }
@@ -328,6 +458,107 @@ void CudaRayProcessor::process(
     CUDA_CHECK(cudaMemcpyAsync(
         nearir_out, d_nearir_,
         static_cast<size_t>(n) * sizeof(uint16_t),
+        cudaMemcpyDeviceToHost, stream));
+
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void CudaRayProcessor::ensureResampleBuffers(int raw_n, int out_n, int H)
+{
+    auto stream = static_cast<cudaStream_t>(stream_);
+    auto realloc = [&](void * & ptr, size_t bytes) {
+        if (ptr) { CUDA_CHECK(cudaFree(ptr)); ptr = nullptr; }
+        CUDA_CHECK(cudaMalloc(&ptr, bytes));
+    };
+
+    if (raw_n > raw_buf_n_) {
+        realloc(d_raw_frame_, static_cast<size_t>(raw_n) * sizeof(float));
+        raw_buf_n_ = raw_n;
+    }
+    if (H > beam_buf_n_) {
+        realloc(d_beam_alt_, static_cast<size_t>(H) * sizeof(float));
+        realloc(d_beam_az_,  static_cast<size_t>(H) * sizeof(float));
+        beam_buf_n_ = H;
+    }
+    // d_depth_ and d_retro_ are ensured by ensureBuffers(out_n).
+    (void)out_n;
+}
+
+void CudaRayProcessor::processRaw(
+    const float * raw_host,
+    const float * beam_alt_host,
+    const float * beam_az_host,
+    const ResampleParams & rp,
+    uint32_t *    range_out,
+    uint16_t *    signal_out,
+    uint8_t *     reflectivity_out,
+    uint16_t *    nearir_out,
+    const RayProcessParams & pp)
+{
+    const int raw_n = rp.gpu_H * rp.gpu_W * rp.gpu_chan;
+    const int out_n = rp.H * rp.W;
+    auto stream = static_cast<cudaStream_t>(stream_);
+
+    ensureBuffers(out_n);
+    ensureResampleBuffers(raw_n, out_n, rp.H);
+
+    bool need_rand = pp.range_noise_min_std > 0.f || pp.range_noise_max_std > 0.f ||
+                     pp.signal_noise_scale > 0.f || pp.nearir_noise_scale > 0.f ||
+                     pp.dropout_rate_close > 0.f || pp.dropout_rate_far > 0.f ||
+                     pp.edge_discon_threshold > 0.f;
+    if (need_rand) ensureRandStates(out_n);
+
+    // H2D: raw GpuRays frame + beam angles
+    CUDA_CHECK(cudaMemcpyAsync(
+        d_raw_frame_, raw_host,
+        static_cast<size_t>(raw_n) * sizeof(float),
+        cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        d_beam_alt_, beam_alt_host,
+        static_cast<size_t>(rp.H) * sizeof(float),
+        cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        d_beam_az_, beam_az_host,
+        static_cast<size_t>(rp.H) * sizeof(float),
+        cudaMemcpyHostToDevice, stream));
+
+    // Kernel 1: resample → d_depth_, d_retro_ (stays on GPU)
+    launchResampleKernel(
+        static_cast<const float *>(d_raw_frame_),
+        static_cast<const float *>(d_beam_alt_),
+        static_cast<const float *>(d_beam_az_),
+        static_cast<float *>(d_depth_),
+        static_cast<float *>(d_retro_),
+        rp, stream_);
+
+    // Kernel 2: noise + channel synthesis (reads d_depth_/d_retro_ on GPU)
+    launchRayProcessKernel(
+        static_cast<const float *>(d_depth_),
+        static_cast<const float *>(d_retro_),
+        static_cast<uint32_t *>(d_range_),
+        static_cast<uint16_t *>(d_signal_),
+        static_cast<uint8_t *>(d_refl_),
+        static_cast<uint16_t *>(d_nearir_),
+        pp,
+        need_rand ? d_rand_states_ : nullptr,
+        stream_);
+
+    // D2H: final results only
+    CUDA_CHECK(cudaMemcpyAsync(
+        range_out, d_range_,
+        static_cast<size_t>(out_n) * sizeof(uint32_t),
+        cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        signal_out, d_signal_,
+        static_cast<size_t>(out_n) * sizeof(uint16_t),
+        cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        reflectivity_out, d_refl_,
+        static_cast<size_t>(out_n) * sizeof(uint8_t),
+        cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(
+        nearir_out, d_nearir_,
+        static_cast<size_t>(out_n) * sizeof(uint16_t),
         cudaMemcpyDeviceToHost, stream));
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
