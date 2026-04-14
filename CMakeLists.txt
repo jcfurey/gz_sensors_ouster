@@ -48,10 +48,16 @@ else()
 endif()
 
 # ── Ouster SDK headers (same pattern as gz_ouster_packet_bridge) ──────────────
+# Try drivers/ouster-ros/ first, then drivers/lidar/ouster/ (alternate workspace layout).
 set(_ouster_sdk_src "${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/ouster-ros/ouster-ros/ouster-sdk")
 if(NOT EXISTS "${_ouster_sdk_src}/ouster_client/include")
+  set(_ouster_sdk_src "${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/lidar/ouster/ouster-ros/ouster-sdk")
+endif()
+if(NOT EXISTS "${_ouster_sdk_src}/ouster_client/include")
   message(FATAL_ERROR
-    "Ouster SDK not found at ${_ouster_sdk_src}. "
+    "Ouster SDK not found. Searched:\n"
+    "  ${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/ouster-ros/ouster-ros/ouster-sdk\n"
+    "  ${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/lidar/ouster/ouster-ros/ouster-sdk\n"
     "Ensure ouster-ros submodule is initialized: git submodule update --init --recursive")
 endif()
 
