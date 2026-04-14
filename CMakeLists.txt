@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(gz_gpu_ouster_lidar)
+project(gz_sensors_ouster)
 
 set(CMAKE_CXX_STANDARD 17)
 add_compile_options(-Wall -Wextra -Wpedantic)
@@ -105,5 +105,45 @@ install(TARGETS ${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  # Test: noise model (CPU fallback path)
+  ament_add_gtest(test_noise_model test/test_noise_model.cpp)
+  target_link_libraries(test_noise_model gz_gpu_ouster_lidar_cuda)
+
+  # Test: parameter validation
+  ament_add_gtest(test_parameter_validation test/test_parameter_validation.cpp)
+  target_include_directories(test_parameter_validation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    "${_ouster_sdk_src}/ouster_client/include"
+  )
+  target_link_libraries(test_parameter_validation
+    gz_gpu_ouster_lidar_cuda
+  )
+  ament_target_dependencies(test_parameter_validation
+    rclcpp
+    ouster_sensor_msgs
+    ouster_ros
+  )
+
+  # Test: metadata parsing
+  ament_add_gtest(test_metadata_parsing test/test_metadata_parsing.cpp)
+  target_include_directories(test_metadata_parsing PRIVATE
+    "${_ouster_sdk_src}/ouster_client/include"
+  )
+  ament_target_dependencies(test_metadata_parsing
+    ouster_ros
+  )
+  target_compile_definitions(test_metadata_parsing PRIVATE
+    TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata"
+  )
+
+  # Test: bilinear resampling (CPU fallback)
+  ament_add_gtest(test_resample test/test_resample.cpp)
+  target_link_libraries(test_resample gz_gpu_ouster_lidar_cuda)
+endif()
 
 ament_package()

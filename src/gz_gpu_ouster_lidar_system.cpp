@@ -67,6 +67,10 @@ GzGpuOusterLidarSystem::GzGpuOusterLidarSystem() = default;
 
 GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
 {
+    render_conn_.reset();
+    frame_conn_.reset();
+    DestroyGpuRays();
+
     shutdown_.store(true, std::memory_order_release);
     drain_cv_.notify_all();
     if (drain_thread_.joinable()) {
@@ -107,6 +111,9 @@ void GzGpuOusterLidarSystem::Configure(
     }
     if (sdf->HasElement("lidar_hz")) {
         lidar_hz_ = sdf->Get<double>("lidar_hz");
+    }
+    if (sdf->HasElement("visibility_mask")) {
+        visibility_mask_ = sdf->Get<uint32_t>("visibility_mask");
     }
 
     // Noise model SDF parameters (all optional, with sensible Ouster defaults)
@@ -436,8 +443,13 @@ void GzGpuOusterLidarSystem::initRosInterface()
         ros_executor_.spin();
     });
 
-    // Publish initial metadata AFTER executor is spinning (Zenoh requires
-    // the executor to process outgoing messages).
+    // Publish initial metadata AFTER executor is spinning.  rmw_zenoh_cpp
+    // requires the executor thread to pump outgoing control messages before
+    // publish() will actually deliver data to peers.  100 ms is enough for
+    // the executor to complete its first spin cycle and for Zenoh peer
+    // discovery to settle on a local router (zenohd runs on the same host).
+    // This is a one-time startup cost; subsequent metadata republishing is
+    // handled in OnRender() with a subscriber-count check.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     std_msgs::msg::String meta_msg;
     meta_msg.data = metadata_str_;
@@ -466,6 +478,7 @@ void GzGpuOusterLidarSystem::OnRender()
             if (metadata_pub_count_ <= 5 || metadata_pub_count_ % ticks_per_sec == 0) {
                 std_msgs::msg::String meta_msg;
                 meta_msg.data = metadata_str_;
+                std::lock_guard<std::mutex> pub_lk(publish_mtx_);
                 meta_pub_->publish(meta_msg);
             }
             // Only stop after subscriber detected AND we've sent enough for Zenoh to settle
@@ -474,6 +487,12 @@ void GzGpuOusterLidarSystem::OnRender()
                 RCLCPP_INFO(kLogger, "metadata delivered to os_cloud (after %d publishes)",
                     metadata_pub_count_);
             }
+        }
+
+        // Skip expensive GPU raycasts when no lidar outputs are consumed.
+        // IMU publishing runs independently in PostUpdate().
+        if (!this->HasActiveLidarSubscribers()) {
+            return;
         }
 
         // ── Throttle to lidar_hz_ ───────────────────────────────────────────
@@ -547,6 +566,10 @@ void GzGpuOusterLidarSystem::OnRender()
 
     gpuRays->SetNearClipPlane(0.3);
     gpuRays->SetFarClipPlane(max_range_);
+    // Preserve out-of-range samples as +/-inf instead of clamping.
+    // This matches upstream GpuLidarSensor behavior and keeps miss handling explicit.
+    gpuRays->SetClamp(false);
+    gpuRays->SetVisibilityMask(visibility_mask_);
 
     // Attach to scene root; world pose is set from ECM each frame in OnRender().
     auto root = scene->RootVisual();
@@ -687,6 +710,7 @@ void GzGpuOusterLidarSystem::onNewFrame(
     // Bilinear resampling is done later on the GPU (CUDA) or CPU (fallback)
     // in encodeAndPublish(), avoiding heavy computation under this lock.
 
+    if (!data || width == 0 || height == 0 || channels == 0) return;
     if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0) return;
 
     const size_t n = static_cast<size_t>(width) * height * channels;
@@ -868,6 +892,7 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
             const uint32_t r = (range_buf_[i] + 2u) >> 2;
             pixels[i] = (r > 65535u) ? 0u : static_cast<uint16_t>(r);
         }
+        std::lock_guard<std::mutex> pub_lk(publish_mtx_);
         range_image_pub_->publish(std::move(msg));
     }
 
@@ -875,6 +900,7 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
     if (signal_image_pub_->get_subscription_count() > 0) {
         auto msg = make_image();
         std::memcpy(msg.data.data(), signal_buf_.data(), n * sizeof(uint16_t));
+        std::lock_guard<std::mutex> pub_lk(publish_mtx_);
         signal_image_pub_->publish(std::move(msg));
     }
 
@@ -885,6 +911,7 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
         for (size_t i = 0; i < n; ++i) {
             pixels[i] = static_cast<uint16_t>(reflectivity_buf_[i]) * 257u;
         }
+        std::lock_guard<std::mutex> pub_lk(publish_mtx_);
         reflec_image_pub_->publish(std::move(msg));
     }
 
@@ -892,6 +919,7 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
     if (nearir_image_pub_->get_subscription_count() > 0) {
         auto msg = make_image();
         std::memcpy(msg.data.data(), nearir_buf_.data(), n * sizeof(uint16_t));
+        std::lock_guard<std::mutex> pub_lk(publish_mtx_);
         nearir_image_pub_->publish(std::move(msg));
     }
 }
@@ -953,7 +981,10 @@ void GzGpuOusterLidarSystem::publishImu(
 
         ouster_sensor_msgs::msg::PacketMsg pkt;
         pkt.buf.assign(imu_pkt_buf_.begin(), imu_pkt_buf_.end());
-        imu_pkt_pub_->publish(std::move(pkt));
+        {
+            std::lock_guard<std::mutex> pub_lk(publish_mtx_);
+            imu_pkt_pub_->publish(std::move(pkt));
+        }
     }
 
     // ── Publish sensor_msgs/Imu for convenience ─────────────────────────
@@ -984,7 +1015,10 @@ void GzGpuOusterLidarSystem::publishImu(
         // Orientation unknown (per REP-145: first element = -1)
         msg.orientation_covariance[0] = -1.0;
 
-        imu_msg_pub_->publish(std::move(msg));
+        {
+            std::lock_guard<std::mutex> pub_lk(publish_mtx_);
+            imu_msg_pub_->publish(std::move(msg));
+        }
     }
 }
 
@@ -1012,14 +1046,47 @@ void GzGpuOusterLidarSystem::drainThreadFunc()
             static_cast<int64_t>(1e9 / lidar_hz_) /
             static_cast<int64_t>(local_pkts.size()));
 
-        for (size_t i = 0; i < local_pkts.size(); ++i) {
-            if (shutdown_.load(std::memory_order_acquire)) return;
-            pkt_pub_->publish(local_pkts[i]);
-            if (i + 1 < local_pkts.size()) {
-                std::this_thread::sleep_for(spacing);
+        try {
+            for (size_t i = 0; i < local_pkts.size(); ++i) {
+                if (shutdown_.load(std::memory_order_acquire)) return;
+                {
+                    std::lock_guard<std::mutex> pub_lk(publish_mtx_);
+                    pkt_pub_->publish(local_pkts[i]);
+                }
+                if (i + 1 < local_pkts.size()) {
+                    std::this_thread::sleep_for(spacing);
+                }
             }
+        } catch (const std::exception & e) {
+            RCLCPP_ERROR(kLogger, "drainThread publish failed: %s", e.what());
         }
     }
+}
+
+bool GzGpuOusterLidarSystem::HasActiveLidarSubscribers() const
+{
+    if (pkt_pub_ && pkt_pub_->get_subscription_count() > 0) return true;
+    if (range_image_pub_ && range_image_pub_->get_subscription_count() > 0) return true;
+    if (signal_image_pub_ && signal_image_pub_->get_subscription_count() > 0) return true;
+    if (reflec_image_pub_ && reflec_image_pub_->get_subscription_count() > 0) return true;
+    if (nearir_image_pub_ && nearir_image_pub_->get_subscription_count() > 0) return true;
+    return false;
+}
+
+void GzGpuOusterLidarSystem::DestroyGpuRays()
+{
+    if (!gpu_rays_) return;
+
+    auto * engine = ::gz::rendering::engine("ogre2");
+    if (engine && engine->SceneCount() > 0) {
+        auto scene = engine->SceneByIndex(0);
+        if (scene) {
+            scene->DestroySensor(gpu_rays_);
+        }
+    }
+
+    gpu_rays_.reset();
+    frame_connected_ = false;
 }
 
 }  // namespace gz_gpu_ouster_lidar

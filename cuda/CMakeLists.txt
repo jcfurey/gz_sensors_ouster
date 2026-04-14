@@ -4,7 +4,13 @@ if(GZ_GPU_OUSTER_USE_CUDA)
   )
 
   set_target_properties(gz_gpu_ouster_lidar_cuda PROPERTIES
-    # Compile for every architecture the installed CUDA toolkit supports.
+    # Compile for every major architecture the installed CUDA toolkit supports.
+    # "all-major" typically covers sm_50+ (Maxwell) through the newest arch.
+    # Minimum required: sm_50 (Maxwell).  Older Kepler (sm_3x) GPUs are NOT
+    # supported — they lack the __shfl_sync and cooperative-group intrinsics
+    # used by the ray-processing kernels.  If your GPU is older than Maxwell,
+    # the plugin falls back to the CPU implementation automatically (see the
+    # else branch below).
     CUDA_ARCHITECTURES all-major
     POSITION_INDEPENDENT_CODE ON
   )

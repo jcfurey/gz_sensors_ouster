@@ -53,5 +53,5 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/${ROS_DISTRO}/setup.bash
-          colcon build --packages-select gz_gpu_ouster_lidar \
+          colcon build --packages-select gz_sensors_ouster \
             --cmake-args -DCMAKE_BUILD_TYPE=Release

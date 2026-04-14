@@ -1,5 +1,5 @@
 <plugin
-  filename="libgz_gpu_ouster_lidar.so"
+     filename="libgz_sensors_ouster.so"
   name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
 
   <!-- ─── Required ────────────────────────────────────────────────── -->
@@ -23,6 +23,11 @@
 
   <!-- Lidar scan rate in Hz (common values: 10, 20). -->
   <lidar_hz>10.0</lidar_hz>
+
+  <!-- Gazebo rendering visibility mask for this sensor.
+       Useful to exclude specific visuals from raycasting (e.g. robot self-mesh).
+       Default is all bits set (0xFFFFFFFF). -->
+  <!-- <visibility_mask>4294967295</visibility_mask> -->
 
   <!-- ─── Lidar (optional) ────────────────────────────────────────── -->
 

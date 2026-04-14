@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>gz_gpu_ouster_lidar</name>
+  <name>gz_sensors_ouster</name>
   <version>1.0.0</version>
   <description>
     Gazebo Harmonic system plugin that creates a GPU-based lidar sensor with
@@ -27,6 +27,8 @@
   <depend>ouster_ros</depend>
 
   <depend>eigen</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

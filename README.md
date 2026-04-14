@@ -57,7 +57,7 @@ For IMU simulation, your world SDF must also load the Gazebo IMU system:
 ## Build
 
 ```bash
-colcon build --packages-select gz_gpu_ouster_lidar
+colcon build --packages-select gz_sensors_ouster
 ```
 
 ## SDF Usage
@@ -68,18 +68,20 @@ full annotated example.
 Minimal (path is relative to the SDF file's directory):
 
 ```xml
-<plugin filename="libgz_gpu_ouster_lidar.so"
+<plugin filename="libgz_sensors_ouster.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
   <metadata_path>metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
   <lidar_hz>10.0</lidar_hz>
+  <!-- Optional: Gazebo render visibility mask (default: all bits set) -->
+  <!-- <visibility_mask>4294967295</visibility_mask> -->
 </plugin>
 ```
 
 With IMU auto-detection:
 
 ```xml
-<plugin filename="libgz_gpu_ouster_lidar.so"
+<plugin filename="libgz_sensors_ouster.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
   <metadata_path>metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
@@ -91,7 +93,7 @@ With IMU auto-detection:
 > **Path resolution**: `metadata_path` is resolved relative to the
 > directory of the SDF file containing the `<plugin>` element. Absolute
 > paths are used as-is. The included metadata files install to
-> `share/gz_gpu_ouster_lidar/config/metadata/`.
+> `share/gz_sensors_ouster/config/metadata/`.
 
 ### Multiple Sensors
 
@@ -101,7 +103,7 @@ prefixes and metadata files:
 
 ```xml
 <!-- Front OS1-64 (primary, with IMU) -->
-<plugin filename="libgz_gpu_ouster_lidar.so"
+<plugin filename="libgz_sensors_ouster.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
   <metadata_path>metadata/os1_64_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/front</sensor_name>
@@ -110,7 +112,7 @@ prefixes and metadata files:
 </plugin>
 
 <!-- Rear OS0-128 (short-range, no IMU) -->
-<plugin filename="libgz_gpu_ouster_lidar.so"
+<plugin filename="libgz_sensors_ouster.so"
         name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
   <metadata_path>metadata/os0_128_rev7.json</metadata_path>
   <sensor_name>/sensor/lidar/rear</sensor_name>
@@ -163,6 +165,7 @@ All noise model parameters can be changed at runtime via
 |-----------|---------|-------|-------------|
 | `lidar_hz` | 10.0 | > 0 | Scan rate in Hz. |
 | `max_range` | *auto* | >= 1 | Max sensing range in metres. Auto-derived from metadata `prod_line` if not set (OS0: 50, OS1: 120, OS2: 240). Also sets the GPU far clip plane. |
+| `visibility_mask` | 4294967295 | 0 to 4294967295 | Gazebo render visibility mask applied to GpuRays. Use to include or exclude visuals from raycasting. |
 
 ### Noise Model
 

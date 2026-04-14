@@ -22,6 +22,7 @@
 #include <vector>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 
 namespace ouster::sdk::core {
     class SensorInfo;
@@ -62,6 +63,7 @@ private:
     std::string sensor_name_;
     std::string world_name_;
     double lidar_hz_ = 10.0;
+    uint32_t visibility_mask_ = 0xFFFFFFFFu;
 
     // ── Noise model parameters (SDF-configurable) ─────────────────────────────
     // Defaults tuned to OS1 rev6 (real hardware on this platform).
@@ -131,6 +133,7 @@ private:
     gz::common::ConnectionPtr render_conn_;
     std::chrono::steady_clock::time_point last_render_time_{};
     void OnRender();
+    void DestroyGpuRays();
 
     // ── CUDA processor ───────────────────────────────────────────────────────
     std::unique_ptr<CudaRayProcessor> cuda_processor_;
@@ -153,6 +156,10 @@ private:
     std::atomic<bool> frame_ready_{false};
 
     // ── ROS 2 node & publishers ──────────────────────────────────────────────
+    // publish_mtx_ serialises all publish() calls across threads (render,
+    // simulation/PostUpdate, drain).  rmw_zenoh_cpp is not guaranteed
+    // thread-safe for concurrent publishes on the same node.
+    std::mutex publish_mtx_;
     rclcpp::Node::SharedPtr ros_node_;
     rclcpp::executors::SingleThreadedExecutor ros_executor_;
     std::thread ros_spin_thread_;
@@ -196,6 +203,7 @@ private:
     void publishImu(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm);
     void drainThreadFunc();
+    bool HasActiveLidarSubscribers() const;
 };
 
 }  // namespace gz_gpu_ouster_lidar
