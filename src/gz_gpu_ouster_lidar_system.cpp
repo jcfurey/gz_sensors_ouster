@@ -222,16 +222,6 @@ void GzGpuOusterLidarSystem::Configure(
     // Pad beam_az_f_ to H if shorter (some metadata omits azimuth offsets).
     beam_az_f_.resize(static_cast<size_t>(H_), 0.0f);
 
-    // Initialise ROS 2 node and publishers
-    initRosInterface();
-
-    // Connect to the rendering-thread Render event (fires after scene->PreRender()
-    // at Sensors.cc:496) so that GpuRays initialisation and Render() happen on
-    // the correct (EGL) thread with the scene already set up.
-    event_mgr_ = &event_mgr;
-    render_conn_ = event_mgr.Connect<::gz::sim::events::Render>(
-        std::bind(&GzGpuOusterLidarSystem::OnRender, this));
-
     // Derive the Gazebo sensor entity name for pose tracking.
     // sensor_name_ is e.g. "/sensor/lidar/lidar0" → extract "lidar0".
     // Gazebo merges fixed-joint child links (including lidar_frame) into the
@@ -248,6 +238,16 @@ void GzGpuOusterLidarSystem::Configure(
     // Image frame_id: match the URDF lidar frame (e.g. "lidar0/lidar_frame")
     image_frame_id_ = lidar_id + "/lidar_frame";
     imu_frame_id_ = lidar_id + "/imu_frame";
+
+    // Initialise ROS 2 node and publishers (after frame IDs are derived)
+    initRosInterface();
+
+    // Connect to the rendering-thread Render event (fires after scene->PreRender()
+    // at Sensors.cc:496) so that GpuRays initialisation and Render() happen on
+    // the correct (EGL) thread with the scene already set up.
+    event_mgr_ = &event_mgr;
+    render_conn_ = event_mgr.Connect<::gz::sim::events::Render>(
+        std::bind(&GzGpuOusterLidarSystem::OnRender, this));
 
     RCLCPP_INFO(kLogger,
         "Configured: H=%d W=%d cpp=%d sensor_name=%s gz_sensor=%s hz=%.1f"
@@ -371,6 +371,43 @@ void GzGpuOusterLidarSystem::initRosInterface()
         abs_prefix + "/reflec_image", qos);
     nearir_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
         abs_prefix + "/nearir_image", qos);
+
+    // CameraInfo publisher (equirectangular projection model for range images)
+    camera_info_pub_ = ros_node_->create_publisher<sensor_msgs::msg::CameraInfo>(
+        abs_prefix + "/camera_info", qos);
+    {
+        const uint32_t H = static_cast<uint32_t>(H_);
+        const uint32_t W = static_cast<uint32_t>(W_);
+
+        // Horizontal: each column = 2π/W radians (full rotation; azimuth window
+        // only affects data validity, not the column ↔ angle mapping).
+        const double fx = static_cast<double>(W) / (2.0 * M_PI);
+        const double cx = static_cast<double>(W) / 2.0;
+
+        // Vertical: use actual beam altitude angles for correct VFOV.
+        double fy, cy;
+        if (beam_alt_angles_.size() >= 2) {
+            auto [min_it, max_it] = std::minmax_element(
+                beam_alt_angles_.begin(), beam_alt_angles_.end());
+            const double vfov_rad = (*max_it - *min_it) * M_PI / 180.0;
+            fy = static_cast<double>(H) / vfov_rad;
+            const double mean_alt_rad = 0.5 * (*max_it + *min_it) * M_PI / 180.0;
+            cy = static_cast<double>(H) / 2.0 - mean_alt_rad * fy;
+        } else {
+            fy = static_cast<double>(H) / (2.0 * M_PI);
+            cy = static_cast<double>(H) / 2.0;
+        }
+
+        camera_info_msg_.header.frame_id = image_frame_id_;
+        camera_info_msg_.height = H;
+        camera_info_msg_.width = W;
+        camera_info_msg_.distortion_model = "equidistant";
+        camera_info_msg_.k = {fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0};
+        camera_info_msg_.d = {0.0, 0.0, 0.0, 0.0, 0.0};
+        camera_info_msg_.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+        camera_info_msg_.p = {fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0,
+                              1.0, 0.0};
+    }
 
     // IMU publishers (only if imu_name was provided in SDF)
     if (imu_enabled_) {
@@ -922,6 +959,13 @@ void GzGpuOusterLidarSystem::publishImages(int64_t stamp_ns)
         std::lock_guard<std::mutex> pub_lk(publish_mtx_);
         nearir_image_pub_->publish(std::move(msg));
     }
+
+    // CameraInfo: publish with matching timestamp for image_transport sync.
+    if (camera_info_pub_->get_subscription_count() > 0) {
+        camera_info_msg_.header.stamp = stamp;
+        std::lock_guard<std::mutex> pub_lk(publish_mtx_);
+        camera_info_pub_->publish(camera_info_msg_);
+    }
 }
 
 // ── IMU publishing ──────────────────────────────────────────────────────────
@@ -1070,6 +1114,7 @@ bool GzGpuOusterLidarSystem::HasActiveLidarSubscribers() const
     if (signal_image_pub_ && signal_image_pub_->get_subscription_count() > 0) return true;
     if (reflec_image_pub_ && reflec_image_pub_->get_subscription_count() > 0) return true;
     if (nearir_image_pub_ && nearir_image_pub_->get_subscription_count() > 0) return true;
+    if (camera_info_pub_ && camera_info_pub_->get_subscription_count() > 0) return true;
     return false;
 }
 

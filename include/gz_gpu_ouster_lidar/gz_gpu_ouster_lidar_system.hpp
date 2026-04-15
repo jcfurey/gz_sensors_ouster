@@ -10,6 +10,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -169,6 +170,8 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr signal_image_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr reflec_image_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr nearir_image_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
+    sensor_msgs::msg::CameraInfo camera_info_msg_;
     rclcpp::Publisher<ouster_sensor_msgs::msg::PacketMsg>::SharedPtr imu_pkt_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_msg_pub_;
     std::string image_frame_id_;
