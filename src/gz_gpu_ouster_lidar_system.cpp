@@ -203,8 +203,23 @@ void GzGpuOusterLidarSystem::Configure(
         return;
     }
 
-    // Initialise CUDA processor
-    cuda_processor_ = std::make_unique<CudaRayProcessor>();
+    // Initialise ray processor. The CUDA path self-probes for a GPU and flips
+    // to a CPU implementation when none is present (no GPU passthrough, older
+    // driver, etc.); the try/catch is a belt-and-braces guard so any residual
+    // throw still disables just this plugin rather than taking the whole sim
+    // down.
+    try {
+        cuda_processor_ = std::make_unique<CudaRayProcessor>();
+    } catch (const std::exception & e) {
+        RCLCPP_ERROR(kLogger,
+            "Ray processor init failed: %s; plugin disabled", e.what());
+        return;
+    }
+    if (cuda_processor_->usesCpuFallback()) {
+        RCLCPP_WARN(kLogger,
+            "No CUDA-capable device detected; gz_gpu_ouster_lidar running on "
+            "CPU fallback (expect lower sim rate on high-resolution sensors).");
+    }
 
     // Allocate channel buffers
     const int n = H_ * W_;

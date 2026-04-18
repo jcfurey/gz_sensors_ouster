@@ -91,11 +91,19 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & p);
 
+    /// Returns true when the CUDA path is inactive — either the library was
+    /// built without CUDA, or CUDA was compiled in but no usable device was
+    /// detected at runtime (e.g. container started without GPU passthrough).
+    /// Callers can use this for diagnostics; both process() and processRaw()
+    /// transparently dispatch to the CPU implementation in this state.
+    bool usesCpuFallback() const { return use_cpu_fallback_; }
+
 private:
     void ensureBuffers(int n);
     void ensureResampleBuffers(int raw_n, int out_n, int H);
     void ensureRandStates(int n);
 
+    bool use_cpu_fallback_ = false;
     void * stream_ = nullptr;
 
     // Device buffers — noise processing

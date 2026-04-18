@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "ray_processor_cuda.cuh"
+#include "ray_processor_cpu_impl.hpp"
 #include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
 
 #include <cuda_runtime.h>
@@ -373,13 +374,40 @@ void launchInitRandKernel(
 
 CudaRayProcessor::CudaRayProcessor()
 {
-    cudaStream_t s;
-    CUDA_CHECK(cudaStreamCreate(&s));
+    // Probe for a usable CUDA device. If the binary was built with CUDA but
+    // the container/host has no GPU passthrough (e.g. the `robot-nogpu`
+    // compose profile), cudaGetDeviceCount returns cudaErrorNoDevice. Fall
+    // back to the CPU path instead of throwing, so the sim stack stays up.
+    int device_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        std::fprintf(stderr,
+            "[gz_gpu_ouster_lidar] No CUDA-capable device available "
+            "(cudaGetDeviceCount: %s); falling back to CPU implementation.\n",
+            cudaGetErrorString(err));
+        cudaGetLastError();  // clear sticky error so later CUDA calls aren't poisoned
+        use_cpu_fallback_ = true;
+        return;
+    }
+
+    cudaStream_t s = nullptr;
+    err = cudaStreamCreate(&s);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr,
+            "[gz_gpu_ouster_lidar] cudaStreamCreate failed (%s); "
+            "falling back to CPU implementation.\n",
+            cudaGetErrorString(err));
+        cudaGetLastError();
+        use_cpu_fallback_ = true;
+        return;
+    }
     stream_ = static_cast<void *>(s);
 }
 
 CudaRayProcessor::~CudaRayProcessor()
 {
+    if (use_cpu_fallback_) return;
+
     if (d_depth_)       cudaFree(d_depth_);
     if (d_retro_)       cudaFree(d_retro_);
     if (d_range_)       cudaFree(d_range_);
@@ -436,6 +464,12 @@ void CudaRayProcessor::process(
     uint16_t *    nearir_out,
     const RayProcessParams & p)
 {
+    if (use_cpu_fallback_) {
+        processCpu(depth_host, retro_host,
+                   range_out, signal_out, reflectivity_out, nearir_out, p);
+        return;
+    }
+
     const int n = p.H * p.W;
     auto stream = static_cast<cudaStream_t>(stream_);
 
@@ -524,6 +558,12 @@ void CudaRayProcessor::processRaw(
     uint16_t *    nearir_out,
     const RayProcessParams & pp)
 {
+    if (use_cpu_fallback_) {
+        processRawCpu(raw_host, beam_alt_host, beam_az_host, rp,
+                      range_out, signal_out, reflectivity_out, nearir_out, pp);
+        return;
+    }
+
     const int raw_n = rp.gpu_H * rp.gpu_W * rp.gpu_chan;
     const int out_n = rp.H * rp.W;
     auto stream = static_cast<cudaStream_t>(stream_);
