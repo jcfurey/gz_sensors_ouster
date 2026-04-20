@@ -1005,8 +1005,28 @@ void GzGpuOusterLidarSystem::publishImu(
 
     if (!angVelComp || !linAccComp) return;  // IMU data not yet available
 
-    const auto & av = angVelComp->Data();   // rad/s, body frame
-    const auto & la = linAccComp->Data();   // m/s², body frame, includes gravity
+    const auto & av = angVelComp->Data();   // rad/s, body frame (gyro — unchanged)
+    const auto & la_raw = linAccComp->Data();   // m/s², body frame, KINEMATIC only
+
+    // ── Proper-acceleration compensation ─────────────────────────────────
+    // `components::LinearAcceleration` is the body's coordinate (kinematic)
+    // linear acceleration in its own frame — NOT what a real accelerometer
+    // reads. An accelerometer measures *proper* acceleration:
+    //
+    //    a_proper = a_kinematic - g_body
+    //
+    // where g_body is the world gravity vector rotated into the body frame.
+    // For a stationary rover, a_kinematic = 0 and a_proper = -g_body ≈
+    // (0, 0, +9.81), which matches what a real Ouster IMU reports.
+    //
+    // Without this step the rover appears to be in free fall (la = 0),
+    // Madgwick cannot find a gravity reference, and downstream localization
+    // (Sierra, robot_localization, etc.) never publishes odom->base_footprint.
+    const auto imu_world_pose = ::gz::sim::worldPose(imu_entity_, ecm);
+    const auto & R = imu_world_pose.Rot();
+    const ::gz::math::Vector3d gravity_world(0.0, 0.0, -9.80665);
+    const auto gravity_body = R.RotateVectorReverse(gravity_world);
+    const ::gz::math::Vector3d la = la_raw - gravity_body;
 
     const int64_t stamp_ns = sim_now.count();
 
