@@ -528,7 +528,8 @@ void CudaRayProcessor::process(
 
 void CudaRayProcessor::ensureResampleBuffers(int raw_n, int out_n, int H)
 {
-    auto stream = static_cast<cudaStream_t>(stream_);
+    // Allocations here use the default stream via cudaMalloc; stream_ is only
+    // needed by the async launch/copy paths elsewhere in this class.
     auto realloc = [&](void * & ptr, size_t bytes) {
         if (ptr) { CUDA_CHECK(cudaFree(ptr)); ptr = nullptr; }
         CUDA_CHECK(cudaMalloc(&ptr, bytes));

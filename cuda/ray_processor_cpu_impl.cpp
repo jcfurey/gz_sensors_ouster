@@ -206,8 +206,10 @@ void processRawCpu(
             depth = d_top * (1.f - v_alpha) + d_bot * v_alpha;
         } else {
             float sum = 0.f;
-            if (v00) sum += d00; if (v01) sum += d01;
-            if (v10) sum += d10; if (v11) sum += d11;
+            if (v00) sum += d00;
+            if (v01) sum += d01;
+            if (v10) sum += d10;
+            if (v11) sum += d11;
             depth = sum / static_cast<float>(n_valid);
         }
 
@@ -230,8 +232,10 @@ void processRawCpu(
                 retro = r_top*(1.f-v_alpha) + r_bot*v_alpha;
             } else if (n_valid > 0) {
                 float sum = 0.f;
-                if (v00) sum += r00; if (v01) sum += r01;
-                if (v10) sum += r10; if (v11) sum += r11;
+                if (v00) sum += r00;
+                if (v01) sum += r01;
+                if (v10) sum += r10;
+                if (v11) sum += r11;
                 retro = sum / static_cast<float>(n_valid);
             } else {
                 retro = 0.f;
