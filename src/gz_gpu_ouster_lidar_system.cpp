@@ -691,7 +691,7 @@ void GzGpuOusterLidarSystem::PostUpdate(
         ecm.Each<::gz::sim::components::Name, ::gz::sim::components::Sensor>(
             [this, auto_detect](const ::gz::sim::Entity & ent,
                    const ::gz::sim::components::Name * name,
-                   const ::gz::sim::components::Sensor * sensor) -> bool {
+                   const ::gz::sim::components::Sensor *) -> bool {
                 bool match = false;
                 if (auto_detect) {
                     // In gz-sim v8 the Sensor component is a marker (no Data()).

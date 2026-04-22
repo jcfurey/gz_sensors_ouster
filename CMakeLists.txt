@@ -1,8 +1,24 @@
 cmake_minimum_required(VERSION 3.18)
 project(gz_sensors_ouster)
 
-set(CMAKE_CXX_STANDARD 17)
-add_compile_options(-Wall -Wextra -Wpedantic)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# -Wall and -Wextra apply to both CXX and CUDA host compilation.
+add_compile_options(-Wall -Wextra)
+
+# -Wpedantic is scoped to CXX only. Reason: NVCC's cudafe1 pass generates
+# tmpxft_*.stub.c intermediate files whose `# N "file"` line directives use
+# GCC's extension form rather than the C-standard `#line N "file"`. GCC's
+# -Wpedantic flags this, and unlike Clang (-Wno-gnu-line-marker) there is no
+# sub-flag to silence just this one pedantic warning. Applying -Wpedantic to
+# the CUDA host-compile pass therefore only ever flags NVCC's own output —
+# never our code. Scoping it to CXX keeps every line we actually write under
+# full -Wpedantic, while avoiding ~100 spurious warnings from NVCC stubs.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
