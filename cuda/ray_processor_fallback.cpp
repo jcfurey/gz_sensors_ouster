@@ -9,10 +9,11 @@
 
 namespace gz_gpu_ouster_lidar {
 
-CudaRayProcessor::CudaRayProcessor()
+CudaRayProcessor::CudaRayProcessor(uint64_t seed)
 {
     // No CUDA in this build — permanently on CPU.
     use_cpu_fallback_ = true;
+    seed_ = seed;
 }
 
 CudaRayProcessor::~CudaRayProcessor() = default;
@@ -31,7 +32,7 @@ void CudaRayProcessor::process(
     const RayProcessParams & p)
 {
     processCpu(depth_host, retro_host,
-               range_out, signal_out, reflectivity_out, nearir_out, p);
+               range_out, signal_out, reflectivity_out, nearir_out, p, seed_);
 }
 
 void CudaRayProcessor::processRaw(
@@ -46,7 +47,8 @@ void CudaRayProcessor::processRaw(
     const RayProcessParams & pp)
 {
     processRawCpu(raw_host, beam_alt_host, beam_az_host, rp,
-                  range_out, signal_out, reflectivity_out, nearir_out, pp);
+                  range_out, signal_out, reflectivity_out, nearir_out, pp,
+                  seed_);
 }
 
 }  // namespace gz_gpu_ouster_lidar

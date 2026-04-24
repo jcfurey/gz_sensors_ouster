@@ -100,6 +100,13 @@ private:
     std::vector<double> beam_az_offsets_;   // per-beam azimuth offset (degrees)
     double beam_origin_mm_ = 0.0;          // lidar_origin_to_beam_origin_mm
 
+    // Cached beam-altitude bounds (populated in loadMetadata).
+    // Values include kBeamMarginDeg padding so the resample window spans a
+    // little beyond the outermost beams.
+    double min_alt_ = 0.0;
+    double max_alt_ = 0.0;
+    double v_range_ = 0.0;
+
     // ── IMU packet format ────────────────────────────────────────────────────
     size_t imu_packet_size_ = 0;
     std::vector<uint8_t> imu_pkt_buf_;

@@ -136,6 +136,14 @@ if(BUILD_TESTING)
   )
 
   # Test: metadata parsing
+  set(_test_metadata_dir "${CMAKE_CURRENT_SOURCE_DIR}/config/metadata")
+  if(NOT IS_DIRECTORY "${_test_metadata_dir}")
+    message(FATAL_ERROR
+      "Test metadata directory missing: ${_test_metadata_dir}\n"
+      "The test_metadata_parsing target requires the example Ouster metadata "
+      "JSONs shipped in config/metadata/. Either restore them or disable "
+      "testing with -DBUILD_TESTING=OFF.")
+  endif()
   ament_add_gtest(test_metadata_parsing test/test_metadata_parsing.cpp)
   target_include_directories(test_metadata_parsing PRIVATE
     "${_ouster_sdk_src}/ouster_client/include"
@@ -144,7 +152,7 @@ if(BUILD_TESTING)
     ouster_ros
   )
   target_compile_definitions(test_metadata_parsing PRIVATE
-    TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata"
+    TEST_METADATA_DIR="${_test_metadata_dir}"
   )
 
   # Test: bilinear resampling (CPU fallback)

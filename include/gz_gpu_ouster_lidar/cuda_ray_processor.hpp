@@ -51,7 +51,12 @@ struct RayProcessParams {
 /// synthesises channel arrays (range_mm, signal, reflectivity, near_ir).
 class CudaRayProcessor {
 public:
-    CudaRayProcessor();
+    /// Construct the processor.
+    /// @param seed  RNG seed for the noise model. 0 (default) means
+    ///              non-deterministic (clock() on GPU, std::random_device on
+    ///              CPU). Any non-zero value produces deterministic output
+    ///              across runs — primarily useful for tests.
+    explicit CudaRayProcessor(uint64_t seed = 0);
     ~CudaRayProcessor();
 
     CudaRayProcessor(const CudaRayProcessor &) = delete;
@@ -98,12 +103,16 @@ public:
     /// transparently dispatch to the CPU implementation in this state.
     bool usesCpuFallback() const { return use_cpu_fallback_; }
 
+    /// Configured RNG seed (0 = non-deterministic).
+    uint64_t seed() const { return seed_; }
+
 private:
     void ensureBuffers(int n);
     void ensureResampleBuffers(int raw_n, int out_n, int H);
     void ensureRandStates(int n);
 
     bool use_cpu_fallback_ = false;
+    uint64_t seed_ = 0;
     void * stream_ = nullptr;
 
     // Device buffers — noise processing

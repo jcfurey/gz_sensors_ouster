@@ -372,8 +372,10 @@ void launchInitRandKernel(
 
 // ── CudaRayProcessor ────────────────────────────────────────────────────────
 
-CudaRayProcessor::CudaRayProcessor()
+CudaRayProcessor::CudaRayProcessor(uint64_t seed)
 {
+    seed_ = seed;
+
     // Probe for a usable CUDA device. If the binary was built with CUDA but
     // the container/host has no GPU passthrough (e.g. the `robot-nogpu`
     // compose profile), cudaGetDeviceCount returns cudaErrorNoDevice. Fall
@@ -447,9 +449,14 @@ void CudaRayProcessor::ensureRandStates(int n)
     if (d_rand_states_) { CUDA_CHECK(cudaFree(d_rand_states_)); d_rand_states_ = nullptr; }
     CUDA_CHECK(cudaMalloc(&d_rand_states_, static_cast<size_t>(n) * sizeof(curandState)));
 
+    // seed_ == 0 means non-deterministic (production). Any non-zero seed
+    // configured at construction time makes the noise reproducible.
+    const unsigned long rng_seed = (seed_ != 0)
+        ? static_cast<unsigned long>(seed_)
+        : static_cast<unsigned long>(clock());
     launchInitRandKernel(
         d_rand_states_,
-        static_cast<unsigned long>(clock()),
+        rng_seed,
         n, stream_);
 
     rand_n_ = n;
@@ -466,7 +473,7 @@ void CudaRayProcessor::process(
 {
     if (use_cpu_fallback_) {
         processCpu(depth_host, retro_host,
-                   range_out, signal_out, reflectivity_out, nearir_out, p);
+                   range_out, signal_out, reflectivity_out, nearir_out, p, seed_);
         return;
     }
 
@@ -560,7 +567,8 @@ void CudaRayProcessor::processRaw(
 {
     if (use_cpu_fallback_) {
         processRawCpu(raw_host, beam_alt_host, beam_az_host, rp,
-                      range_out, signal_out, reflectivity_out, nearir_out, pp);
+                      range_out, signal_out, reflectivity_out, nearir_out, pp,
+                      seed_);
         return;
     }
 

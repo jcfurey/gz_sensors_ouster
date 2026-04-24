@@ -17,6 +17,11 @@ if(GZ_GPU_OUSTER_USE_CUDA)
     # CPU implementation automatically.
     CUDA_ARCHITECTURES all-major
     POSITION_INDEPENDENT_CODE ON
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_EXTENSIONS OFF
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
   )
 else()
   # Non-CUDA build: no CUDA toolkit available. Class methods in
@@ -27,6 +32,8 @@ else()
   )
   set_target_properties(gz_gpu_ouster_lidar_cuda PROPERTIES
     POSITION_INDEPENDENT_CODE ON
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
   )
 endif()
 

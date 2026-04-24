@@ -221,6 +221,13 @@ frame regardless of sensor density. All numbers assume a single sensor.
 
 ### Estimated max real-time scan rate
 
+Numbers below were measured on NVIDIA RTX GPUs with the CUDA path
+enabled. The plugin itself is GPU-agnostic for ray casting (OGRE2 +
+OpenGL works on AMD and Intel), but CUDA post-processing requires an
+NVIDIA GPU; other vendors automatically use the CPU fallback path —
+expect ~5-10 ms of additional per-frame CPU time for high-density
+sensors.
+
 | Sensor config | Pixels/frame | RTX 3060 | RTX 3090 | RTX 4090 |
 |---------------|-------------|----------|----------|----------|
 | OS1-64 (512×64) | 33K | 40+ Hz | 40+ Hz | 40+ Hz |

@@ -49,6 +49,11 @@ namespace gz_gpu_ouster_lidar {
 
 static const rclcpp::Logger kLogger = rclcpp::get_logger("gz_gpu_ouster_lidar");
 
+// Small angular pad added to the beam altitude range so the GpuRays vertical
+// FOV extends a touch beyond the outermost beams; avoids cubemap-edge
+// interpolation artefacts during bilinear resample.
+static constexpr double kBeamMarginDeg = 1.0;
+
 // ── Registration ─────────────────────────────────────────────────────────────
 
 GZ_ADD_PLUGIN(
@@ -362,10 +367,26 @@ bool GzGpuOusterLidarSystem::loadMetadata()
 
         pkt_buf_.resize(pw_->lidar_packet_size, 0);
 
-        // IMU packet buffer (used only when imu_enabled_)
+        // IMU packet buffer (used only when imu_enabled_).
+        // Known Ouster IMU packet sizes:
+        //   48 bytes  - LEGACY profile
+        //   other > 0 - ACCEL32_GYRO32_NMEA (uses PacketWriter setters)
+        // A zero or unrecognised size disables IMU packet emission; the
+        // sensor_msgs/Imu publisher still works.
         imu_packet_size_ = pf.imu_packet_size;
         if (imu_enabled_ && imu_packet_size_ > 0) {
             imu_pkt_buf_.resize(imu_packet_size_, 0);
+            constexpr size_t kLegacyImuSize = 48;
+            if (imu_packet_size_ != kLegacyImuSize) {
+                RCLCPP_INFO(kLogger,
+                    "IMU packet size=%zu bytes (non-LEGACY profile); "
+                    "using PacketWriter NMEA timestamp setter.",
+                    imu_packet_size_);
+            }
+        } else if (imu_enabled_) {
+            RCLCPP_WARN(kLogger,
+                "IMU enabled but metadata reports imu_packet_size=0; "
+                "imu_packets topic will be inactive.");
         }
 
         // Derive max_range from product line if not explicitly set via SDF.
@@ -391,6 +412,18 @@ bool GzGpuOusterLidarSystem::loadMetadata()
     if (beam_alt_angles_.empty() || static_cast<int>(beam_alt_angles_.size()) != H_) {
         RCLCPP_ERROR(kLogger, "beam_altitude_angles size (%zu) != H (%d)",
             beam_alt_angles_.size(), H_);
+        return false;
+    }
+
+    // Cache beam altitude range (with margin) for the resample pipeline.
+    const auto [min_it, max_it] = std::minmax_element(
+        beam_alt_angles_.begin(), beam_alt_angles_.end());
+    min_alt_ = *min_it - kBeamMarginDeg;
+    max_alt_ = *max_it + kBeamMarginDeg;
+    v_range_ = max_alt_ - min_alt_;
+    if (v_range_ <= 0.0) {
+        RCLCPP_ERROR(kLogger, "Invalid beam altitude range: [%.3f, %.3f]",
+            min_alt_, max_alt_);
         return false;
     }
 
@@ -643,18 +676,12 @@ void GzGpuOusterLidarSystem::OnRender()
     gpuRays->SetAngleMax(GZ_PI);
     gpuRays->SetRayCount(W_);
 
-    // Vertical: use the min/max from beam_altitude_angles
+    // Vertical: use the min/max from beam_altitude_angles (cached with
+    // kBeamMarginDeg padding in loadMetadata).
     // GpuRays fires UNIFORM vertical samples between min/max.
     // We oversample vertically and resample to exact beam angles in onNewFrame.
-    double min_alt = *std::min_element(beam_alt_angles_.begin(), beam_alt_angles_.end());
-    double max_alt = *std::max_element(beam_alt_angles_.begin(), beam_alt_angles_.end());
-
-    constexpr double margin_deg = 1.0;
-    min_alt -= margin_deg;
-    max_alt += margin_deg;
-
-    gpuRays->SetVerticalAngleMin(min_alt * GZ_PI / 180.0);
-    gpuRays->SetVerticalAngleMax(max_alt * GZ_PI / 180.0);
+    gpuRays->SetVerticalAngleMin(min_alt_ * GZ_PI / 180.0);
+    gpuRays->SetVerticalAngleMax(max_alt_ * GZ_PI / 180.0);
 
     // Ogre2GpuRays cubemap face resolution = next_power_of_2(max(hs, vs)),
     // where hs = RangeCount/4 for 360° HFOV and vs ≈ VerticalRangeCount.
@@ -689,7 +716,7 @@ void GzGpuOusterLidarSystem::OnRender()
     sensor_initialized_.store(true, std::memory_order_release);
 
     RCLCPP_INFO(kLogger, "GpuRays sensor created: %dx%d rays, vertical FOV [%.1f, %.1f] deg",
-        W_, v_samples, min_alt, max_alt);
+        W_, v_samples, min_alt_, max_alt_);
 }
 
 // ── ISystemPostUpdate ────────────────────────────────────────────────────────
@@ -882,22 +909,16 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     }
 
     // ── Resample params ──────────────────────────────────────────────────────
-    double min_alt = *std::min_element(beam_alt_angles_.begin(), beam_alt_angles_.end());
-    double max_alt = *std::max_element(beam_alt_angles_.begin(), beam_alt_angles_.end());
-    constexpr double margin_deg = 1.0;
-    min_alt -= margin_deg;
-    max_alt += margin_deg;
-    const double v_range = max_alt - min_alt;
-    if (v_range <= 0.0) return;
-
+    // min_alt_, max_alt_, v_range_ were cached (with kBeamMarginDeg padding)
+    // in loadMetadata.
     ResampleParams rp;
     rp.H = H_;
     rp.W = W_;
     rp.gpu_H = gpu_H;
     rp.gpu_W = gpu_W;
     rp.gpu_chan = gpu_chan;
-    rp.min_alt = static_cast<float>(min_alt);
-    rp.v_range = static_cast<float>(v_range);
+    rp.min_alt = static_cast<float>(min_alt_);
+    rp.v_range = static_cast<float>(v_range_);
     rp.deg_per_col = 360.0f / static_cast<float>(W_);
     rp.beam_origin_m = static_cast<float>(beam_origin_mm_ / 1000.0);
     rp.half_W = W_ / 2;
@@ -949,7 +970,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     std::vector<ouster_sensor_msgs::msg::PacketMsg> new_pkts(static_cast<size_t>(n_packets));
 
     for (int p = 0; p < n_packets; ++p) {
-        std::fill(pkt_buf_.begin(), pkt_buf_.end(), 0);
+        std::memset(pkt_buf_.data(), 0, pkt_buf_.size());
 
         const int col_start = p * cpp_;
         pw_->set_frame_id(pkt_buf_.data(), frame_id_);
@@ -1089,22 +1110,27 @@ void GzGpuOusterLidarSystem::publishImu(
     // ── Encode Ouster IMU PacketMsg ──────────────────────────────────────
     if (imu_pkt_pub_ && imu_pkt_pub_->get_subscription_count() > 0 &&
         !imu_pkt_buf_.empty()) {
-        std::fill(imu_pkt_buf_.begin(), imu_pkt_buf_.end(), 0);
+        std::memset(imu_pkt_buf_.data(), 0, imu_pkt_buf_.size());
         uint8_t * buf = imu_pkt_buf_.data();
         const uint64_t ts = static_cast<uint64_t>(stamp_ns);
 
-        // LEGACY IMU profile (48 bytes): timestamps at fixed offsets.
-        // PacketWriter only exposes set_imu_nmea_ts (for ACCEL32_GYRO32_NMEA),
-        // so we write the LEGACY sys_ts/accel_ts/gyro_ts directly.
-        // os_cloud reads imu_gyro_ts (offset 16) for the ROS message timestamp.
-        if (imu_pkt_buf_.size() >= 48) {
+        // Dispatch on packet size — PacketWriter doesn't expose the profile.
+        //   LEGACY (48 bytes):      write sys_ts/accel_ts/gyro_ts directly;
+        //                           the SDK has no setter for these fields.
+        //                           os_cloud reads gyro_ts (offset 16) for
+        //                           the ROS timestamp.
+        //   ACCEL32_GYRO32_NMEA:    use set_imu_nmea_ts.
+        // Using exclusive branches prevents the NMEA setter from stomping on
+        // the LEGACY offsets (and vice versa) when the other profile is in
+        // use.
+        constexpr size_t kLegacyImuSize = 48;
+        if (imu_pkt_buf_.size() == kLegacyImuSize) {
             std::memcpy(buf + 0,  &ts, sizeof(uint64_t));  // sys_ts
             std::memcpy(buf + 8,  &ts, sizeof(uint64_t));  // accel_ts
             std::memcpy(buf + 16, &ts, sizeof(uint64_t));  // gyro_ts
+        } else {
+            pw_->set_imu_nmea_ts(buf, ts);
         }
-
-        // ACCEL32_GYRO32_NMEA profile: use PacketWriter setters.
-        pw_->set_imu_nmea_ts(buf, ts);
 
         // Accel/gyro values — PacketWriter writes at profile-correct offsets.
         pw_->set_imu_la_x(buf, static_cast<float>(la.X()));
