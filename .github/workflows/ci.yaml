@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -55,3 +61,11 @@ jobs:
           source /opt/ros/${ROS_DISTRO}/setup.bash
           colcon build --packages-select gz_sensors_ouster \
             --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+      - name: Test
+        shell: bash
+        run: |
+          source /opt/ros/${ROS_DISTRO}/setup.bash
+          source install/setup.bash
+          colcon test --packages-select gz_sensors_ouster --event-handlers console_direct+
+          colcon test-result --verbose --all

@@ -34,10 +34,11 @@ For example, with `<sensor_name>/sensor/lidar/lidar0</sensor_name>`:
 | `.../signal_image` | `sensor_msgs/Image` | lidar_hz | Signal photon counts (mono16) |
 | `.../reflec_image` | `sensor_msgs/Image` | lidar_hz | Reflectivity (mono16) |
 | `.../nearir_image` | `sensor_msgs/Image` | lidar_hz | Near-IR (mono16) |
+| `.../camera_info` | `sensor_msgs/CameraInfo` | lidar_hz | Range-image camera metadata (H×W, frame_id) |
 | `.../imu_packets` | `ouster_sensor_msgs/PacketMsg` | imu_hz | Native Ouster IMU packets (if IMU enabled) |
 | `.../imu` | `sensor_msgs/Imu` | imu_hz | Standard ROS IMU message (if IMU enabled) |
 
-Image and IMU topics are only published when subscribers are present.
+Image, CameraInfo, and IMU topics are only published when subscribers are present.
 
 ## Prerequisites
 
