@@ -45,22 +45,56 @@ find_package(ouster_sensor_msgs REQUIRED)
 find_package(ouster_ros REQUIRED)
 find_package(Eigen3 REQUIRED)
 
-# CUDA (optional): build with CUDA when nvcc/toolkit are available,
-# otherwise fall back to a CPU implementation with the same interface.
+# GPU backends (all optional). Each probes for its toolchain; missing
+# toolchains just disable that backend and fall through to the next at
+# runtime. At least one is always compiled in — the CPU backend.
+#
+# User-overridable: pass -DGZ_GPU_OUSTER_USE_{CUDA,HIP,SYCL}=ON/OFF on the
+# cmake command line to force a backend on or off regardless of the probe.
 include(CheckLanguage)
+
+# ── CUDA (NVIDIA) ────────────────────────────────────────────────────────────
 check_language(CUDA)
-set(GZ_GPU_OUSTER_USE_CUDA OFF)
+set(GZ_GPU_OUSTER_USE_CUDA OFF CACHE BOOL "Build the CUDA backend for NVIDIA GPUs")
 if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
   find_package(CUDAToolkit QUIET)
   if(CUDAToolkit_FOUND)
     set(GZ_GPU_OUSTER_USE_CUDA ON)
-    message(STATUS "${PROJECT_NAME}: CUDA enabled")
+    message(STATUS "${PROJECT_NAME}: CUDA backend enabled (nvcc + curand)")
   else()
-    message(WARNING "${PROJECT_NAME}: nvcc found but CUDAToolkit was not found; using CPU fallback")
+    message(STATUS "${PROJECT_NAME}: nvcc found but CUDAToolkit missing; CUDA backend disabled")
   endif()
 else()
-  message(WARNING "${PROJECT_NAME}: CUDA compiler not found; using CPU fallback")
+  message(STATUS "${PROJECT_NAME}: no CUDA compiler; CUDA backend disabled")
+endif()
+
+# ── HIP (AMD, including APUs via ROCm) ──────────────────────────────────────
+check_language(HIP)
+set(GZ_GPU_OUSTER_USE_HIP OFF CACHE BOOL "Build the HIP backend for AMD GPUs (incl. APUs)")
+if(CMAKE_HIP_COMPILER)
+  set(GZ_GPU_OUSTER_USE_HIP ON)
+  message(STATUS "${PROJECT_NAME}: HIP backend enabled (${CMAKE_HIP_COMPILER})")
+else()
+  message(STATUS "${PROJECT_NAME}: no HIP compiler; HIP backend disabled")
+endif()
+
+# ── SYCL (Intel iGPU + Arc via oneAPI DPC++ / AdaptiveCpp) ──────────────────
+# Enable automatically when the compiler identifies as IntelLLVM (icpx) or
+# when SYCL is explicitly requested via -DGZ_GPU_OUSTER_USE_SYCL=ON (e.g.
+# for AdaptiveCpp builds where the compiler ID is Clang).
+set(GZ_GPU_OUSTER_USE_SYCL OFF CACHE BOOL "Build the SYCL backend for Intel GPUs")
+if(NOT GZ_GPU_OUSTER_USE_SYCL AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+  set(GZ_GPU_OUSTER_USE_SYCL ON)
+  message(STATUS "${PROJECT_NAME}: SYCL backend enabled (icpx detected)")
+elseif(GZ_GPU_OUSTER_USE_SYCL)
+  message(STATUS "${PROJECT_NAME}: SYCL backend enabled (user-requested)")
+else()
+  message(STATUS "${PROJECT_NAME}: SYCL backend disabled")
+endif()
+
+if(NOT GZ_GPU_OUSTER_USE_CUDA AND NOT GZ_GPU_OUSTER_USE_HIP AND NOT GZ_GPU_OUSTER_USE_SYCL)
+  message(STATUS "${PROJECT_NAME}: no GPU backend enabled; CPU fallback only")
 endif()
 
 # ── Ouster SDK headers (same pattern as gz_ouster_packet_bridge) ──────────────
@@ -152,6 +186,14 @@ if(BUILD_TESTING)
   )
 
   # Test: metadata parsing
+  set(_test_metadata_dir "${CMAKE_CURRENT_SOURCE_DIR}/config/metadata")
+  if(NOT IS_DIRECTORY "${_test_metadata_dir}")
+    message(FATAL_ERROR
+      "Test metadata directory missing: ${_test_metadata_dir}\n"
+      "The test_metadata_parsing target requires the example Ouster metadata "
+      "JSONs shipped in config/metadata/. Either restore them or disable "
+      "testing with -DBUILD_TESTING=OFF.")
+  endif()
   ament_add_gtest(test_metadata_parsing test/test_metadata_parsing.cpp)
   target_include_directories(test_metadata_parsing PRIVATE
     "${_ouster_sdk_src}/ouster_client/include"
@@ -160,7 +202,7 @@ if(BUILD_TESTING)
     ouster_ros
   )
   target_compile_definitions(test_metadata_parsing PRIVATE
-    TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata"
+    TEST_METADATA_DIR="${_test_metadata_dir}"
   )
 
   # Test: bilinear resampling (CPU fallback)

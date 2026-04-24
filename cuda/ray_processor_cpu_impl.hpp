@@ -13,6 +13,10 @@
 
 namespace gz_gpu_ouster_lidar {
 
+// Optional `seed` (default 0) makes noise deterministic: any non-zero value
+// seeds a local std::mt19937 used for this call; 0 falls back to the
+// non-deterministic thread_local RNG used in production.
+
 void processCpu(
     const float * depth_host,
     const float * retro_host,
@@ -20,7 +24,8 @@ void processCpu(
     uint16_t *    signal_out,
     uint8_t *     reflectivity_out,
     uint16_t *    nearir_out,
-    const RayProcessParams & p);
+    const RayProcessParams & p,
+    uint64_t      seed = 0);
 
 void processRawCpu(
     const float * raw_host,
@@ -31,6 +36,7 @@ void processRawCpu(
     uint16_t *    signal_out,
     uint8_t *     reflectivity_out,
     uint16_t *    nearir_out,
-    const RayProcessParams & pp);
+    const RayProcessParams & pp,
+    uint64_t      seed = 0);
 
 }  // namespace gz_gpu_ouster_lidar

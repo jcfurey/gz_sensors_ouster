@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 
 namespace gz_gpu_ouster_lidar {
 
@@ -47,19 +48,34 @@ struct RayProcessParams {
     float edge_discon_threshold; ///< Depth jump threshold (metres) to suppress neighbor, 0=off
 };
 
-/// CUDA ray post-processor: resamples GpuRays → Ouster beam geometry, then
-/// synthesises channel arrays (range_mm, signal, reflectivity, near_ir).
+// Forward declaration for pimpl.
+class Backend;
+
+/// Vendor-neutral ray post-processor: resamples GpuRays → Ouster beam
+/// geometry, then synthesises channel arrays (range_mm, signal,
+/// reflectivity, near_ir). Internally dispatches to whichever backend was
+/// detected at construction time — CUDA (NVIDIA), HIP (AMD incl. APUs),
+/// SYCL (Intel), or CPU.
+///
+/// The class name is retained from the original CUDA-only implementation
+/// for source-compatibility with downstream code that declared dependencies
+/// on it. The behaviour is now vendor-neutral.
 class CudaRayProcessor {
 public:
-    CudaRayProcessor();
+    /// Construct the processor.
+    /// @param seed  RNG seed for the noise model. 0 (default) means
+    ///              non-deterministic (clock() on GPU, std::random_device on
+    ///              CPU). Any non-zero value produces deterministic output
+    ///              across runs — primarily useful for tests.
+    explicit CudaRayProcessor(uint64_t seed = 0);
     ~CudaRayProcessor();
 
     CudaRayProcessor(const CudaRayProcessor &) = delete;
     CudaRayProcessor & operator=(const CudaRayProcessor &) = delete;
 
-    /// Resample raw GpuRays buffer to Ouster beam geometry on GPU, then run
-    /// noise model and produce final channel outputs.  Single CUDA stream,
-    /// one host sync at the end.
+    /// Resample raw GpuRays buffer to Ouster beam geometry, then run the
+    /// noise model and produce final channel outputs. Fast path for the
+    /// GPU pipeline; one host synchronisation per call.
     ///
     /// @param raw_host         gpu_H × gpu_W × gpu_chan float array from GpuRays
     /// @param beam_alt_host    H float array of beam altitude angles (degrees)
@@ -81,7 +97,7 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & pp);
 
-    /// Legacy interface: process pre-resampled depth/retro buffers (CPU fallback path).
+    /// Legacy interface: process pre-resampled depth/retro buffers.
     void process(
         const float * depth_host,
         const float * retro_host,
@@ -91,39 +107,20 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & p);
 
-    /// Returns true when the CUDA path is inactive — either the library was
-    /// built without CUDA, or CUDA was compiled in but no usable device was
-    /// detected at runtime (e.g. container started without GPU passthrough).
-    /// Callers can use this for diagnostics; both process() and processRaw()
-    /// transparently dispatch to the CPU implementation in this state.
-    bool usesCpuFallback() const { return use_cpu_fallback_; }
+    /// Returns true when the active backend is the CPU fallback (no GPU
+    /// path is compiled in, or all GPU probes failed at construction).
+    bool usesCpuFallback() const;
+
+    /// Short name of the active backend: "cuda", "hip", "sycl", or "cpu".
+    /// Primarily for logging / diagnostics.
+    const char * backendName() const;
+
+    /// Configured RNG seed (0 = non-deterministic).
+    uint64_t seed() const { return seed_; }
 
 private:
-    void ensureBuffers(int n);
-    void ensureResampleBuffers(int raw_n, int out_n, int H);
-    void ensureRandStates(int n);
-
-    bool use_cpu_fallback_ = false;
-    void * stream_ = nullptr;
-
-    // Device buffers — noise processing
-    void * d_depth_   = nullptr;
-    void * d_retro_   = nullptr;
-    void * d_range_   = nullptr;
-    void * d_signal_  = nullptr;
-    void * d_refl_    = nullptr;
-    void * d_nearir_  = nullptr;
-    void * d_rand_states_ = nullptr;
-
-    // Device buffers — resampling
-    void * d_raw_frame_ = nullptr;
-    void * d_beam_alt_  = nullptr;
-    void * d_beam_az_   = nullptr;
-
-    int buf_n_      = 0;
-    int rand_n_     = 0;
-    int raw_buf_n_  = 0;
-    int beam_buf_n_ = 0;
+    uint64_t seed_ = 0;
+    std::unique_ptr<Backend> backend_;
 };
 
 }  // namespace gz_gpu_ouster_lidar

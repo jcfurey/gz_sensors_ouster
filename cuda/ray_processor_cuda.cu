@@ -1,9 +1,13 @@
 // Copyright 2026 John C. Furey
 // SPDX-License-Identifier: Apache-2.0
+//
+// NVIDIA CUDA backend. Kernel bodies are near-1:1 mirrored in
+// ray_processor_hip.cpp (AMD HIP). When fixing a bug in the math here,
+// check there too. The SYCL backend (ray_processor_sycl.cpp) re-expresses
+// the same math in a SYCL kernel model.
 
 #include "ray_processor_cuda.cuh"
-#include "ray_processor_cpu_impl.hpp"
-#include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
+#include "backend.hpp"
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -11,6 +15,7 @@
 #include <cstdint>
 #include <ctime>
 #include <cstdio>
+#include <memory>
 #include <stdexcept>
 
 namespace gz_gpu_ouster_lidar {
@@ -370,268 +375,245 @@ void launchInitRandKernel(
     CUDA_CHECK(cudaGetLastError());
 }
 
-// ── CudaRayProcessor ────────────────────────────────────────────────────────
+// ── CudaBackend ─────────────────────────────────────────────────────────────
 
-CudaRayProcessor::CudaRayProcessor()
+namespace {
+
+class CudaBackend final : public Backend {
+public:
+    CudaBackend(uint64_t seed, cudaStream_t stream) : seed_(seed), stream_(stream) {}
+
+    ~CudaBackend() override
+    {
+        if (d_depth_)       cudaFree(d_depth_);
+        if (d_retro_)       cudaFree(d_retro_);
+        if (d_range_)       cudaFree(d_range_);
+        if (d_signal_)      cudaFree(d_signal_);
+        if (d_refl_)        cudaFree(d_refl_);
+        if (d_nearir_)      cudaFree(d_nearir_);
+        if (d_raw_frame_)   cudaFree(d_raw_frame_);
+        if (d_beam_alt_)    cudaFree(d_beam_alt_);
+        if (d_beam_az_)     cudaFree(d_beam_az_);
+        if (d_rand_states_) cudaFree(d_rand_states_);
+        if (stream_)        cudaStreamDestroy(stream_);
+    }
+
+    void process(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & p) override
+    {
+        const int n = p.H * p.W;
+        ensureBuffers(n);
+        const bool need_rand = noiseEnabled(p);
+        if (need_rand) ensureRandStates(n);
+
+        CUDA_CHECK(cudaMemcpyAsync(d_depth_, depth_host,
+            static_cast<size_t>(n) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        if (retro_host) {
+            CUDA_CHECK(cudaMemcpyAsync(d_retro_, retro_host,
+                static_cast<size_t>(n) * sizeof(float),
+                cudaMemcpyHostToDevice, stream_));
+        }
+
+        launchRayProcessKernel(
+            static_cast<const float *>(d_depth_),
+            retro_host ? static_cast<const float *>(d_retro_) : nullptr,
+            static_cast<uint32_t *>(d_range_),
+            static_cast<uint16_t *>(d_signal_),
+            static_cast<uint8_t *>(d_refl_),
+            static_cast<uint16_t *>(d_nearir_),
+            p,
+            need_rand ? d_rand_states_ : nullptr,
+            stream_);
+
+        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, n);
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
+
+    void processRaw(
+        const float * raw_host,
+        const float * beam_alt_host,
+        const float * beam_az_host,
+        const ResampleParams & rp,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) override
+    {
+        const int raw_n = rp.gpu_H * rp.gpu_W * rp.gpu_chan;
+        const int out_n = rp.H * rp.W;
+
+        ensureBuffers(out_n);
+        ensureResampleBuffers(raw_n, rp.H);
+
+        const bool need_rand = noiseEnabled(pp);
+        if (need_rand) ensureRandStates(out_n);
+
+        CUDA_CHECK(cudaMemcpyAsync(d_raw_frame_, raw_host,
+            static_cast<size_t>(raw_n) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(d_beam_alt_, beam_alt_host,
+            static_cast<size_t>(rp.H) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(d_beam_az_, beam_az_host,
+            static_cast<size_t>(rp.H) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+
+        launchResampleKernel(
+            static_cast<const float *>(d_raw_frame_),
+            static_cast<const float *>(d_beam_alt_),
+            static_cast<const float *>(d_beam_az_),
+            static_cast<float *>(d_depth_),
+            static_cast<float *>(d_retro_),
+            rp, stream_);
+
+        launchRayProcessKernel(
+            static_cast<const float *>(d_depth_),
+            static_cast<const float *>(d_retro_),
+            static_cast<uint32_t *>(d_range_),
+            static_cast<uint16_t *>(d_signal_),
+            static_cast<uint8_t *>(d_refl_),
+            static_cast<uint16_t *>(d_nearir_),
+            pp,
+            need_rand ? d_rand_states_ : nullptr,
+            stream_);
+
+        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, out_n);
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
+
+    const char * name() const override { return "cuda"; }
+
+private:
+    static bool noiseEnabled(const RayProcessParams & p)
+    {
+        return p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
+               p.signal_noise_scale > 0.f || p.nearir_noise_scale > 0.f ||
+               p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
+               p.edge_discon_threshold > 0.f;
+    }
+
+    static void realloc_(void * & ptr, size_t bytes)
+    {
+        if (ptr) { CUDA_CHECK(cudaFree(ptr)); ptr = nullptr; }
+        CUDA_CHECK(cudaMalloc(&ptr, bytes));
+    }
+
+    void ensureBuffers(int n)
+    {
+        if (n <= buf_n_) return;
+        realloc_(d_depth_,  static_cast<size_t>(n) * sizeof(float));
+        realloc_(d_retro_,  static_cast<size_t>(n) * sizeof(float));
+        realloc_(d_range_,  static_cast<size_t>(n) * sizeof(uint32_t));
+        realloc_(d_signal_, static_cast<size_t>(n) * sizeof(uint16_t));
+        realloc_(d_refl_,   static_cast<size_t>(n) * sizeof(uint8_t));
+        realloc_(d_nearir_, static_cast<size_t>(n) * sizeof(uint16_t));
+        buf_n_ = n;
+    }
+
+    void ensureResampleBuffers(int raw_n, int H)
+    {
+        if (raw_n > raw_buf_n_) {
+            realloc_(d_raw_frame_, static_cast<size_t>(raw_n) * sizeof(float));
+            raw_buf_n_ = raw_n;
+        }
+        if (H > beam_buf_n_) {
+            realloc_(d_beam_alt_, static_cast<size_t>(H) * sizeof(float));
+            realloc_(d_beam_az_,  static_cast<size_t>(H) * sizeof(float));
+            beam_buf_n_ = H;
+        }
+    }
+
+    void ensureRandStates(int n)
+    {
+        if (n <= rand_n_) return;
+        if (d_rand_states_) { CUDA_CHECK(cudaFree(d_rand_states_)); d_rand_states_ = nullptr; }
+        CUDA_CHECK(cudaMalloc(&d_rand_states_,
+            static_cast<size_t>(n) * sizeof(curandState)));
+
+        // seed_ == 0 means non-deterministic (production). Any non-zero seed
+        // configured at construction time makes the noise reproducible.
+        const unsigned long rng_seed = (seed_ != 0)
+            ? static_cast<unsigned long>(seed_)
+            : static_cast<unsigned long>(clock());
+        launchInitRandKernel(d_rand_states_, rng_seed, n, stream_);
+        rand_n_ = n;
+    }
+
+    void d2hResults(
+        uint32_t * range_out,
+        uint16_t * signal_out,
+        uint8_t *  reflectivity_out,
+        uint16_t * nearir_out,
+        int n)
+    {
+        CUDA_CHECK(cudaMemcpyAsync(range_out, d_range_,
+            static_cast<size_t>(n) * sizeof(uint32_t),
+            cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(signal_out, d_signal_,
+            static_cast<size_t>(n) * sizeof(uint16_t),
+            cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(reflectivity_out, d_refl_,
+            static_cast<size_t>(n) * sizeof(uint8_t),
+            cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(nearir_out, d_nearir_,
+            static_cast<size_t>(n) * sizeof(uint16_t),
+            cudaMemcpyDeviceToHost, stream_));
+    }
+
+    uint64_t seed_ = 0;
+    cudaStream_t stream_ = nullptr;
+
+    // Device buffers — noise processing
+    void * d_depth_   = nullptr;
+    void * d_retro_   = nullptr;
+    void * d_range_   = nullptr;
+    void * d_signal_  = nullptr;
+    void * d_refl_    = nullptr;
+    void * d_nearir_  = nullptr;
+    void * d_rand_states_ = nullptr;
+
+    // Device buffers — resampling
+    void * d_raw_frame_ = nullptr;
+    void * d_beam_alt_  = nullptr;
+    void * d_beam_az_   = nullptr;
+
+    int buf_n_      = 0;
+    int rand_n_     = 0;
+    int raw_buf_n_  = 0;
+    int beam_buf_n_ = 0;
+};
+
+}  // namespace
+
+// ── Factory ─────────────────────────────────────────────────────────────────
+// Returns nullptr when no CUDA device is present or stream creation fails —
+// e.g. a binary built with CUDA but running on a container without GPU
+// passthrough. The dispatcher then tries the next backend (HIP / SYCL / CPU).
+
+std::unique_ptr<Backend> makeCudaBackend(uint64_t seed)
 {
-    // Probe for a usable CUDA device. If the binary was built with CUDA but
-    // the container/host has no GPU passthrough (e.g. the `robot-nogpu`
-    // compose profile), cudaGetDeviceCount returns cudaErrorNoDevice. Fall
-    // back to the CPU path instead of throwing, so the sim stack stays up.
     int device_count = 0;
     cudaError_t err = cudaGetDeviceCount(&device_count);
     if (err != cudaSuccess || device_count == 0) {
-        std::fprintf(stderr,
-            "[gz_gpu_ouster_lidar] No CUDA-capable device available "
-            "(cudaGetDeviceCount: %s); falling back to CPU implementation.\n",
-            cudaGetErrorString(err));
         cudaGetLastError();  // clear sticky error so later CUDA calls aren't poisoned
-        use_cpu_fallback_ = true;
-        return;
+        return nullptr;
     }
 
     cudaStream_t s = nullptr;
     err = cudaStreamCreate(&s);
     if (err != cudaSuccess) {
-        std::fprintf(stderr,
-            "[gz_gpu_ouster_lidar] cudaStreamCreate failed (%s); "
-            "falling back to CPU implementation.\n",
-            cudaGetErrorString(err));
         cudaGetLastError();
-        use_cpu_fallback_ = true;
-        return;
+        return nullptr;
     }
-    stream_ = static_cast<void *>(s);
-}
-
-CudaRayProcessor::~CudaRayProcessor()
-{
-    if (use_cpu_fallback_) return;
-
-    if (d_depth_)       cudaFree(d_depth_);
-    if (d_retro_)       cudaFree(d_retro_);
-    if (d_range_)       cudaFree(d_range_);
-    if (d_signal_)      cudaFree(d_signal_);
-    if (d_refl_)        cudaFree(d_refl_);
-    if (d_nearir_)      cudaFree(d_nearir_);
-    if (d_raw_frame_)   cudaFree(d_raw_frame_);
-    if (d_beam_alt_)    cudaFree(d_beam_alt_);
-    if (d_beam_az_)     cudaFree(d_beam_az_);
-    if (d_rand_states_) cudaFree(d_rand_states_);
-    if (stream_)        cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
-}
-
-void CudaRayProcessor::ensureBuffers(int n)
-{
-    if (n <= buf_n_) return;
-
-    auto realloc = [&](void * & ptr, size_t bytes) {
-        if (ptr) { CUDA_CHECK(cudaFree(ptr)); ptr = nullptr; }
-        CUDA_CHECK(cudaMalloc(&ptr, bytes));
-    };
-
-    realloc(d_depth_,  static_cast<size_t>(n) * sizeof(float));
-    realloc(d_retro_,  static_cast<size_t>(n) * sizeof(float));
-    realloc(d_range_,  static_cast<size_t>(n) * sizeof(uint32_t));
-    realloc(d_signal_, static_cast<size_t>(n) * sizeof(uint16_t));
-    realloc(d_refl_,   static_cast<size_t>(n) * sizeof(uint8_t));
-    realloc(d_nearir_, static_cast<size_t>(n) * sizeof(uint16_t));
-
-    buf_n_ = n;
-}
-
-void CudaRayProcessor::ensureRandStates(int n)
-{
-    if (n <= rand_n_) return;
-
-    if (d_rand_states_) { CUDA_CHECK(cudaFree(d_rand_states_)); d_rand_states_ = nullptr; }
-    CUDA_CHECK(cudaMalloc(&d_rand_states_, static_cast<size_t>(n) * sizeof(curandState)));
-
-    launchInitRandKernel(
-        d_rand_states_,
-        static_cast<unsigned long>(clock()),
-        n, stream_);
-
-    rand_n_ = n;
-}
-
-void CudaRayProcessor::process(
-    const float * depth_host,
-    const float * retro_host,
-    uint32_t *    range_out,
-    uint16_t *    signal_out,
-    uint8_t *     reflectivity_out,
-    uint16_t *    nearir_out,
-    const RayProcessParams & p)
-{
-    if (use_cpu_fallback_) {
-        processCpu(depth_host, retro_host,
-                   range_out, signal_out, reflectivity_out, nearir_out, p);
-        return;
-    }
-
-    const int n = p.H * p.W;
-    auto stream = static_cast<cudaStream_t>(stream_);
-
-    ensureBuffers(n);
-    bool need_rand = p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
-                     p.signal_noise_scale > 0.f || p.nearir_noise_scale > 0.f ||
-                     p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
-                     p.edge_discon_threshold > 0.f;
-    if (need_rand) ensureRandStates(n);
-
-    // H2D: depth (always) and retro (if available)
-    CUDA_CHECK(cudaMemcpyAsync(
-        d_depth_, depth_host,
-        static_cast<size_t>(n) * sizeof(float),
-        cudaMemcpyHostToDevice, stream));
-
-    if (retro_host) {
-        CUDA_CHECK(cudaMemcpyAsync(
-            d_retro_, retro_host,
-            static_cast<size_t>(n) * sizeof(float),
-            cudaMemcpyHostToDevice, stream));
-    }
-
-    // Launch kernel
-    launchRayProcessKernel(
-        static_cast<const float *>(d_depth_),
-        retro_host ? static_cast<const float *>(d_retro_) : nullptr,
-        static_cast<uint32_t *>(d_range_),
-        static_cast<uint16_t *>(d_signal_),
-        static_cast<uint8_t *>(d_refl_),
-        static_cast<uint16_t *>(d_nearir_),
-        p,
-        need_rand ? d_rand_states_ : nullptr,
-        stream_);
-
-    // D2H: results
-    CUDA_CHECK(cudaMemcpyAsync(
-        range_out, d_range_,
-        static_cast<size_t>(n) * sizeof(uint32_t),
-        cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(
-        signal_out, d_signal_,
-        static_cast<size_t>(n) * sizeof(uint16_t),
-        cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(
-        reflectivity_out, d_refl_,
-        static_cast<size_t>(n) * sizeof(uint8_t),
-        cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(
-        nearir_out, d_nearir_,
-        static_cast<size_t>(n) * sizeof(uint16_t),
-        cudaMemcpyDeviceToHost, stream));
-
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-}
-
-void CudaRayProcessor::ensureResampleBuffers(int raw_n, int out_n, int H)
-{
-    // Allocations here use the default stream via cudaMalloc; stream_ is only
-    // needed by the async launch/copy paths elsewhere in this class.
-    auto realloc = [&](void * & ptr, size_t bytes) {
-        if (ptr) { CUDA_CHECK(cudaFree(ptr)); ptr = nullptr; }
-        CUDA_CHECK(cudaMalloc(&ptr, bytes));
-    };
-
-    if (raw_n > raw_buf_n_) {
-        realloc(d_raw_frame_, static_cast<size_t>(raw_n) * sizeof(float));
-        raw_buf_n_ = raw_n;
-    }
-    if (H > beam_buf_n_) {
-        realloc(d_beam_alt_, static_cast<size_t>(H) * sizeof(float));
-        realloc(d_beam_az_,  static_cast<size_t>(H) * sizeof(float));
-        beam_buf_n_ = H;
-    }
-    // d_depth_ and d_retro_ are ensured by ensureBuffers(out_n).
-    (void)out_n;
-}
-
-void CudaRayProcessor::processRaw(
-    const float * raw_host,
-    const float * beam_alt_host,
-    const float * beam_az_host,
-    const ResampleParams & rp,
-    uint32_t *    range_out,
-    uint16_t *    signal_out,
-    uint8_t *     reflectivity_out,
-    uint16_t *    nearir_out,
-    const RayProcessParams & pp)
-{
-    if (use_cpu_fallback_) {
-        processRawCpu(raw_host, beam_alt_host, beam_az_host, rp,
-                      range_out, signal_out, reflectivity_out, nearir_out, pp);
-        return;
-    }
-
-    const int raw_n = rp.gpu_H * rp.gpu_W * rp.gpu_chan;
-    const int out_n = rp.H * rp.W;
-    auto stream = static_cast<cudaStream_t>(stream_);
-
-    ensureBuffers(out_n);
-    ensureResampleBuffers(raw_n, out_n, rp.H);
-
-    bool need_rand = pp.range_noise_min_std > 0.f || pp.range_noise_max_std > 0.f ||
-                     pp.signal_noise_scale > 0.f || pp.nearir_noise_scale > 0.f ||
-                     pp.dropout_rate_close > 0.f || pp.dropout_rate_far > 0.f ||
-                     pp.edge_discon_threshold > 0.f;
-    if (need_rand) ensureRandStates(out_n);
-
-    // H2D: raw GpuRays frame + beam angles
-    CUDA_CHECK(cudaMemcpyAsync(
-        d_raw_frame_, raw_host,
-        static_cast<size_t>(raw_n) * sizeof(float),
-        cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(
-        d_beam_alt_, beam_alt_host,
-        static_cast<size_t>(rp.H) * sizeof(float),
-        cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(
-        d_beam_az_, beam_az_host,
-        static_cast<size_t>(rp.H) * sizeof(float),
-        cudaMemcpyHostToDevice, stream));
-
-    // Kernel 1: resample → d_depth_, d_retro_ (stays on GPU)
-    launchResampleKernel(
-        static_cast<const float *>(d_raw_frame_),
-        static_cast<const float *>(d_beam_alt_),
-        static_cast<const float *>(d_beam_az_),
-        static_cast<float *>(d_depth_),
-        static_cast<float *>(d_retro_),
-        rp, stream_);
-
-    // Kernel 2: noise + channel synthesis (reads d_depth_/d_retro_ on GPU)
-    launchRayProcessKernel(
-        static_cast<const float *>(d_depth_),
-        static_cast<const float *>(d_retro_),
-        static_cast<uint32_t *>(d_range_),
-        static_cast<uint16_t *>(d_signal_),
-        static_cast<uint8_t *>(d_refl_),
-        static_cast<uint16_t *>(d_nearir_),
-        pp,
-        need_rand ? d_rand_states_ : nullptr,
-        stream_);
-
-    // D2H: final results only
-    CUDA_CHECK(cudaMemcpyAsync(
-        range_out, d_range_,
-        static_cast<size_t>(out_n) * sizeof(uint32_t),
-        cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(
-        signal_out, d_signal_,
-        static_cast<size_t>(out_n) * sizeof(uint16_t),
-        cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(
-        reflectivity_out, d_refl_,
-        static_cast<size_t>(out_n) * sizeof(uint8_t),
-        cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(
-        nearir_out, d_nearir_,
-        static_cast<size_t>(out_n) * sizeof(uint16_t),
-        cudaMemcpyDeviceToHost, stream));
-
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    return std::make_unique<CudaBackend>(seed, s);
 }
 
 }  // namespace gz_gpu_ouster_lidar

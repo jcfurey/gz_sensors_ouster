@@ -19,14 +19,20 @@ void processCpu(
     uint16_t *    signal_out,
     uint8_t *     reflectivity_out,
     uint16_t *    nearir_out,
-    const RayProcessParams & p)
+    const RayProcessParams & p,
+    uint64_t      seed)
 {
     const int H = p.H;
     const int W = p.W;
     const int n = H * W;
 
-    // Thread-local RNG for CPU fallback
-    static thread_local std::mt19937 rng{std::random_device{}()};
+    // Seeded callers (tests) get a call-local RNG for reproducibility.
+    // Default callers (production) share a thread-local non-deterministic RNG
+    // to avoid reseeding every frame.
+    static thread_local std::mt19937 tl_rng{std::random_device{}()};
+    std::mt19937 local_rng;
+    if (seed != 0) local_rng.seed(static_cast<std::mt19937::result_type>(seed));
+    std::mt19937 & rng = (seed != 0) ? local_rng : tl_rng;
     std::normal_distribution<float> norm(0.0f, 1.0f);
     std::uniform_real_distribution<float> uni(0.0f, 1.0f);
 
@@ -157,7 +163,8 @@ void processRawCpu(
     uint16_t *    signal_out,
     uint8_t *     reflectivity_out,
     uint16_t *    nearir_out,
-    const RayProcessParams & pp)
+    const RayProcessParams & pp,
+    uint64_t      seed)
 {
     const int H = rp.H, W = rp.W;
     const int gpu_H = rp.gpu_H, gpu_W = rp.gpu_W, gpu_chan = rp.gpu_chan;
@@ -245,7 +252,7 @@ void processRawCpu(
     }
 
     processCpu(depth_buf.data(), retro_buf.data(),
-               range_out, signal_out, reflectivity_out, nearir_out, pp);
+               range_out, signal_out, reflectivity_out, nearir_out, pp, seed);
 }
 
 }  // namespace gz_gpu_ouster_lidar
