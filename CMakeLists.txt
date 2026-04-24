@@ -54,9 +54,22 @@ find_package(Eigen3 REQUIRED)
 include(CheckLanguage)
 
 # ── CUDA (NVIDIA) ────────────────────────────────────────────────────────────
+# check_language(CUDA) skips re-probing when CMAKE_CUDA_COMPILER is already
+# cached — so a stale path (e.g. /usr/bin/nvcc from an older container image
+# where nvcc was symlinked there) survives reconfigures and then trips
+# enable_language(CUDA) with "not a full path to an existing compiler tool".
+# Guard: if the cached path no longer exists, clear it and re-probe so CMake
+# finds the current nvcc on PATH.
 check_language(CUDA)
+if(CMAKE_CUDA_COMPILER AND NOT EXISTS "${CMAKE_CUDA_COMPILER}")
+  message(STATUS
+    "${PROJECT_NAME}: cached CMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER} "
+    "does not exist; clearing and re-probing")
+  unset(CMAKE_CUDA_COMPILER CACHE)
+  check_language(CUDA)
+endif()
 set(GZ_GPU_OUSTER_USE_CUDA OFF CACHE BOOL "Build the CUDA backend for NVIDIA GPUs")
-if(CMAKE_CUDA_COMPILER)
+if(CMAKE_CUDA_COMPILER AND EXISTS "${CMAKE_CUDA_COMPILER}")
   enable_language(CUDA)
   find_package(CUDAToolkit QUIET)
   if(CUDAToolkit_FOUND)
