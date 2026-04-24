@@ -58,14 +58,26 @@ include(CheckLanguage)
 # cached — so a stale path (e.g. /usr/bin/nvcc from an older container image
 # where nvcc was symlinked there) survives reconfigures and then trips
 # enable_language(CUDA) with "not a full path to an existing compiler tool".
-# Guard: if the cached path no longer exists, clear it and re-probe so CMake
-# finds the current nvcc on PATH.
+# Even when the compiler path is corrected, cached CUDA_*_LIBRARY entries
+# from the previous toolkit install (e.g. /usr/lib/x86_64-linux-gnu/libcurand.so
+# on an earlier Debian-layout image) survive and break the link step with
+# "No rule to make target …libcurand.so".
+# Guard: when the cached compiler path no longer exists, the whole CUDA
+# cache is from a different toolkit and untrustworthy — wipe every CUDA_*
+# and CUDAToolkit_* entry, then re-probe.
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER AND NOT EXISTS "${CMAKE_CUDA_COMPILER}")
   message(STATUS
     "${PROJECT_NAME}: cached CMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER} "
-    "does not exist; clearing and re-probing")
+    "does not exist; clearing CUDA cache and re-probing")
   unset(CMAKE_CUDA_COMPILER CACHE)
+  get_cmake_property(_cuda_cache_vars CACHE_VARIABLES)
+  foreach(_v IN LISTS _cuda_cache_vars)
+    if(_v MATCHES "^CUDA_|^CUDAToolkit")
+      unset(${_v} CACHE)
+    endif()
+  endforeach()
+  unset(_cuda_cache_vars)
   check_language(CUDA)
 endif()
 set(GZ_GPU_OUSTER_USE_CUDA OFF CACHE BOOL "Build the CUDA backend for NVIDIA GPUs")
