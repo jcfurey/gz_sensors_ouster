@@ -69,3 +69,48 @@ jobs:
           source install/setup.bash
           colcon test --packages-select gz_sensors_ouster --event-handlers console_direct+
           colcon test-result --verbose --all
+
+  # Compile-only smoke test for the HIP (AMD) backend. No AMD GPU in CI, so
+  # we only verify the source compiles under hipcc. Runtime coverage must
+  # be done on real ROCm hardware.
+  hip-smoke:
+    name: HIP smoke build (no device)
+    runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-22.04:6.1-complete
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile HIP backend in isolation
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq cmake build-essential
+          mkdir -p /tmp/hip-smoke && cd /tmp/hip-smoke
+          # Build just the HIP TU against its own includes; we don't have
+          # the full ROS stack in this container, so we only check that the
+          # HIP kernel source compiles. Link errors on unresolved Backend
+          # symbols are expected and ignored.
+          /opt/rocm/bin/hipcc -std=c++17 -fPIC -D__HIP_PLATFORM_AMD__=1 \
+            -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
+            -c $GITHUB_WORKSPACE/cuda/ray_processor_hip.cpp \
+            -o ray_processor_hip.o
+          echo "HIP backend compiled OK."
+
+  # Compile-only smoke test for the SYCL (Intel) backend. Uses the public
+  # Intel oneAPI base-toolkit container. Same caveat as HIP — no device.
+  sycl-smoke:
+    name: SYCL smoke build (no device)
+    runs-on: ubuntu-latest
+    container:
+      image: intel/oneapi-basekit:2024.2.1-0-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile SYCL backend in isolation
+        shell: bash
+        run: |
+          . /opt/intel/oneapi/setvars.sh
+          icpx -fsycl -std=c++17 -fPIC \
+            -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
+            -c $GITHUB_WORKSPACE/cuda/ray_processor_sycl.cpp \
+            -o ray_processor_sycl.o
+          echo "SYCL backend compiled OK."

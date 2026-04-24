@@ -9,16 +9,18 @@ hardware -- no driver changes needed.
 ## Features
 
 - Per-beam elevation and azimuth geometry from Ouster calibration JSON
-- CUDA post-processing with automatic CPU fallback (range noise, signal
-  model, dropouts, edge suppression, near-IR)
+- Multi-vendor GPU post-processing: **CUDA** (NVIDIA), **HIP** (AMD incl.
+  APUs, with unified-memory fast path), **SYCL** (Intel iGPU + Arc, via
+  oneAPI DPC++ or AdaptiveCpp). Automatic CPU fallback when no GPU
+  toolchain is compiled in or no device is found at runtime.
 - Native `PacketMsg` encoding via Ouster SDK `PacketWriter`
   (RANGE, SIGNAL, REFLECTIVITY, NEAR_IR channels)
 - Simulated IMU packets from Gazebo's IMU sensor (optional, auto-detect)
 - Noise parameters reconfigurable at runtime via `ros2 param set`
 - Latched metadata republishing for rmw_zenoh_cpp compatibility
 - Rolling-shutter packet timing via drain thread
-- Works on **any GPU** (AMD, Intel, NVIDIA) -- ray casting uses OpenGL
-  via OGRE2. CUDA is only used for noise processing and is optional.
+- Works on **any GPU** for ray casting (OGRE2 + OpenGL is vendor-agnostic);
+  the GPU noise path is additionally accelerated on NVIDIA/AMD/Intel.
 
 ## Published Topics
 
@@ -47,8 +49,15 @@ Image, CameraInfo, and IMU topics are only published when subscribers are presen
 - **Ouster SDK** (via the `ouster-ros` submodule -- run
   `git submodule update --init --recursive`)
 - **Eigen3**
-- **CUDA Toolkit** (optional -- automatically falls back to CPU if not
-  installed. The CPU fallback produces identical results.)
+- **GPU toolchain** (optional, any of):
+  - **CUDA Toolkit** (NVIDIA) -- detected automatically via `nvcc`
+  - **ROCm / HIP** (AMD, incl. APUs) -- pass `-DGZ_GPU_OUSTER_USE_HIP=ON`
+    with `hipcc` available; APU unified memory is used automatically
+  - **Intel oneAPI DPC++** (Intel iGPU, Arc) -- pass
+    `-DCMAKE_CXX_COMPILER=icpx` and the SYCL backend enables itself, or
+    use AdaptiveCpp with `-DGZ_GPU_OUSTER_USE_SYCL=ON`
+  - With none of the above the plugin compiles on CPU only (OpenMP-
+    parallelised); produces identical results at lower throughput.
 
 For IMU simulation, your world SDF must also load the Gazebo IMU system:
 ```xml
@@ -60,6 +69,49 @@ For IMU simulation, your world SDF must also load the Gazebo IMU system:
 ```bash
 colcon build --packages-select gz_sensors_ouster
 ```
+
+By default CMake probes your toolchain and enables the appropriate GPU
+backend automatically. Force a specific combination with:
+
+```bash
+colcon build --packages-select gz_sensors_ouster --cmake-args \
+  -DGZ_GPU_OUSTER_USE_CUDA=ON \
+  -DGZ_GPU_OUSTER_USE_HIP=OFF \
+  -DGZ_GPU_OUSTER_USE_SYCL=OFF
+```
+
+## GPU Backends
+
+At runtime the plugin dispatches to the first backend that successfully
+initialises a device, in preference order: **CUDA → HIP → SYCL → CPU**.
+Each backend reports itself in the Gazebo log on startup:
+
+```
+[gz_gpu_ouster_lidar] HIP backend: device='Radeon 780M (gfx1103)' integrated=yes (managed-memory path ON)
+[gz_gpu_ouster_lidar] Using hip-apu backend.
+```
+
+| Backend | Vendor | Notes |
+|---------|--------|-------|
+| `cuda`     | NVIDIA | Requires CUDA Toolkit + driver; uses `curand` for noise. |
+| `hip`      | AMD discrete | Requires ROCm; uses `hiprand`. |
+| `hip-apu`  | AMD APU | Same as `hip` but allocates via `hipMallocManaged`, skipping H2D/D2H over the shared-memory die. |
+| `sycl`     | Intel Arc | Requires oneAPI DPC++ (`icpx`) or AdaptiveCpp. Uses `sycl::malloc_shared`. |
+| `sycl-igpu`| Intel iGPU | Same backend, integrated-memory fast path. |
+| `cpu`      | Any | OpenMP-parallelised; noise parity with GPU paths. Automatic fallback when no GPU device is found. |
+
+### Environment override
+
+Set `GZ_OUSTER_BACKEND` to force a specific backend (useful for
+debugging a cross-vendor build):
+
+```bash
+GZ_OUSTER_BACKEND=cpu  ros2 launch my_sim bringup.launch.py
+GZ_OUSTER_BACKEND=sycl ros2 launch my_sim bringup.launch.py
+```
+
+If the forced backend is unavailable on the host, the dispatcher logs a
+warning and falls through to the auto-selection order.
 
 ## SDF Usage
 
