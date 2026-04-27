@@ -613,6 +613,17 @@ void GzGpuOusterLidarSystem::OnRender()
         // and get_subscription_count() may lag behind actual Zenoh peer state.
         // Republish every ~1s (assuming render ticks at sensor hz) until we
         // see a subscriber AND have published at least a few times.
+        const auto meta_subs = meta_pub_->get_subscription_count();
+        if (metadata_published_ && meta_subs == 0) {
+            // Subscriber dropped (Foxglove tab refresh, os_cloud restart,
+            // network blip). transient_local replay won't reliably re-deliver
+            // the latched metadata when the sub reconnects on rmw_zenoh, so
+            // re-arm the republish loop instead of staying latched forever.
+            metadata_published_ = false;
+            metadata_pub_count_ = 0;
+            RCLCPP_INFO(kLogger,
+                "metadata subscriber count dropped to 0; re-arming republish");
+        }
         if (!metadata_published_) {
             ++metadata_pub_count_;
             // Throttle: republish roughly every 1 second worth of render ticks.
@@ -625,7 +636,7 @@ void GzGpuOusterLidarSystem::OnRender()
                 meta_pub_->publish(meta_msg);
             }
             // Only stop after subscriber detected AND we've sent enough for Zenoh to settle
-            if (meta_pub_->get_subscription_count() > 0 && metadata_pub_count_ > ticks_per_sec * 2) {
+            if (meta_subs > 0 && metadata_pub_count_ > ticks_per_sec * 2) {
                 metadata_published_ = true;
                 RCLCPP_INFO(kLogger, "metadata delivered to os_cloud (after %d publishes)",
                     metadata_pub_count_);
