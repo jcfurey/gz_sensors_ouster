@@ -26,6 +26,12 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>ouster_sensor_msgs</depend>
+  <!-- ouster_ros provides the ouster_client library that defines
+       SensorInfo / PacketFormat / PacketWriter symbols used by the plugin.
+       PacketWriter setters are inline templates, but the SensorInfo(json)
+       constructor and PacketFormat::PacketFormat(SensorInfo) live in
+       ouster-sdk/ouster_client/src/{sensor_info,parsing}.cpp — runtime
+       link dep, not build-only. -->
   <depend>ouster_ros</depend>
 
   <!-- Eigen is only used in the .cpp (Eigen::Map), not in our public headers,
