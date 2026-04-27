@@ -162,6 +162,10 @@ private:
     std::vector<float> beam_az_f_;      // beam_az_offsets_ as float
     std::mutex frame_mtx_;
     std::atomic<bool> frame_ready_{false};
+    // Cumulative count of GpuRays frames that arrived while a previous
+    // frame was still pending in raw_frame_buf_ — i.e. PostUpdate didn't
+    // drain in time and the older frame was overwritten unobserved.
+    std::atomic<uint64_t> dropped_frames_{0};
 
     // ── ROS 2 node & publishers ──────────────────────────────────────────────
     // publish_mtx_ serialises all publish() calls across threads (render,

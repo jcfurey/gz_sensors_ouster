@@ -870,6 +870,20 @@ void GzGpuOusterLidarSystem::onNewFrame(
     const size_t n = static_cast<size_t>(width) * height * channels;
 
     std::lock_guard<std::mutex> lk(frame_mtx_);
+    if (frame_ready_.load(std::memory_order_acquire)) {
+        // Previous frame hasn't been consumed by PostUpdate yet; we're
+        // about to overwrite it. Surface the drop so a sustained problem
+        // (sim-time stall, post-pause burst, undersized PostUpdate budget)
+        // is visible in logs instead of silent.
+        const uint64_t dropped = dropped_frames_.fetch_add(1) + 1;
+        if (ros_node_) {
+            RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
+                "%s: dropped GpuRays frame (PostUpdate didn't drain); "
+                "total dropped=%lu",
+                sensor_name_.c_str(),
+                static_cast<unsigned long>(dropped));
+        }
+    }
     raw_frame_buf_.resize(n);
     std::memcpy(raw_frame_buf_.data(), data, n * sizeof(float));
     raw_frame_H_    = static_cast<int>(height);
