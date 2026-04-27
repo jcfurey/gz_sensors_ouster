@@ -235,7 +235,8 @@ void GzGpuOusterLidarSystem::Configure(
     const int n = H_ * W_;
     range_buf_.resize(static_cast<size_t>(n), 0);
     signal_buf_.resize(static_cast<size_t>(n), 0);
-    reflectivity_buf_.resize(static_cast<size_t>(n), 50);
+    reflectivity_buf_.resize(static_cast<size_t>(n),
+                             static_cast<uint8_t>(base_reflectivity_));
     nearir_buf_.resize(static_cast<size_t>(n), 0);
     // Convert beam angles to float for GPU upload.
     beam_alt_f_.resize(beam_alt_angles_.size());
