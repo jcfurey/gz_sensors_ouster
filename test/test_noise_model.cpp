@@ -234,10 +234,16 @@ TEST(NoiseModel, RangeNoiseAddsVariance)
     double mean = sum / valid;
     double var = sum2 / valid - mean * mean;
 
-    // Mean should be near 50000 mm (50 m)
-    EXPECT_NEAR(mean, 50000.0, 500.0);  // within 0.5 m
-    // Variance should be non-zero (noise was applied)
-    EXPECT_GT(var, 0.0);
+    // Expected per-sample sigma:
+    //   t = depth / max_range = 50 / 120 ≈ 0.417
+    //   sigma = min_std + t*(max_std - min_std) = 10 + 0.417*20 = 18.3 mm
+    //   refl_factor at retro=0.5 = min(1/0.5, 2) = 2.0
+    //   effective sigma ≈ 36.7 mm; expected variance ≈ 1346 mm²
+    //   SE of mean over N=10000 ≈ 0.37 mm
+    // Bound mean to ±5 mm (~14σ_mean) and variance to within 2× of expected.
+    EXPECT_NEAR(mean, 50000.0, 5.0);
+    EXPECT_GT(var, 700.0);
+    EXPECT_LT(var, 3000.0);
 }
 
 TEST(NoiseModel, DropoutsReduceValidCount)
@@ -264,15 +270,14 @@ TEST(NoiseModel, DropoutsReduceValidCount)
     }
     int dropped = n - valid;
 
-    // Should have some dropouts (at 100/120 range, expect ~8% * refl_factor)
-    EXPECT_GT(dropped, 0);
-    // But not all dropped
-    EXPECT_LT(dropped, n);
-    // Rough bounds: dropout rate at 100/120 * max_range ~ 8.3%, with refl_factor ~2
-    // so effective rate ~16.7%.  Allow wide margin for randomness.
+    // Expected drop rate: t=100/120≈0.833, p_drop = 0.833*0.10 = 0.0833;
+    // refl_factor at retro=0.5 = 2.0, clamped to ≤1.0 → effective rate
+    // ≈ 0.167. SE over N=50000 ≈ 0.0017.
+    // Bound to ±0.03 (~17σ) so a regression that doubles or zeroes the
+    // rate fails immediately.
     double drop_rate = static_cast<double>(dropped) / n;
-    EXPECT_GT(drop_rate, 0.02);
-    EXPECT_LT(drop_rate, 0.50);
+    EXPECT_GT(drop_rate, 0.137);
+    EXPECT_LT(drop_rate, 0.197);
 }
 
 TEST(NoiseModel, ZeroNoiseProducesDeterministicOutput)
@@ -326,10 +331,11 @@ TEST(NoiseModel, EdgeDiscontinuityCausesDropouts)
         if (range[4] == 0) ++center_dropped;  // center = index 4
     }
 
-    // Center pixel should be suppressed ~50% of the time (uni(rng) < 0.5)
+    // Center pixel should be suppressed ~50% of the time (uni(rng) < 0.5).
+    // SE over 1000 trials ≈ 0.0158; bound to ±0.05 (~3σ).
     double rate = static_cast<double>(center_dropped) / trials;
-    EXPECT_GT(rate, 0.30);
-    EXPECT_LT(rate, 0.70);
+    EXPECT_GT(rate, 0.45);
+    EXPECT_LT(rate, 0.55);
 }
 
 }  // namespace gz_gpu_ouster_lidar
