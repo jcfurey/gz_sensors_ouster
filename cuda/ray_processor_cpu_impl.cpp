@@ -86,7 +86,8 @@ void processCpu(
             float retro_val = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.f)
                 ? retro_host[idx] : 0.5f;
             float refl_factor = std::min(1.0f / std::max(retro_val, 0.33f), 3.0f);
-            p_drop *= refl_factor;
+            // Clamp to [0,1] — see cuda.cu comment.
+            p_drop = std::min(p_drop * refl_factor, 1.0f);
 
             if (uni(rng) < p_drop) {
                 range_out[idx] = 0u;

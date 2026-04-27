@@ -200,7 +200,8 @@ private:
                     float retro_val = (retro && sycl::isfinite(retro[idx]) && retro[idx] > 0.f)
                         ? retro[idx] : 0.5f;
                     float refl_factor = sycl::fmin(1.0f / sycl::fmax(retro_val, 0.33f), 3.0f);
-                    p_drop *= refl_factor;
+                    // Clamp to [0,1] so the curve is honest at dark+far. See cuda.cu.
+                    p_drop = sycl::fmin(p_drop * refl_factor, 1.0f);
                     if (uniform01(counter, seed, idx) < p_drop) {
                         range_out[idx]  = 0u;
                         signal_out[idx] = 0u;
