@@ -7,7 +7,7 @@
 #include <limits>
 #include <vector>
 
-#include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
 
 namespace gz_gpu_ouster_lidar {
 
@@ -89,7 +89,7 @@ TEST(Resample, UniformDepthProducesUniformRange)
     std::vector<uint8_t>  refl(n);
     std::vector<uint16_t> nearir(n);
 
-    CudaRayProcessor proc;
+    RayProcessor proc;
     proc.processRaw(raw.data(), beam_alt.data(), beam_az.data(), rp,
                     range.data(), signal.data(), refl.data(), nearir.data(), pp);
 
@@ -124,7 +124,7 @@ TEST(Resample, AllInfProducesZeroRange)
     std::vector<uint8_t>  refl(n);
     std::vector<uint16_t> nearir(n);
 
-    CudaRayProcessor proc;
+    RayProcessor proc;
     proc.processRaw(raw.data(), beam_alt.data(), beam_az.data(), rp,
                     range.data(), signal.data(), refl.data(), nearir.data(), pp);
 
@@ -154,7 +154,7 @@ TEST(Resample, BeamOriginSubtraction)
     std::vector<uint8_t>  refl(n);
     std::vector<uint16_t> nearir(n);
 
-    CudaRayProcessor proc;
+    RayProcessor proc;
     proc.processRaw(raw.data(), beam_alt.data(), beam_az.data(), rp,
                     range.data(), signal.data(), refl.data(), nearir.data(), pp);
 
@@ -193,7 +193,7 @@ TEST(Resample, AzimuthOffsetShiftsColumns)
     std::vector<uint8_t>  refl(n);
     std::vector<uint16_t> nearir(n);
 
-    CudaRayProcessor proc;
+    RayProcessor proc;
     proc.processRaw(raw.data(), beam_alt.data(), beam_az_zero.data(), rp,
                     range_zero.data(), sig.data(), refl.data(), nearir.data(), pp);
     proc.processRaw(raw.data(), beam_alt.data(), beam_az_offset.data(), rp,

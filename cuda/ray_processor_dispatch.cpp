@@ -1,7 +1,7 @@
 // Copyright 2026 John C. Furey
 // SPDX-License-Identifier: Apache-2.0
 //
-// Runtime dispatcher for CudaRayProcessor. Owns a Backend chosen at
+// Runtime dispatcher for RayProcessor. Owns a Backend chosen at
 // construction time by probing each vendor path in order.
 //
 // Preference order:
@@ -14,10 +14,11 @@
 // specific backend for testing; if the requested backend is unavailable
 // the dispatcher falls through to the default order with a warning.
 //
-// The class name "CudaRayProcessor" is retained for ABI/source compatibility
-// — despite the name it is now vendor-neutral.
+// The class is `RayProcessor`. A `using CudaRayProcessor = RayProcessor`
+// alias lives in cuda_ray_processor.hpp for source-compat with pre-rename
+// callers; new code should include ray_processor.hpp directly.
 
-#include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "backend.hpp"
 
 #include <cstdio>
@@ -83,9 +84,9 @@ std::unique_ptr<Backend> pickBackend(uint64_t seed)
 
 }  // namespace
 
-// ── CudaRayProcessor ────────────────────────────────────────────────────────
+// ── RayProcessor ────────────────────────────────────────────────────────────
 
-CudaRayProcessor::CudaRayProcessor(uint64_t seed)
+RayProcessor::RayProcessor(uint64_t seed)
     : seed_(seed), backend_(pickBackend(seed))
 {
     std::fprintf(stderr,
@@ -93,9 +94,9 @@ CudaRayProcessor::CudaRayProcessor(uint64_t seed)
         backend_ ? backend_->name() : "none");
 }
 
-CudaRayProcessor::~CudaRayProcessor() = default;
+RayProcessor::~RayProcessor() = default;
 
-void CudaRayProcessor::processRaw(
+void RayProcessor::processRaw(
     const float * raw_host,
     const float * beam_alt_host,
     const float * beam_az_host,
@@ -111,12 +112,12 @@ void CudaRayProcessor::processRaw(
                          pp);
 }
 
-bool CudaRayProcessor::usesCpuFallback() const
+bool RayProcessor::usesCpuFallback() const
 {
     return backend_ && std::strcmp(backend_->name(), "cpu") == 0;
 }
 
-const char * CudaRayProcessor::backendName() const
+const char * RayProcessor::backendName() const
 {
     return backend_ ? backend_->name() : "none";
 }

@@ -8,7 +8,7 @@
 #include <numeric>
 #include <vector>
 
-#include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "ray_processor_cpu_impl.hpp"
 
 namespace gz_gpu_ouster_lidar {

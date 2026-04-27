@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
 
 #include <cstdint>
 

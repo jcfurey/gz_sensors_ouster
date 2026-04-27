@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "gz_gpu_ouster_lidar/gz_gpu_ouster_lidar_system.hpp"
-#include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -219,13 +219,13 @@ void GzGpuOusterLidarSystem::Configure(
     // throw still disables just this plugin rather than taking the whole sim
     // down.
     try {
-        cuda_processor_ = std::make_unique<CudaRayProcessor>();
+        ray_processor_ = std::make_unique<RayProcessor>();
     } catch (const std::exception & e) {
         RCLCPP_ERROR(kLogger,
             "Ray processor init failed: %s; plugin disabled", e.what());
         return;
     }
-    if (cuda_processor_->usesCpuFallback()) {
+    if (ray_processor_->usesCpuFallback()) {
         RCLCPP_WARN(kLogger,
             "No CUDA-capable device detected; gz_gpu_ouster_lidar running on "
             "CPU fallback (expect lower sim rate on high-resolution sensors).");
@@ -886,7 +886,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     if (stamp_ns <= 0) return;
     if (!pw_ || pkt_buf_.empty()) return;
     if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0 || cpp_ <= 0) return;
-    if (!cuda_processor_) return;
+    if (!ray_processor_) return;
 
     // ── Snapshot noise parameters (may be updated by ROS param callback) ───
     double snap_range_noise_min_std, snap_range_noise_max_std;
@@ -939,7 +939,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     pp.edge_discon_threshold = static_cast<float>(snap_edge_discon_threshold);
 
     // ── GPU pipeline: resample → noise → channel outputs ─────────────────────
-    cuda_processor_->processRaw(
+    ray_processor_->processRaw(
         raw_data,
         beam_alt_f_.data(),
         beam_az_f_.data(),

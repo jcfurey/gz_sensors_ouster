@@ -32,7 +32,7 @@ namespace ouster::sdk::core {
 
 namespace gz_gpu_ouster_lidar {
 
-class CudaRayProcessor;
+class RayProcessor;
 
 /// Gazebo Harmonic system plugin that creates a GpuRays sensor with
 /// per-beam non-uniform elevation angles matching Ouster calibration metadata,
@@ -143,8 +143,8 @@ private:
     void OnRender();
     void DestroyGpuRays();
 
-    // ── CUDA processor ───────────────────────────────────────────────────────
-    std::unique_ptr<CudaRayProcessor> cuda_processor_;
+    // ── Ray processor (vendor-neutral; CUDA/HIP/SYCL/CPU at runtime) ────────
+    std::unique_ptr<RayProcessor> ray_processor_;
 
     // ── Channel buffers ──────────────────────────────────────────────────────
     // Allocated as H×W, filled by CUDA, encoded into packets.

@@ -1,7 +1,7 @@
 // Copyright 2026 John C. Furey
 // SPDX-License-Identifier: Apache-2.0
 //
-// Internal backend interface for CudaRayProcessor. Each vendor path (CUDA
+// Internal backend interface for RayProcessor. Each vendor path (CUDA
 // for NVIDIA, HIP for AMD, SYCL for Intel) implements this, plus an
 // always-available CPU backend used as a fallback when no GPU is present.
 //
@@ -15,7 +15,7 @@
 
 #pragma once
 
-#include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
 
 #include <cstdint>
 #include <memory>
