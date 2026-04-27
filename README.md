@@ -151,8 +151,8 @@ With IMU auto-detection:
 ### Multiple Sensors
 
 Add one `<plugin>` block per sensor. Each gets its own topics, GpuRays
-instance, CUDA stream, and drain thread. Use different `sensor_name`
-prefixes and metadata files:
+instance, GPU stream (or CPU OpenMP pool), and drain thread. Use
+different `sensor_name` prefixes and metadata files:
 
 ```xml
 <!-- Front OS1-64 (primary, with IMU) -->
@@ -291,17 +291,19 @@ consumers don't get literal-zero variances.
 ## Performance
 
 The rendering bottleneck is Ogre2's GpuRays cubemap (6 faces per
-frame). Our CUDA pipeline (resample + noise) adds only ~2-3 ms per
-frame regardless of sensor density. All numbers assume a single sensor.
+frame). The GPU post-processing pipeline (resample + noise) adds only
+~2-3 ms per frame regardless of sensor density on any of the supported
+backends. All numbers assume a single sensor.
 
 ### Estimated max real-time scan rate
 
-Numbers below were measured on NVIDIA RTX GPUs with the CUDA path
-enabled. The plugin itself is GPU-agnostic for ray casting (OGRE2 +
-OpenGL works on AMD and Intel), but CUDA post-processing requires an
-NVIDIA GPU; other vendors automatically use the CPU fallback path —
-expect ~5-10 ms of additional per-frame CPU time for high-density
-sensors.
+Numbers below were measured on NVIDIA RTX GPUs with the CUDA backend
+active. The HIP backend on AMD discrete GPUs is comparable; the
+hip-apu and sycl-igpu paths skip explicit memory copies (managed /
+shared USM) and trade slightly higher kernel time for lower transfer
+overhead — expect within 20% of the CUDA numbers below. The CPU
+fallback path adds ~5-10 ms of per-frame CPU time at high-density
+configs (still real-time-capable for OS1-64 and OS1-128).
 
 | Sensor config | Pixels/frame | RTX 3060 | RTX 3090 | RTX 4090 |
 |---------------|-------------|----------|----------|----------|
@@ -314,14 +316,18 @@ sensors.
 
 ### Per-frame time budget breakdown (4096×512)
 
+Numbers below are for the CUDA backend. HIP / SYCL costs are similar.
+The CPU fallback collapses transfer rows to zero and inflates the
+kernel rows to 5-10 ms each.
+
 | Stage | Time | Notes |
 |-------|------|-------|
 | Ogre2 cubemap (6 faces) | 20-50 ms | **Dominant cost** -- GPU raycast |
 | onNewFrame memcpy | <1 ms | 24 MB raw buffer copy |
-| H2D transfer | ~1 ms | Raw frame to GPU |
+| H2D transfer | ~1 ms | Raw frame to device (skipped on hip-apu / sycl-igpu) |
 | resampleKernel | ~1 ms | 2M threads, bilinear interp |
 | rayProcessKernel | ~1 ms | 2M threads, noise + channels |
-| D2H transfer | ~1 ms | Final channel results |
+| D2H transfer | ~1 ms | Final channel results (skipped on hip-apu / sycl-igpu) |
 | Packet encoding | 2-3 ms | 256 packets × 4 set_block calls |
 
 ### Tips for high-density configs
@@ -335,7 +341,9 @@ sensors.
 - **CPU fallback is viable** for low-density sensors (OS1-16, OS1-32).
   OpenMP parallelisation keeps resampling under 5 ms for <100K pixels.
 - **GPU VRAM**: Each sensor uses ~100 MB for the Ogre2 cubemap plus
-  ~20 MB for CUDA device buffers.
+  ~10-20 MB for backend device buffers (raw frame, channels, RNG state).
+  The plugin logs the per-sensor breakdown on first frame; check the
+  log if multi-sensor configs run into VRAM pressure.
 
 ## Architecture
 
@@ -343,7 +351,14 @@ sensors.
 2. **OnRender()** (render thread) lazily creates GpuRays, triggers GPU raycast
 3. **onNewFrame()** fast-copies the raw GpuRays buffer into a staging area (memcpy only, <1ms)
 4. **PostUpdate()** (sim thread) caches pose, swaps the raw frame out, dispatches to `encodeAndPublish()`, publishes IMU
-5. **encodeAndPublish()** uploads raw frame to GPU, runs resample kernel (bilinear interpolation to exact Ouster beam geometry) → noise kernel (range/signal/reflectivity/near-IR with reflectivity-dependent effects) on a single CUDA stream, downloads results, encodes packets via PacketWriter. CPU fallback uses OpenMP-parallelised resampling + sequential noise.
+5. **encodeAndPublish()** hands the raw frame to the active `RayProcessor`
+   backend (CUDA / HIP / SYCL / CPU — chosen at construction by probing
+   for a usable device). The backend runs the resample kernel
+   (bilinear interpolation to exact Ouster beam geometry) → noise kernel
+   (range/signal/reflectivity/near-IR with reflectivity-dependent
+   effects), then PacketWriter encodes the result. The GPU backends use
+   one device stream per sensor; the CPU backend uses OpenMP for
+   resample and runs noise sequentially.
 6. **drainThreadFunc()** publishes packets with rolling-shutter inter-packet timing
 
 ## License
