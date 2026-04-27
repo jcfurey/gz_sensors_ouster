@@ -18,20 +18,6 @@ class CpuBackend final : public Backend {
 public:
     explicit CpuBackend(uint64_t seed) : seed_(seed) {}
 
-    void process(
-        const float * depth_host,
-        const float * retro_host,
-        uint32_t *    range_out,
-        uint16_t *    signal_out,
-        uint8_t *     reflectivity_out,
-        uint16_t *    nearir_out,
-        const RayProcessParams & p) override
-    {
-        processCpu(depth_host, retro_host,
-                   range_out, signal_out, reflectivity_out, nearir_out,
-                   p, seed_);
-    }
-
     void processRaw(
         const float * raw_host,
         const float * beam_alt_host,

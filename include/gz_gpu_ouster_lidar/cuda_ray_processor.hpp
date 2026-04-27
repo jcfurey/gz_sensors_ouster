@@ -97,16 +97,6 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & pp);
 
-    /// Legacy interface: process pre-resampled depth/retro buffers.
-    void process(
-        const float * depth_host,
-        const float * retro_host,
-        uint32_t *    range_out,
-        uint16_t *    signal_out,
-        uint8_t *     reflectivity_out,
-        uint16_t *    nearir_out,
-        const RayProcessParams & p);
-
     /// Returns true when the active backend is the CPU fallback (no GPU
     /// path is compiled in, or all GPU probes failed at construction).
     bool usesCpuFallback() const;

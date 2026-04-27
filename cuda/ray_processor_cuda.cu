@@ -398,44 +398,6 @@ public:
         if (stream_)        cudaStreamDestroy(stream_);
     }
 
-    void process(
-        const float * depth_host,
-        const float * retro_host,
-        uint32_t *    range_out,
-        uint16_t *    signal_out,
-        uint8_t *     reflectivity_out,
-        uint16_t *    nearir_out,
-        const RayProcessParams & p) override
-    {
-        const int n = p.H * p.W;
-        ensureBuffers(n);
-        const bool need_rand = noiseEnabled(p);
-        if (need_rand) ensureRandStates(n);
-
-        CUDA_CHECK(cudaMemcpyAsync(d_depth_, depth_host,
-            static_cast<size_t>(n) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
-        if (retro_host) {
-            CUDA_CHECK(cudaMemcpyAsync(d_retro_, retro_host,
-                static_cast<size_t>(n) * sizeof(float),
-                cudaMemcpyHostToDevice, stream_));
-        }
-
-        launchRayProcessKernel(
-            static_cast<const float *>(d_depth_),
-            retro_host ? static_cast<const float *>(d_retro_) : nullptr,
-            static_cast<uint32_t *>(d_range_),
-            static_cast<uint16_t *>(d_signal_),
-            static_cast<uint8_t *>(d_refl_),
-            static_cast<uint16_t *>(d_nearir_),
-            p,
-            need_rand ? d_rand_states_ : nullptr,
-            stream_);
-
-        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, n);
-        CUDA_CHECK(cudaStreamSynchronize(stream_));
-    }
-
     void processRaw(
         const float * raw_host,
         const float * beam_alt_host,

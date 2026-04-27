@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "gz_gpu_ouster_lidar/cuda_ray_processor.hpp"
+#include "ray_processor_cpu_impl.hpp"
 
 namespace gz_gpu_ouster_lidar {
 
@@ -47,8 +48,7 @@ TEST(NoiseModel, ValidDepthProducesNonZeroRange)
     std::vector<uint16_t> nearir(n);
 
     auto p = noNoiseParams(H, W);
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     for (int i = 0; i < n; ++i) {
@@ -79,8 +79,7 @@ TEST(NoiseModel, InvalidDepthProducesZeroRange)
     std::vector<uint16_t> nearir(n);
 
     auto p = noNoiseParams(H, W);
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     for (int i = 0; i < n; ++i) {
@@ -101,8 +100,7 @@ TEST(NoiseModel, RangeIsDepthTimesThousand)
     std::vector<uint16_t> nearir(n);
 
     auto p = noNoiseParams(H, W);
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     EXPECT_EQ(range[0], 1000u);
@@ -124,8 +122,7 @@ TEST(NoiseModel, SignalFollowsInverseSquareLaw)
 
     auto p = noNoiseParams(H, W);
     p.base_signal = 1600.0f;
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     // signal = base_signal * intensity / r^2
@@ -148,8 +145,7 @@ TEST(NoiseModel, ReflectivityLambertianScale)
     std::vector<uint16_t> nearir(n);
 
     auto p = noNoiseParams(H, W);
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     // retro=0 is invalid (<=0 check), falls through to base_reflectivity
@@ -171,8 +167,7 @@ TEST(NoiseModel, ReflectivityRetroScale)
     std::vector<uint16_t> nearir(n);
 
     auto p = noNoiseParams(H, W);
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     // 100 + log2(2) * 22 = 100 + 22 = 122
@@ -193,8 +188,7 @@ TEST(NoiseModel, NullRetroUsesDefaults)
 
     auto p = noNoiseParams(H, W);
     p.base_reflectivity = 42.0f;
-    CudaRayProcessor proc;
-    proc.process(depth.data(), nullptr,
+    processCpu(depth.data(), nullptr,
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     for (int i = 0; i < n; ++i) {
@@ -222,8 +216,7 @@ TEST(NoiseModel, RangeNoiseAddsVariance)
     auto p = noNoiseParams(H, W);
     p.range_noise_min_std = 0.01f;
     p.range_noise_max_std = 0.03f;
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     // Compute variance of range values (in mm)
@@ -262,8 +255,7 @@ TEST(NoiseModel, DropoutsReduceValidCount)
     p.dropout_rate_close = 0.0f;
     p.dropout_rate_far = 0.10f;  // 10% at max range
     p.max_range = 120.0f;
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
     int valid = 0;
@@ -295,10 +287,9 @@ TEST(NoiseModel, ZeroNoiseProducesDeterministicOutput)
     std::vector<uint16_t> nearir1(n), nearir2(n);
 
     auto p = noNoiseParams(H, W);
-    CudaRayProcessor proc;
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range1.data(), signal1.data(), refl1.data(), nearir1.data(), p);
-    proc.process(depth.data(), retro.data(),
+    processCpu(depth.data(), retro.data(),
                  range2.data(), signal2.data(), refl2.data(), nearir2.data(), p);
 
     EXPECT_EQ(range1, range2);
@@ -325,13 +316,12 @@ TEST(NoiseModel, EdgeDiscontinuityCausesDropouts)
     // Run many times to check that the center pixel drops out at ~50% rate
     int center_dropped = 0;
     const int trials = 1000;
-    CudaRayProcessor proc;
     for (int t = 0; t < trials; ++t) {
         std::vector<uint32_t> range(n);
         std::vector<uint16_t> signal(n);
         std::vector<uint8_t>  refl(n);
         std::vector<uint16_t> nearir(n);
-        proc.process(depth.data(), retro.data(),
+        processCpu(depth.data(), retro.data(),
                      range.data(), signal.data(), refl.data(), nearir.data(), p);
         if (range[4] == 0) ++center_dropped;  // center = index 4
     }

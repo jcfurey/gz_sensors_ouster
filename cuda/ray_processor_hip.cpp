@@ -296,44 +296,6 @@ public:
         if (stream_) hipStreamDestroy(stream_);
     }
 
-    void process(
-        const float * depth_host,
-        const float * retro_host,
-        uint32_t *    range_out,
-        uint16_t *    signal_out,
-        uint8_t *     reflectivity_out,
-        uint16_t *    nearir_out,
-        const RayProcessParams & p) override
-    {
-        const int n = p.H * p.W;
-        ensureBuffers(n);
-        const bool need_rand = noiseEnabled(p);
-        if (need_rand) ensureRandStates(n);
-
-        h2d(d_depth_, depth_host, static_cast<size_t>(n) * sizeof(float));
-        if (retro_host) h2d(d_retro_, retro_host, static_cast<size_t>(n) * sizeof(float));
-
-        const int grid = (n + kBlock - 1) / kBlock;
-        hipLaunchKernelGGL(rayProcessKernelHip, dim3(grid), dim3(kBlock), 0, stream_,
-            static_cast<const float *>(d_depth_),
-            retro_host ? static_cast<const float *>(d_retro_) : nullptr,
-            static_cast<uint32_t *>(d_range_),
-            static_cast<uint16_t *>(d_signal_),
-            static_cast<uint8_t *>(d_refl_),
-            static_cast<uint16_t *>(d_nearir_),
-            p.H, p.W,
-            p.base_signal, p.base_reflectivity,
-            p.range_noise_min_std, p.range_noise_max_std, p.max_range,
-            p.signal_noise_scale, p.nearir_noise_scale,
-            p.dropout_rate_close, p.dropout_rate_far,
-            p.edge_discon_threshold,
-            need_rand ? static_cast<hiprandState *>(d_rand_states_) : nullptr);
-        HIP_CHECK(hipGetLastError());
-
-        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, n);
-        HIP_CHECK(hipStreamSynchronize(stream_));
-    }
-
     void processRaw(
         const float * raw_host,
         const float * beam_alt_host,

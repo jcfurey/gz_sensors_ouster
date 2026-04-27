@@ -95,19 +95,6 @@ CudaRayProcessor::CudaRayProcessor(uint64_t seed)
 
 CudaRayProcessor::~CudaRayProcessor() = default;
 
-void CudaRayProcessor::process(
-    const float * depth_host,
-    const float * retro_host,
-    uint32_t *    range_out,
-    uint16_t *    signal_out,
-    uint8_t *     reflectivity_out,
-    uint16_t *    nearir_out,
-    const RayProcessParams & p)
-{
-    backend_->process(depth_host, retro_host,
-                      range_out, signal_out, reflectivity_out, nearir_out, p);
-}
-
 void CudaRayProcessor::processRaw(
     const float * raw_host,
     const float * beam_alt_host,

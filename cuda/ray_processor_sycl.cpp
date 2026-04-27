@@ -97,34 +97,6 @@ public:
         maybeFree(u_beam_az_);
     }
 
-    void process(
-        const float * depth_host,
-        const float * retro_host,
-        uint32_t *    range_out,
-        uint16_t *    signal_out,
-        uint8_t *     reflectivity_out,
-        uint16_t *    nearir_out,
-        const RayProcessParams & p) override
-    {
-        const int n = p.H * p.W;
-        ensureBuffers(n);
-
-        std::memcpy(u_depth_, depth_host, static_cast<size_t>(n) * sizeof(float));
-        if (retro_host) {
-            std::memcpy(u_retro_, retro_host, static_cast<size_t>(n) * sizeof(float));
-        }
-
-        launchRayKernel(
-            u_depth_, retro_host ? u_retro_ : nullptr,
-            u_range_, u_signal_, u_refl_, u_nearir_, p, n);
-        q_.wait();
-
-        std::memcpy(range_out,        u_range_,  static_cast<size_t>(n) * sizeof(uint32_t));
-        std::memcpy(signal_out,       u_signal_, static_cast<size_t>(n) * sizeof(uint16_t));
-        std::memcpy(reflectivity_out, u_refl_,   static_cast<size_t>(n) * sizeof(uint8_t));
-        std::memcpy(nearir_out,       u_nearir_, static_cast<size_t>(n) * sizeof(uint16_t));
-    }
-
     void processRaw(
         const float * raw_host,
         const float * beam_alt_host,
