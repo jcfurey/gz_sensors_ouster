@@ -364,6 +364,70 @@ kernel rows to 5-10 ms each.
   The plugin logs the per-sensor breakdown on first frame; check the
   log if multi-sensor configs run into VRAM pressure.
 
+## Observability
+
+The plugin emits a few categories of structured log lines worth
+recognising when you're triaging behaviour in a running sim.
+
+### One-time at startup
+
+```
+[gz_gpu_ouster_lidar] Using cuda backend.
+[gz_gpu_ouster_lidar] HIP backend: device='Radeon 780M (gfx1103)' integrated=yes (managed-memory path ON)
+```
+Backend dispatch — `cuda` / `hip` / `hip-apu` / `sycl` / `sycl-igpu` / `cpu`.
+Set `GZ_OUSTER_BACKEND=cpu` (or any backend name) to force a specific
+choice for debugging.
+
+```
+GpuRays sensor created: 1024x256 rays, vertical FOV [-22.6, 22.6] deg
+Configured: H=128 W=1024 cpp=16 sensor_name=/sensor/lidar/lidar0 ...
+```
+Dimensions and tuning derived from the loaded metadata.
+
+### One-time on first frame
+
+```
+/sensor/lidar/lidar0: GPU buffers ~12.4 MiB (cuda backend) — raw=3.1 channels=0.6 resample=1.0 rand=7.7
+```
+Per-sensor backend memory footprint. Use this to budget multi-sensor
+configs against available VRAM. The four numbers are the raw cubemap,
+the channel outputs (range/signal/reflec/nearir), the depth+retro
+intermediate, and the curand/hiprand state (zero on SYCL — its RNG is
+counter-based and stateless).
+
+### Repeated until acknowledged
+
+```
+metadata delivered to os_cloud (after 24 publishes)
+```
+Metadata republishing settles when both (a) `get_subscription_count() > 0`
+and (b) ≥2 seconds of pubs have happened. If a subscriber drops to 0,
+republishing automatically re-arms:
+
+```
+metadata subscriber count dropped to 0; re-arming republish
+```
+
+### Throttled WARN (5 s)
+
+```
+/sensor/lidar/lidar0: dropped GpuRays frame (PostUpdate didn't drain); total dropped=37
+```
+The render thread fired a new frame before the sim thread consumed the
+previous one. Rare under the lidar_hz throttle; sustained drops mean
+PostUpdate is starved (sim-time stall, post-pause burst, or the GPU
+pipeline can't keep up with the configured rate). The cumulative
+counter is per-sensor and lifetime-of-process.
+
+### `/imu` covariance
+
+If you've enabled IMU noise (defaults are non-zero — see [IMU noise
+model](#imu-noise-model)), the published `sensor_msgs/Imu` covariance
+diagonals reflect the active per-sample noise std. Setting all four
+noise params to 0 falls back to the ouster_ros default literals
+(6e-4 / 0.01) so REP-145 consumers don't see literal-zero variances.
+
 ## Architecture
 
 1. **Configure()** loads metadata, creates ROS publishers, declares parameters
