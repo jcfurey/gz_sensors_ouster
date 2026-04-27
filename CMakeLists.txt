@@ -233,6 +233,10 @@ if(BUILD_TESTING)
   # Test: bilinear resampling (CPU fallback)
   ament_add_gtest(test_resample test/test_resample.cpp)
   target_link_libraries(test_resample gz_gpu_ouster_lidar_cuda)
+
+  # Test: IMU noise model (CPU-only, no Gazebo dep)
+  ament_add_gtest(test_imu_noise test/test_imu_noise.cpp)
+  target_link_libraries(test_imu_noise gz_gpu_ouster_lidar_cuda)
 endif()
 
 ament_package()
