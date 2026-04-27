@@ -21,7 +21,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 #include <memory>
 #include <stdexcept>
 
@@ -426,9 +425,13 @@ private:
         if (d_rand_states_) { HIP_CHECK(hipFree(d_rand_states_)); d_rand_states_ = nullptr; }
         HIP_CHECK(hipMalloc(&d_rand_states_,
             static_cast<size_t>(n) * sizeof(hiprandState)));
+        // seed_ == 0 means non-deterministic. Mix steady_clock + pid +
+        // this-pointer so multiple sensors constructed in the same tick get
+        // independent noise (clock() at 10 ms resolution gives identical
+        // seeds and perfectly correlated noise across LiDARs).
         const unsigned long rng_seed = (seed_ != 0)
             ? static_cast<unsigned long>(seed_)
-            : static_cast<unsigned long>(clock());
+            : static_cast<unsigned long>(deriveNonDeterministicSeed(this));
         const int grid = (n + kBlock - 1) / kBlock;
         hipLaunchKernelGGL(initRandStatesHip, dim3(grid), dim3(kBlock), 0, stream_,
             static_cast<hiprandState *>(d_rand_states_), rng_seed, n);

@@ -27,7 +27,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -78,9 +77,11 @@ public:
         : seed_(seed), q_(std::move(q)), integrated_(integrated)
     {
         // Derive a non-zero effective seed: production callers pass 0 for
-        // non-deterministic; we want new output every run in that case.
-        effective_seed_ = (seed_ != 0) ? seed_ :
-            static_cast<uint64_t>(std::time(nullptr)) ^ 0xC0FFEEULL;
+        // non-deterministic; we want new output every run AND distinct
+        // output across sensors constructed in the same tick.
+        // time(nullptr) has 1-second resolution which is too coarse — mix
+        // steady_clock + pid + this-pointer instead.
+        effective_seed_ = (seed_ != 0) ? seed_ : deriveNonDeterministicSeed(this);
     }
 
     ~SyclBackend() override

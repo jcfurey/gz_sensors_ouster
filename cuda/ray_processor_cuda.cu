@@ -13,7 +13,6 @@
 #include <math_constants.h>
 #include <curand_kernel.h>
 #include <cstdint>
-#include <ctime>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
@@ -494,9 +493,11 @@ private:
 
         // seed_ == 0 means non-deterministic (production). Any non-zero seed
         // configured at construction time makes the noise reproducible.
+        // For non-deterministic, mix steady_clock + pid + this-pointer so two
+        // sensors constructed in the same tick get independent noise.
         const unsigned long rng_seed = (seed_ != 0)
             ? static_cast<unsigned long>(seed_)
-            : static_cast<unsigned long>(clock());
+            : static_cast<unsigned long>(deriveNonDeterministicSeed(this));
         launchInitRandKernel(d_rand_states_, rng_seed, n, stream_);
         rand_n_ = n;
     }
