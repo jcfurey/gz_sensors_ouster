@@ -220,6 +220,25 @@ All noise model parameters can be changed at runtime via
 | `max_range` | *auto* | >= 1 | Max sensing range in metres. Auto-derived from metadata `prod_line` if not set (OS0: 50, OS1: 120, OS2: 240). Also sets the GPU far clip plane. |
 | `visibility_mask` | 4294967295 | 0 to 4294967295 | Gazebo render visibility mask applied to GpuRays. Use to include or exclude visuals from raycasting. |
 
+### QoS overrides
+
+`lidar_packets` always uses `SensorDataQoS` (BEST_EFFORT) because that's
+what `os_cloud` expects. Image, camera_info, and IMU pubs are
+configurable for deployments that need a specific QoS to match their
+consumer — necessary on rmw_zenoh_cpp where pub and sub QoS must match
+exactly (neither BEST_EFFORT-pub-to-RELIABLE-sub nor the reverse work).
+
+| Parameter | Default | Accepted values | Affects |
+|-----------|---------|-----------------|---------|
+| `image_qos` | `reliable` | `reliable` \| `best_effort` \| `sensor_data` | range/signal/reflec/nearir image + camera_info |
+| `imu_qos`   | `sensor_data` | `reliable` \| `best_effort` \| `sensor_data` | imu + imu_packets |
+
+Defaults match the most common consumers: `reliable` for images
+(matches RViz Image display, rqt_image_view, image_transport), and
+`sensor_data` (BEST_EFFORT) for IMU (matches the real `ouster_ros`
+driver so a sim-to-hardware topic swap doesn't require flipping
+subscriber QoS).
+
 ### Noise Model
 
 Defaults are validated against ISPRS OS1-64 accuracy assessment and

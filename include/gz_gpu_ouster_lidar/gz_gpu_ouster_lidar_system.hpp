@@ -67,6 +67,14 @@ private:
     double lidar_hz_ = 10.0;
     uint32_t visibility_mask_ = 0xFFFFFFFFu;
 
+    // QoS overrides for image/camera_info and IMU pubs. Accepted values:
+    //   "reliable"    — RELIABLE + KEEP_LAST(depth)
+    //   "best_effort" — BEST_EFFORT + KEEP_LAST(depth)
+    //   "sensor_data" — rclcpp::SensorDataQoS preset
+    // lidar_packets always uses SensorDataQoS (high-rate, os_cloud expects it).
+    std::string image_qos_ = "reliable";    // matches RViz / rqt_image_view default
+    std::string imu_qos_   = "sensor_data"; // matches ouster_ros driver convention
+
     // ── Noise model parameters (SDF-configurable) ─────────────────────────────
     // Defaults tuned to OS1 rev6 (real hardware on this platform).
     // OS1 has tighter beams and longer range than OS0, yielding better

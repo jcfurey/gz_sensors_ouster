@@ -126,6 +126,12 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("visibility_mask")) {
         visibility_mask_ = sdf->Get<uint32_t>("visibility_mask");
     }
+    if (sdf->HasElement("image_qos")) {
+        image_qos_ = sdf->Get<std::string>("image_qos");
+    }
+    if (sdf->HasElement("imu_qos")) {
+        imu_qos_ = sdf->Get<std::string>("imu_qos");
+    }
 
     // Noise model SDF parameters (all optional, with sensible Ouster defaults)
     if (sdf->HasElement("range_noise_min_std")) {
@@ -201,6 +207,17 @@ void GzGpuOusterLidarSystem::Configure(
     accel_noise_std_       = std::max(0.0, accel_noise_std_);
     gyro_bias_walk_        = std::max(0.0, gyro_bias_walk_);
     accel_bias_walk_       = std::max(0.0, accel_bias_walk_);
+
+    auto validate_qos = [](std::string & val, const char * field, const char * fallback) {
+        if (val != "reliable" && val != "best_effort" && val != "sensor_data") {
+            RCLCPP_WARN(kLogger,
+                "Unknown %s='%s'; expected reliable|best_effort|sensor_data. "
+                "Defaulting to %s.", field, val.c_str(), fallback);
+            val = fallback;
+        }
+    };
+    validate_qos(image_qos_, "image_qos", "reliable");
+    validate_qos(imu_qos_,   "imu_qos",   "sensor_data");
     if (lidar_hz_ <= 0.0) {
         RCLCPP_WARN(kLogger, "lidar_hz must be > 0, got %f; defaulting to 10", lidar_hz_);
         lidar_hz_ = 10.0;
@@ -473,21 +490,30 @@ void GzGpuOusterLidarSystem::initRosInterface()
     meta_pub_ = ros_node_->create_publisher<std_msgs::msg::String>(
         abs_prefix + "/metadata", meta_qos);
 
+    // Build a QoS from a string keyword. Used for image/camera_info and IMU
+    // pubs so deployments can match whatever their consumer expects on
+    // rmw_zenoh_cpp (where pub and sub QoS must match exactly — neither
+    // BEST_EFFORT-pub-to-RELIABLE-sub nor the reverse work).
+    auto qos_from_string = [](const std::string & kind, size_t depth) -> rclcpp::QoS {
+        if (kind == "sensor_data") return rclcpp::SensorDataQoS();
+        rclcpp::QoS q{depth};
+        if (kind == "best_effort") q.best_effort();
+        else                        q.reliable();   // "reliable" or unknown
+        return q.keep_last(depth);
+    };
+
     // Packet publisher: SensorDataQoS (BEST_EFFORT). High-rate raw stream;
     // a dropped packet is recoverable by os_cloud and never blocks the
-    // realtime path.
-    const auto qos = rclcpp::SensorDataQoS();
+    // realtime path. Not user-overridable.
+    const auto pkt_qos = rclcpp::SensorDataQoS();
     pkt_pub_ = ros_node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
-        abs_prefix + "/lidar_packets", qos);
+        abs_prefix + "/lidar_packets", pkt_qos);
 
-    // Image + camera_info: RELIABLE KEEP_LAST(5). Standard ROS image tools
-    // (rqt_image_view, image_view, image_transport, RViz Image display)
-    // default to RELIABLE subscribers. On rmw_zenoh_cpp a RELIABLE sub does
-    // not match a BEST_EFFORT pub, so SensorDataQoS here would silently
-    // drop everything for those consumers. Foxglove/Trillium can match
-    // either side.
-    rclcpp::QoS image_qos{5};
-    image_qos.reliable().keep_last(5);
+    // Image + camera_info: configurable via <image_qos> SDF tag, defaults
+    // RELIABLE KEEP_LAST(5) to match RViz / rqt_image_view / image_transport
+    // default subscribers. Override to "best_effort" if your consumer is
+    // Foxglove configured for sensor data.
+    const auto image_qos = qos_from_string(image_qos_, 5);
     range_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
         abs_prefix + "/range_image", image_qos);
     signal_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
@@ -534,13 +560,17 @@ void GzGpuOusterLidarSystem::initRosInterface()
                               1.0, 0.0};
     }
 
-    // IMU publishers (only if imu_name was provided in SDF)
+    // IMU publishers (only if imu_name was provided in SDF). QoS is
+    // configurable via <imu_qos>; defaults to sensor_data to match the
+    // ouster_ros driver convention so a sim/hardware topic swap doesn't
+    // require changing subscriber QoS.
     if (imu_enabled_) {
+        const auto imu_qos = qos_from_string(imu_qos_, 10);
         imu_pkt_pub_ = ros_node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
-            abs_prefix + "/imu_packets", qos);
+            abs_prefix + "/imu_packets", imu_qos);
         if (publish_imu_msg_) {
             imu_msg_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Imu>(
-                abs_prefix + "/imu", qos);
+                abs_prefix + "/imu", imu_qos);
         }
     }
 
