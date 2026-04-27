@@ -6,7 +6,10 @@
     Gazebo Harmonic system plugin that creates a GPU-based lidar sensor with
     per-beam non-uniform elevation angles matching Ouster calibration metadata.
     Fires rays via gz::rendering::GpuRays and produces Ouster lidar_packets
-    (PacketMsg) through CUDA post-processing.
+    (PacketMsg) through a vendor-neutral post-processing pipeline that
+    dispatches at runtime to CUDA (NVIDIA), HIP (AMD incl. APUs), SYCL
+    (Intel), or an OpenMP-parallelised CPU fallback. Optional IMU noise +
+    bias model with Ouster Os1 datasheet defaults.
   </description>
   <maintainer email="john.c.furey@erdc.dren.mil">John C. Furey</maintainer>
   <license>Apache-2.0</license>
