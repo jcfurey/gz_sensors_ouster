@@ -253,6 +253,29 @@ world plugin.
 | `imu_hz` | 100.0 | > 0 | IMU publish rate in Hz. |
 | `publish_imu_msg` | true | bool | Also publish `sensor_msgs/Imu` alongside Ouster IMU packets. |
 
+#### IMU noise model
+
+White Gaussian noise plus random-walk bias on each axis. Defaults match
+the Ouster Os1 IMU datasheet (ICM-20948 class). All values are
+**continuous-time densities** (per-√Hz) — at runtime they're scaled by
+1/√dt for white noise and √dt for bias drift, where dt = 1/imu_hz. Set
+any to 0 to disable that term. All four are dynamically reconfigurable
+via `ros2 param set`.
+
+| Parameter | Default | Units | Description |
+|-----------|---------|-------|-------------|
+| `gyro_noise_std`  | 1.75e-4 | rad/s/√Hz | Gyro white-noise density (≈0.01 °/s/√Hz). |
+| `accel_noise_std` | 2.3e-3  | m/s²/√Hz  | Accelerometer white-noise density (≈230 µg/√Hz). |
+| `gyro_bias_walk`  | 1.0e-6  | rad/s²/√Hz | Gyro bias random walk (in-run instability). |
+| `accel_bias_walk` | 1.0e-5  | m/s³/√Hz   | Accelerometer bias random walk. |
+
+The published `angular_velocity_covariance` and
+`linear_acceleration_covariance` diagonals are derived from the active
+noise std at publish time, so downstream EKFs see covariances consistent
+with the injected noise. With all noise params set to 0, the covariances
+fall back to the ouster_ros driver defaults (6e-4 / 0.01) so REP-145
+consumers don't get literal-zero variances.
+
 ## Sensor Tuning Guide
 
 | Sensor | `max_range` | `base_signal` | `range_noise_min_std` | `range_noise_max_std` | `dropout_rate_far` | `edge_discon_threshold` |

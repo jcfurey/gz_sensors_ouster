@@ -18,6 +18,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -90,6 +91,25 @@ private:
     double imu_hz_ = 100.0;                // IMU publish rate (Hz)
     bool imu_enabled_ = false;             // true if <imu_name> was provided
     bool publish_imu_msg_ = true;          // also publish sensor_msgs/Imu
+
+    // ── IMU noise model (SDF-configurable, dynamically reconfigurable) ───────
+    // Defaults match Ouster Os1 IMU datasheet (ICM-20948 class).
+    // Continuous-time noise densities; per-sample std is density / sqrt(dt).
+    // Bias random walks; per-sample drift std is walk * sqrt(dt).
+    double gyro_noise_std_   = 1.75e-4;  // rad/s/√Hz   (≈0.01 °/s/√Hz)
+    double accel_noise_std_  = 2.3e-3;   // m/s²/√Hz    (≈230 µg/√Hz)
+    double gyro_bias_walk_   = 1.0e-6;   // rad/s²/√Hz  (Ouster bias instability)
+    double accel_bias_walk_  = 1.0e-5;   // m/s³/√Hz    (Ouster bias instability)
+
+    // Bias state (random walk integrand). Persists across frames.
+    ::gz::math::Vector3d gyro_bias_{0, 0, 0};
+    ::gz::math::Vector3d accel_bias_{0, 0, 0};
+
+    // Per-instance RNG for IMU noise. Lazy-seeded on first publish using
+    // deriveNonDeterministicSeed(this) so multiple sensors get independent
+    // noise streams.
+    std::mt19937 imu_rng_;
+    bool imu_rng_seeded_ = false;
 
     // ── Ouster metadata ──────────────────────────────────────────────────────
     std::string metadata_str_;

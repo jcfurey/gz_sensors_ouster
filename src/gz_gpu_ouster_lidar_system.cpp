@@ -172,6 +172,20 @@ void GzGpuOusterLidarSystem::Configure(
         publish_imu_msg_ = sdf->Get<bool>("publish_imu_msg");
     }
 
+    // ── IMU noise model (SDF-optional, defaults match Ouster Os1) ────────────
+    if (sdf->HasElement("gyro_noise_std")) {
+        gyro_noise_std_ = sdf->Get<double>("gyro_noise_std");
+    }
+    if (sdf->HasElement("accel_noise_std")) {
+        accel_noise_std_ = sdf->Get<double>("accel_noise_std");
+    }
+    if (sdf->HasElement("gyro_bias_walk")) {
+        gyro_bias_walk_ = sdf->Get<double>("gyro_bias_walk");
+    }
+    if (sdf->HasElement("accel_bias_walk")) {
+        accel_bias_walk_ = sdf->Get<double>("accel_bias_walk");
+    }
+
     // ── Validate parameters ────────────────────────────────────────────────────
     range_noise_min_std_   = std::max(0.0, range_noise_min_std_);
     range_noise_max_std_   = std::max(0.0, range_noise_max_std_);
@@ -183,6 +197,10 @@ void GzGpuOusterLidarSystem::Configure(
     base_signal_           = std::max(0.0, base_signal_);
     base_reflectivity_     = std::clamp(base_reflectivity_, 0.0, 255.0);
     max_range_             = std::max(1.0, max_range_);
+    gyro_noise_std_        = std::max(0.0, gyro_noise_std_);
+    accel_noise_std_       = std::max(0.0, accel_noise_std_);
+    gyro_bias_walk_        = std::max(0.0, gyro_bias_walk_);
+    accel_bias_walk_       = std::max(0.0, accel_bias_walk_);
     if (lidar_hz_ <= 0.0) {
         RCLCPP_WARN(kLogger, "lidar_hz must be > 0, got %f; defaulting to 10", lidar_hz_);
         lidar_hz_ = 10.0;
@@ -544,6 +562,12 @@ void GzGpuOusterLidarSystem::initRosInterface()
     ros_node_->declare_parameter("edge_discon_threshold", edge_discon_threshold_);
     ros_node_->declare_parameter("base_signal", base_signal_);
     ros_node_->declare_parameter("base_reflectivity", base_reflectivity_);
+    if (imu_enabled_) {
+        ros_node_->declare_parameter("gyro_noise_std",   gyro_noise_std_);
+        ros_node_->declare_parameter("accel_noise_std",  accel_noise_std_);
+        ros_node_->declare_parameter("gyro_bias_walk",   gyro_bias_walk_);
+        ros_node_->declare_parameter("accel_bias_walk",  accel_bias_walk_);
+    }
 
     param_cb_handle_ = ros_node_->add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> & params)
@@ -572,6 +596,10 @@ void GzGpuOusterLidarSystem::initRosInterface()
                     else if (name == "edge_discon_threshold") edge_discon_threshold_   = std::max(0.0, p.as_double());
                     else if (name == "base_signal")          base_signal_             = std::max(0.0, p.as_double());
                     else if (name == "base_reflectivity")    base_reflectivity_       = std::clamp(p.as_double(), 0.0, 255.0);
+                    else if (name == "gyro_noise_std")       gyro_noise_std_          = std::max(0.0, p.as_double());
+                    else if (name == "accel_noise_std")      accel_noise_std_         = std::max(0.0, p.as_double());
+                    else if (name == "gyro_bias_walk")       gyro_bias_walk_          = std::max(0.0, p.as_double());
+                    else if (name == "accel_bias_walk")      accel_bias_walk_         = std::max(0.0, p.as_double());
                 }
             }
             rcl_interfaces::msg::SetParametersResult r;
@@ -1190,7 +1218,45 @@ void GzGpuOusterLidarSystem::publishImu(
     const auto & R = imu_world_pose.Rot();
     const ::gz::math::Vector3d gravity_world(0.0, 0.0, -9.80665);
     const auto gravity_body = R.RotateVectorReverse(gravity_world);
-    const ::gz::math::Vector3d la = la_raw - gravity_body;
+    const ::gz::math::Vector3d la_proper = la_raw - gravity_body;
+
+    // ── IMU noise + bias model ───────────────────────────────────────────
+    // Adds white Gaussian noise (continuous-time density → per-sample sigma
+    // via /√dt) and integrates a random-walk bias state (per-sample drift
+    // sigma via *√dt). Defaults match Ouster Os1 datasheet; downstream
+    // filters that subscribe to /imu now see a non-pristine signal.
+    if (!imu_rng_seeded_) {
+        imu_rng_.seed(static_cast<uint32_t>(deriveNonDeterministicSeed(this)));
+        imu_rng_seeded_ = true;
+    }
+    double snap_gyro_noise, snap_accel_noise, snap_gyro_walk, snap_accel_walk;
+    {
+        std::lock_guard<std::mutex> lk(noise_mtx_);
+        snap_gyro_noise  = gyro_noise_std_;
+        snap_accel_noise = accel_noise_std_;
+        snap_gyro_walk   = gyro_bias_walk_;
+        snap_accel_walk  = accel_bias_walk_;
+    }
+    const double dt = 1.0 / imu_hz_;
+    const double sqrt_dt = std::sqrt(dt);
+    const double gyro_white  = snap_gyro_noise / sqrt_dt;
+    const double accel_white = snap_accel_noise / sqrt_dt;
+    const double gyro_drift  = snap_gyro_walk * sqrt_dt;
+    const double accel_drift = snap_accel_walk * sqrt_dt;
+
+    std::normal_distribution<double> normal{0.0, 1.0};
+    auto draw = [&] { return normal(imu_rng_); };
+
+    // Random-walk integration: bias_k+1 = bias_k + drift * N(0,1)
+    gyro_bias_  += ::gz::math::Vector3d(
+        gyro_drift * draw(), gyro_drift * draw(), gyro_drift * draw());
+    accel_bias_ += ::gz::math::Vector3d(
+        accel_drift * draw(), accel_drift * draw(), accel_drift * draw());
+
+    const ::gz::math::Vector3d av_meas = av + gyro_bias_ +
+        ::gz::math::Vector3d(gyro_white * draw(), gyro_white * draw(), gyro_white * draw());
+    const ::gz::math::Vector3d la = la_proper + accel_bias_ +
+        ::gz::math::Vector3d(accel_white * draw(), accel_white * draw(), accel_white * draw());
 
     const int64_t stamp_ns = sim_now.count();
 
@@ -1223,9 +1289,9 @@ void GzGpuOusterLidarSystem::publishImu(
         pw_->set_imu_la_x(buf, static_cast<float>(la.X()));
         pw_->set_imu_la_y(buf, static_cast<float>(la.Y()));
         pw_->set_imu_la_z(buf, static_cast<float>(la.Z()));
-        pw_->set_imu_av_x(buf, static_cast<float>(av.X()));
-        pw_->set_imu_av_y(buf, static_cast<float>(av.Y()));
-        pw_->set_imu_av_z(buf, static_cast<float>(av.Z()));
+        pw_->set_imu_av_x(buf, static_cast<float>(av_meas.X()));
+        pw_->set_imu_av_y(buf, static_cast<float>(av_meas.Y()));
+        pw_->set_imu_av_z(buf, static_cast<float>(av_meas.Z()));
 
         ouster_sensor_msgs::msg::PacketMsg pkt;
         pkt.buf.assign(imu_pkt_buf_.begin(), imu_pkt_buf_.end());
@@ -1243,22 +1309,27 @@ void GzGpuOusterLidarSystem::publishImu(
         msg.header.stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000LL);
         msg.header.frame_id = imu_frame_id_;
 
-        msg.angular_velocity.x = av.X();
-        msg.angular_velocity.y = av.Y();
-        msg.angular_velocity.z = av.Z();
+        msg.angular_velocity.x = av_meas.X();
+        msg.angular_velocity.y = av_meas.Y();
+        msg.angular_velocity.z = av_meas.Z();
 
         msg.linear_acceleration.x = la.X();
         msg.linear_acceleration.y = la.Y();
         msg.linear_acceleration.z = la.Z();
 
-        // Covariance: match ouster_ros os_cloud defaults
-        msg.angular_velocity_covariance[0] = 6e-4;
-        msg.angular_velocity_covariance[4] = 6e-4;
-        msg.angular_velocity_covariance[8] = 6e-4;
+        // Covariance derived from the actual noise model: diagonal = σ²
+        // where σ is the per-sample white-noise standard deviation. Falls
+        // back to ouster_ros defaults if the user disabled noise (so REP-145
+        // consumers don't see literal zero variances).
+        const double gyro_var  = (gyro_white > 0.0)  ? gyro_white  * gyro_white  : 6e-4;
+        const double accel_var = (accel_white > 0.0) ? accel_white * accel_white : 0.01;
+        msg.angular_velocity_covariance[0] = gyro_var;
+        msg.angular_velocity_covariance[4] = gyro_var;
+        msg.angular_velocity_covariance[8] = gyro_var;
 
-        msg.linear_acceleration_covariance[0] = 0.01;
-        msg.linear_acceleration_covariance[4] = 0.01;
-        msg.linear_acceleration_covariance[8] = 0.01;
+        msg.linear_acceleration_covariance[0] = accel_var;
+        msg.linear_acceleration_covariance[4] = accel_var;
+        msg.linear_acceleration_covariance[8] = accel_var;
 
         // Orientation unknown (per REP-145: first element = -1)
         msg.orientation_covariance[0] = -1.0;
