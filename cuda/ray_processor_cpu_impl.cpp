@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "ray_processor_cpu_impl.hpp"
+#include "backend.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -36,10 +37,7 @@ void processCpu(
     std::normal_distribution<float> norm(0.0f, 1.0f);
     std::uniform_real_distribution<float> uni(0.0f, 1.0f);
 
-    const bool has_noise = p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
-                           p.signal_noise_scale > 0.f || p.nearir_noise_scale > 0.f ||
-                           p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
-                           p.edge_discon_threshold > 0.f;
+    const bool has_noise = noiseEnabled(p);
 
     for (int idx = 0; idx < n; ++idx) {
         float d = depth_host[idx];

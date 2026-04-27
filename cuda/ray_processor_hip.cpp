@@ -393,14 +393,6 @@ public:
     const char * name() const override { return integrated_ ? "hip-apu" : "hip"; }
 
 private:
-    static bool noiseEnabled(const RayProcessParams & p)
-    {
-        return p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
-               p.signal_noise_scale > 0.f || p.nearir_noise_scale > 0.f ||
-               p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
-               p.edge_discon_threshold > 0.f;
-    }
-
     // APU (integrated GPU) shares DRAM with the CPU. hipMallocManaged lets
     // the runtime map the allocation into both address spaces without an
     // explicit copy. On discrete AMD GPUs we use hipMalloc + async memcpy

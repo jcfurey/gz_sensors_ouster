@@ -58,4 +58,15 @@ std::unique_ptr<Backend> makeHipBackend(uint64_t seed);
 std::unique_ptr<Backend> makeSyclBackend(uint64_t seed);
 std::unique_ptr<Backend> makeCpuBackend(uint64_t seed);
 
+/// True if any noise/dropout/edge-suppression term is non-zero. Backends
+/// use this to skip RNG state allocation and the curand/hiprand init
+/// kernel when the user has fully disabled noise.
+inline bool noiseEnabled(const RayProcessParams & p)
+{
+    return p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
+           p.signal_noise_scale > 0.f || p.nearir_noise_scale > 0.f ||
+           p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
+           p.edge_discon_threshold > 0.f;
+}
+
 }  // namespace gz_gpu_ouster_lidar
