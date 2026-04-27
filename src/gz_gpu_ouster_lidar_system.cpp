@@ -3,6 +3,7 @@
 
 #include "gz_gpu_ouster_lidar/gz_gpu_ouster_lidar_system.hpp"
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
+#include "backend.hpp"  // noiseEnabled() — pulled in via cuda/ public includes
 
 #include <algorithm>
 #include <chrono>
@@ -974,6 +975,32 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     pp.edge_discon_threshold = static_cast<float>(snap_edge_discon_threshold);
 
     // ── GPU pipeline: resample → noise → channel outputs ─────────────────────
+    if (!memory_logged_) {
+        // One-time per-sensor accounting after first frame, when the
+        // dispatched backend has settled on actual buffer sizes. Helps
+        // diagnose multi-sensor OOMs — a dense sensor (4096×512) plus
+        // curand state can easily exceed 100 MB of VRAM on its own.
+        const size_t raw_bytes  = static_cast<size_t>(gpu_H) * gpu_W * gpu_chan * sizeof(float);
+        const size_t channel_bytes =
+            static_cast<size_t>(H_) * W_ *
+            (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint16_t));
+        const size_t resample_bytes = static_cast<size_t>(H_) * W_ * 2 * sizeof(float);
+        // curandState (XORWOW) is 48 B; hiprand similar; SYCL counter-based
+        // RNG is stateless. Approximate with 48 B to avoid backend coupling.
+        const size_t rand_bytes = noiseEnabled(pp)
+            ? static_cast<size_t>(H_) * W_ * 48 : 0;
+        const size_t total = raw_bytes + channel_bytes + resample_bytes + rand_bytes;
+        RCLCPP_INFO(kLogger,
+            "%s: GPU buffers ~%.1f MiB (%s backend) — raw=%.1f channels=%.1f "
+            "resample=%.1f rand=%.1f",
+            sensor_name_.c_str(), total / 1048576.0,
+            ray_processor_->backendName(),
+            raw_bytes / 1048576.0,
+            channel_bytes / 1048576.0,
+            resample_bytes / 1048576.0,
+            rand_bytes / 1048576.0);
+        memory_logged_ = true;
+    }
     ray_processor_->processRaw(
         raw_data,
         beam_alt_f_.data(),

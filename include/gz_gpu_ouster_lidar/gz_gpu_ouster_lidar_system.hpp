@@ -190,6 +190,7 @@ private:
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
     bool metadata_published_ = false;   // true once a subscriber has acked
     int metadata_pub_count_ = 0;       // render ticks since sensor init
+    bool memory_logged_ = false;       // true after first GPU-buffer report
 
     // ── Drain thread ─────────────────────────────────────────────────────────
     std::vector<ouster_sensor_msgs::msg::PacketMsg> drain_pkts_;
