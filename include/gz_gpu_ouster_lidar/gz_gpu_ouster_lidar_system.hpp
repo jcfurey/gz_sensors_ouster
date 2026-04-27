@@ -187,8 +187,19 @@ private:
     std::vector<uint8_t>  reflectivity_buf_;
     std::vector<uint16_t> nearir_buf_;          // NEAR_IR channel for packet encoding
 
-    // Raw GpuRays frame staging buffer (fast memcpy in callback, GPU-processed later)
+    // Raw GpuRays frame triple-buffer:
+    //   pending_buf_  — render-thread scratch; memcpy from GpuRays lands here
+    //                   OUTSIDE the lock.
+    //   raw_frame_buf_ — handoff slot; under frame_mtx_, render swaps
+    //                    pending_buf_ in, sim swaps it out.
+    //   process_buf_  — sim-thread scratch; encodeAndPublish reads from here
+    //                   AFTER releasing the lock.
+    // After warmup, all three vectors hold capacity matching the largest seen
+    // frame so the per-frame memcpy doesn't reallocate. The render thread no
+    // longer holds frame_mtx_ during the ~1 ms (16-24 MB) memcpy.
+    std::vector<float> pending_buf_;
     std::vector<float> raw_frame_buf_;
+    std::vector<float> process_buf_;
     int raw_frame_H_ = 0;
     int raw_frame_W_ = 0;
     int raw_frame_chan_ = 0;

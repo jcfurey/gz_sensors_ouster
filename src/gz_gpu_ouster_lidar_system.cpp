@@ -904,27 +904,31 @@ void GzGpuOusterLidarSystem::PostUpdate(
     }
 
     // ── Process any pending frame ────────────────────────────────────────────
+    // Sim-side of the triple buffer: under the lock just swap the
+    // raw_frame_buf_ slot into our sim-only process_buf_. encodeAndPublish
+    // (which can take many ms on dense sensors) runs without holding
+    // frame_mtx_, so the render thread is free to memcpy a new frame
+    // concurrently. process_buf_ keeps its capacity across calls.
     bool have_frame = false;
-    std::vector<float> local_raw;
-    int local_raw_H = 0, local_raw_W = 0, local_raw_chan = 0;
+    int local_H = 0, local_W = 0, local_chan = 0;
     {
         std::lock_guard<std::mutex> lk(frame_mtx_);
         have_frame = frame_ready_;
         frame_ready_ = false;
         if (have_frame) {
-            local_raw.swap(raw_frame_buf_);
-            local_raw_H    = raw_frame_H_;
-            local_raw_W    = raw_frame_W_;
-            local_raw_chan  = raw_frame_chan_;
+            process_buf_.swap(raw_frame_buf_);
+            local_H    = raw_frame_H_;
+            local_W    = raw_frame_W_;
+            local_chan = raw_frame_chan_;
         }
     }
 
-    if (have_frame && !local_raw.empty()) {
+    if (have_frame && !process_buf_.empty()) {
         const auto stamp_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 info.simTime).count();
-        encodeAndPublish(stamp_ns, local_raw.data(),
-                         local_raw_H, local_raw_W, local_raw_chan);
+        encodeAndPublish(stamp_ns, process_buf_.data(),
+                         local_H, local_W, local_chan);
     }
 
     // ── Publish IMU at configured rate ──────────────────────────────────────
@@ -949,27 +953,38 @@ void GzGpuOusterLidarSystem::onNewFrame(
 
     const size_t n = static_cast<size_t>(width) * height * channels;
 
-    std::lock_guard<std::mutex> lk(frame_mtx_);
-    if (frame_ready_.load(std::memory_order_acquire)) {
-        // Previous frame hasn't been consumed by PostUpdate yet; we're
-        // about to overwrite it. Surface the drop so a sustained problem
-        // (sim-time stall, post-pause burst, undersized PostUpdate budget)
-        // is visible in logs instead of silent.
-        const uint64_t dropped = dropped_frames_.fetch_add(1) + 1;
-        if (ros_node_) {
-            RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
-                "%s: dropped GpuRays frame (PostUpdate didn't drain); "
-                "total dropped=%lu",
-                sensor_name_.c_str(),
-                static_cast<unsigned long>(dropped));
+    // Memcpy into the render-only pending_buf_ FIRST, no lock held. After
+    // warmup pending_buf_'s capacity matches the largest seen frame (it
+    // takes whatever raw_frame_buf_ had after the previous swap), so this
+    // resize is a no-op and the memcpy is the only meaningful cost.
+    pending_buf_.resize(n);
+    std::memcpy(pending_buf_.data(), data, n * sizeof(float));
+
+    {
+        std::lock_guard<std::mutex> lk(frame_mtx_);
+        if (frame_ready_.load(std::memory_order_acquire)) {
+            // Previous frame hasn't been consumed by PostUpdate yet; we're
+            // about to overwrite it. Surface the drop so a sustained problem
+            // (sim-time stall, post-pause burst, undersized PostUpdate budget)
+            // is visible in logs instead of silent.
+            const uint64_t dropped = dropped_frames_.fetch_add(1) + 1;
+            if (ros_node_) {
+                RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
+                    "%s: dropped GpuRays frame (PostUpdate didn't drain); "
+                    "total dropped=%lu",
+                    sensor_name_.c_str(),
+                    static_cast<unsigned long>(dropped));
+            }
         }
+        // O(1) vector swap: pending_buf_ ↔ raw_frame_buf_. Capacity of the
+        // vector that previously held the (now-stale) frame is preserved
+        // and reused next render cycle.
+        pending_buf_.swap(raw_frame_buf_);
+        raw_frame_H_    = static_cast<int>(height);
+        raw_frame_W_    = static_cast<int>(width);
+        raw_frame_chan_ = static_cast<int>(channels);
+        frame_ready_ = true;
     }
-    raw_frame_buf_.resize(n);
-    std::memcpy(raw_frame_buf_.data(), data, n * sizeof(float));
-    raw_frame_H_    = static_cast<int>(height);
-    raw_frame_W_    = static_cast<int>(width);
-    raw_frame_chan_ = static_cast<int>(channels);
-    frame_ready_ = true;
 }
 
 // ── Encode depth → Ouster packets ───────────────────────────────────────────
