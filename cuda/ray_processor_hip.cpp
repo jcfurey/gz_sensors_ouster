@@ -216,7 +216,8 @@ __global__ void rayProcessKernelHip(
         float retro_val = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
             ? retro[idx] : 0.5f;
         float refl_factor = fminf(1.0f / fmaxf(retro_val, 0.33f), 3.0f);
-        p_dropout *= refl_factor;
+        // Clamp to [0,1] so the curve is honest at dark+far. See cuda.cu.
+        p_dropout = fminf(p_dropout * refl_factor, 1.0f);
         if (hiprand_uniform(rs) < p_dropout) {
             range_out[idx]  = 0u;
             signal_out[idx] = 0u;
