@@ -364,6 +364,30 @@ kernel rows to 5-10 ms each.
   The plugin logs the per-sensor breakdown on first frame; check the
   log if multi-sensor configs run into VRAM pressure.
 
+## Tests
+
+Tests are off by default (the workspace's `colcon_defaults.yaml` sets
+`-DBUILD_TESTING=OFF`). To build + run them:
+
+```bash
+colcon build --packages-select gz_sensors_ouster --cmake-args -DBUILD_TESTING=ON
+colcon test --packages-select gz_sensors_ouster
+colcon test-result --verbose --test-result-base build/gz_sensors_ouster
+```
+
+| Binary | Coverage |
+|--------|---------|
+| `test_noise_model` | Range/signal/refl/nearir math + statistical bounds on dropouts and range noise |
+| `test_resample` | Bilinear resample math (uniform depth, all-inf, beam-origin subtraction, azimuth offset) |
+| `test_metadata_parsing` | Loads each shipped `config/metadata/*.json` via the Ouster SDK |
+| `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
+| `test_imu_noise` | IMU white-noise variance vs. density²/dt, bias drift growth, RNG-draw gating, determinism under fixed seed |
+| `test_lifecycle` | Plugin construct + destruct without ever calling `Configure` (catches member-init regressions; build-time vtable check against gz-sim8) |
+
+All tests run on the CPU backend — they exercise the math and class
+lifecycle, not the GPU kernels. GPU paths are exercised at integration
+time when `processRaw()` is dispatched at runtime.
+
 ## Observability
 
 The plugin emits a few categories of structured log lines worth
