@@ -12,6 +12,7 @@
 namespace gz_gpu_ouster_lidar {
 
 /// Deprecated alias for source compatibility with pre-rename callers.
-using CudaRayProcessor = RayProcessor;
+using CudaRayProcessor [[deprecated(
+    "use RayProcessor; cuda_ray_processor.hpp is a compat shim")]] = RayProcessor;
 
 }  // namespace gz_gpu_ouster_lidar
