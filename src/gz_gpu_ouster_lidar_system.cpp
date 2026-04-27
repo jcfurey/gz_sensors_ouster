@@ -3,7 +3,8 @@
 
 #include "gz_gpu_ouster_lidar/gz_gpu_ouster_lidar_system.hpp"
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
-#include "backend.hpp"  // noiseEnabled() — pulled in via cuda/ public includes
+#include "backend.hpp"     // noiseEnabled() — pulled in via cuda/ public includes
+#include "imu_noise.hpp"   // applyImuNoise()
 
 #include <algorithm>
 #include <chrono>
@@ -1251,12 +1252,11 @@ void GzGpuOusterLidarSystem::publishImu(
     const ::gz::math::Vector3d la_proper = la_raw - gravity_body;
 
     // ── IMU noise + bias model ───────────────────────────────────────────
-    // Adds white Gaussian noise (continuous-time density → per-sample sigma
-    // via /√dt) and integrates a random-walk bias state (per-sample drift
-    // sigma via *√dt). Defaults match Ouster Os1 datasheet; downstream
+    // Math lives in cuda/imu_noise.{hpp,cpp} so it's testable without
+    // spinning Gazebo. Defaults match Ouster Os1 datasheet; downstream
     // filters that subscribe to /imu now see a non-pristine signal.
     if (!imu_rng_seeded_) {
-        imu_rng_.seed(static_cast<uint32_t>(deriveNonDeterministicSeed(this)));
+        imu_rng_.seed(deriveNonDeterministicSeed(this));
         imu_rng_seeded_ = true;
     }
     double snap_gyro_noise, snap_accel_noise, snap_gyro_walk, snap_accel_walk;
@@ -1267,26 +1267,19 @@ void GzGpuOusterLidarSystem::publishImu(
         snap_gyro_walk   = gyro_bias_walk_;
         snap_accel_walk  = accel_bias_walk_;
     }
-    const double dt = 1.0 / imu_hz_;
-    const double sqrt_dt = std::sqrt(dt);
-    const double gyro_white  = snap_gyro_noise / sqrt_dt;
-    const double accel_white = snap_accel_noise / sqrt_dt;
-    const double gyro_drift  = snap_gyro_walk * sqrt_dt;
-    const double accel_drift = snap_accel_walk * sqrt_dt;
-
-    std::normal_distribution<double> normal{0.0, 1.0};
-    auto draw = [&] { return normal(imu_rng_); };
-
-    // Random-walk integration: bias_k+1 = bias_k + drift * N(0,1)
-    gyro_bias_  += ::gz::math::Vector3d(
-        gyro_drift * draw(), gyro_drift * draw(), gyro_drift * draw());
-    accel_bias_ += ::gz::math::Vector3d(
-        accel_drift * draw(), accel_drift * draw(), accel_drift * draw());
-
-    const ::gz::math::Vector3d av_meas = av + gyro_bias_ +
-        ::gz::math::Vector3d(gyro_white * draw(), gyro_white * draw(), gyro_white * draw());
-    const ::gz::math::Vector3d la = la_proper + accel_bias_ +
-        ::gz::math::Vector3d(accel_white * draw(), accel_white * draw(), accel_white * draw());
+    const Vec3 nominal_av = {av.X(), av.Y(), av.Z()};
+    const Vec3 nominal_la = {la_proper.X(), la_proper.Y(), la_proper.Z()};
+    const ImuNoiseSample noisy = applyImuNoise(
+        nominal_av, nominal_la,
+        gyro_bias_, accel_bias_,
+        snap_gyro_noise, snap_accel_noise,
+        snap_gyro_walk,  snap_accel_walk,
+        1.0 / imu_hz_,
+        imu_rng_);
+    const ::gz::math::Vector3d av_meas(noisy.av.x, noisy.av.y, noisy.av.z);
+    const ::gz::math::Vector3d la(noisy.la.x, noisy.la.y, noisy.la.z);
+    const double gyro_white  = noisy.gyro_white_std;   // for covariance below
+    const double accel_white = noisy.accel_white_std;
 
     const int64_t stamp_ns = sim_now.count();
 

@@ -17,6 +17,7 @@ set(_backend_sources
   backend_cpu.cpp
   backend_stubs.cpp
   ray_processor_cpu_impl.cpp
+  imu_noise.cpp
 )
 
 add_library(gz_gpu_ouster_lidar_cuda STATIC ${_backend_sources})

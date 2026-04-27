@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
+#include "imu_noise.hpp"  // Vec3 (used for IMU bias state members)
+
 #include <gz/sim/System.hh>
 #include <gz/common/Event.hh>
 #include <gz/math/Pose3.hh>
@@ -110,13 +113,16 @@ private:
     double accel_bias_walk_  = 1.0e-5;   // m/s³/√Hz    (Ouster bias instability)
 
     // Bias state (random walk integrand). Persists across frames.
-    ::gz::math::Vector3d gyro_bias_{0, 0, 0};
-    ::gz::math::Vector3d accel_bias_{0, 0, 0};
+    // Plain double-triple (defined in cuda/imu_noise.hpp) so the noise
+    // model can be unit-tested without dragging gz/math along.
+    Vec3 gyro_bias_{0.0, 0.0, 0.0};
+    Vec3 accel_bias_{0.0, 0.0, 0.0};
 
     // Per-instance RNG for IMU noise. Lazy-seeded on first publish using
     // deriveNonDeterministicSeed(this) so multiple sensors get independent
-    // noise streams.
-    std::mt19937 imu_rng_;
+    // noise streams. mt19937_64 (not mt19937) so the full 64-bit seed is
+    // preserved.
+    std::mt19937_64 imu_rng_;
     bool imu_rng_seeded_ = false;
 
     // ── Ouster metadata ──────────────────────────────────────────────────────
