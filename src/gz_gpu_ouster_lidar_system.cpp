@@ -954,7 +954,11 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     const int n_packets = W_ / cpp_;
     const int64_t scan_period_ns = static_cast<int64_t>(1e9 / lidar_hz_);
     const int64_t scan_start_ns  = std::max(int64_t{0}, stamp_ns - scan_period_ns);
-    const int64_t dt_col_ns      = scan_period_ns / W_;
+
+    // Per-column timestamps: round (col * period / W) on the full numerator
+    // rather than accumulating col * (period / W). At 10 Hz × 1024 cols the
+    // truncated form drops 256 ns per scan and drifts over long bag captures;
+    // computing on the full multiply restores the last column to the scan end.
 
     // Map raw buffers into Eigen for PacketWriter
     using RangeMatrix = Eigen::Map<ouster::sdk::core::img_t<uint32_t>>;
@@ -978,8 +982,9 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
         for (int c_local = 0; c_local < cpp_; ++c_local) {
             const int col_global = col_start + c_local;
             uint8_t * col = pw_->nth_col(c_local, pkt_buf_.data());
-            pw_->set_col_timestamp(col,
-                static_cast<uint64_t>(scan_start_ns + col_global * dt_col_ns));
+            const int64_t col_ts = scan_start_ns +
+                (static_cast<int64_t>(col_global) * scan_period_ns) / W_;
+            pw_->set_col_timestamp(col, static_cast<uint64_t>(col_ts));
             pw_->set_col_measurement_id(col, static_cast<uint16_t>(col_global));
             pw_->set_col_status(col, 0x01u);
         }
