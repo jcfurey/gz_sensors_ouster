@@ -1263,19 +1263,26 @@ void GzGpuOusterLidarSystem::drainThreadFunc()
 
         if (local_pkts.empty()) continue;
 
-        const auto spacing = std::chrono::nanoseconds(
-            static_cast<int64_t>(1e9 / lidar_hz_) /
-            static_cast<int64_t>(local_pkts.size()));
+        // Use absolute deadlines (sleep_until) instead of accumulating
+        // sleep_for(spacing) calls. At dense-sensor packet counts the per-
+        // packet spacing drops to hundreds of microseconds, where CFS
+        // scheduler jitter would round each sleep up and the packets would
+        // bunch toward the end of the scan. Anchoring on a fixed t0 lets
+        // any individual sleep finish late without pushing the next one.
+        const auto period = std::chrono::nanoseconds(
+            static_cast<int64_t>(1e9 / lidar_hz_));
+        const auto spacing = period / static_cast<int64_t>(local_pkts.size());
+        const auto t0 = std::chrono::steady_clock::now();
 
         try {
             for (size_t i = 0; i < local_pkts.size(); ++i) {
                 if (shutdown_.load(std::memory_order_acquire)) return;
+                if (i > 0) {
+                    std::this_thread::sleep_until(t0 + spacing * static_cast<int64_t>(i));
+                }
                 {
                     std::lock_guard<std::mutex> pub_lk(publish_mtx_);
                     pkt_pub_->publish(local_pkts[i]);
-                }
-                if (i + 1 < local_pkts.size()) {
-                    std::this_thread::sleep_for(spacing);
                 }
             }
         } catch (const std::exception & e) {
