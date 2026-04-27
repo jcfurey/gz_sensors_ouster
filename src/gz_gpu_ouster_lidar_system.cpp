@@ -454,24 +454,33 @@ void GzGpuOusterLidarSystem::initRosInterface()
     meta_pub_ = ros_node_->create_publisher<std_msgs::msg::String>(
         abs_prefix + "/metadata", meta_qos);
 
-    // Packet publisher
+    // Packet publisher: SensorDataQoS (BEST_EFFORT). High-rate raw stream;
+    // a dropped packet is recoverable by os_cloud and never blocks the
+    // realtime path.
     const auto qos = rclcpp::SensorDataQoS();
     pkt_pub_ = ros_node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
         abs_prefix + "/lidar_packets", qos);
 
-    // Image publishers (same topics as os_image node)
+    // Image + camera_info: RELIABLE KEEP_LAST(5). Standard ROS image tools
+    // (rqt_image_view, image_view, image_transport, RViz Image display)
+    // default to RELIABLE subscribers. On rmw_zenoh_cpp a RELIABLE sub does
+    // not match a BEST_EFFORT pub, so SensorDataQoS here would silently
+    // drop everything for those consumers. Foxglove/Trillium can match
+    // either side.
+    rclcpp::QoS image_qos{5};
+    image_qos.reliable().keep_last(5);
     range_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
-        abs_prefix + "/range_image", qos);
+        abs_prefix + "/range_image", image_qos);
     signal_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
-        abs_prefix + "/signal_image", qos);
+        abs_prefix + "/signal_image", image_qos);
     reflec_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
-        abs_prefix + "/reflec_image", qos);
+        abs_prefix + "/reflec_image", image_qos);
     nearir_image_pub_ = ros_node_->create_publisher<sensor_msgs::msg::Image>(
-        abs_prefix + "/nearir_image", qos);
+        abs_prefix + "/nearir_image", image_qos);
 
     // CameraInfo publisher (equirectangular projection model for range images)
     camera_info_pub_ = ros_node_->create_publisher<sensor_msgs::msg::CameraInfo>(
-        abs_prefix + "/camera_info", qos);
+        abs_prefix + "/camera_info", image_qos);
     {
         const uint32_t H = static_cast<uint32_t>(H_);
         const uint32_t W = static_cast<uint32_t>(W_);
