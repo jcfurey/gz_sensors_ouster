@@ -80,4 +80,29 @@
   <!-- <imu_hz>100.0</imu_hz> -->
   <!-- <publish_imu_msg>true</publish_imu_msg> -->
 
+  <!-- IMU noise + bias model. Continuous-time densities (per-√Hz),
+       internally scaled by sqrt(dt) where dt = 1/imu_hz. Defaults match
+       Ouster Os1 IMU datasheet (ICM-20948 class). Set any to 0 to
+       disable that term; all four are dynamically reconfigurable via
+       `ros2 param set`. The published Imu covariance diagonal is
+       derived from the active gyro/accel densities. -->
+  <!-- <gyro_noise_std>1.75e-4</gyro_noise_std> -->   <!-- rad/s/√Hz, ≈0.01 °/s/√Hz -->
+  <!-- <accel_noise_std>2.3e-3</accel_noise_std> -->  <!-- m/s²/√Hz, ≈230 µg/√Hz -->
+  <!-- <gyro_bias_walk>1.0e-6</gyro_bias_walk> -->    <!-- rad/s²/√Hz, in-run bias instability -->
+  <!-- <accel_bias_walk>1.0e-5</accel_bias_walk> -->  <!-- m/s³/√Hz -->
+
+  <!-- ─── QoS overrides (optional) ─────────────────────────────────── -->
+  <!-- lidar_packets always uses SensorDataQoS (BEST_EFFORT) — that's what
+       os_cloud expects and is not user-overridable. For everything else,
+       choose the QoS that matches your downstream subscribers. On
+       rmw_zenoh_cpp publisher and subscriber QoS must match exactly
+       (neither BE-pub-to-RELIABLE-sub nor the reverse work). Accepted
+       values: "reliable" | "best_effort" | "sensor_data".
+
+       Defaults:
+         image_qos = "reliable"      (matches RViz / rqt_image_view default)
+         imu_qos   = "sensor_data"   (matches the real ouster_ros driver) -->
+  <!-- <image_qos>reliable</image_qos> -->     <!-- range/signal/reflec/nearir + camera_info -->
+  <!-- <imu_qos>sensor_data</imu_qos> -->     <!-- imu + imu_packets -->
+
 </plugin>
