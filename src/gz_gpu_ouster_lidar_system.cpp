@@ -554,6 +554,7 @@ void GzGpuOusterLidarSystem::initRosInterface()
         camera_info_msg_.height = H;
         camera_info_msg_.width = W;
         camera_info_msg_.distortion_model = "equidistant";
+        // camera_info_msg_.distortion_model = "plumb_bob";
         camera_info_msg_.k = {fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0};
         camera_info_msg_.d = {0.0, 0.0, 0.0, 0.0, 0.0};
         camera_info_msg_.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
