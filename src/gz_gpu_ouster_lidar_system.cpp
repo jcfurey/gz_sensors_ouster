@@ -1126,10 +1126,10 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
             pw_->set_col_status(col, 0x01u);
         }
 
-        pw_->set_block<uint32_t>(range_mat,  ouster::sdk::core::ChanField::RANGE,        pkt_buf_.data());
-        pw_->set_block<uint16_t>(signal_mat, ouster::sdk::core::ChanField::SIGNAL,       pkt_buf_.data());
-        pw_->set_block<uint8_t> (refl_mat,   ouster::sdk::core::ChanField::REFLECTIVITY, pkt_buf_.data());
-        pw_->set_block<uint16_t>(nearir_mat, ouster::sdk::core::ChanField::NEAR_IR,      pkt_buf_.data());
+        pw_->set_block<uint32_t>(range_mat.data(),  W_, ouster::sdk::core::ChanField::RANGE,        pkt_buf_.data());
+        pw_->set_block<uint16_t>(signal_mat.data(), W_, ouster::sdk::core::ChanField::SIGNAL,       pkt_buf_.data());
+        pw_->set_block<uint8_t> (refl_mat.data(),   W_, ouster::sdk::core::ChanField::REFLECTIVITY, pkt_buf_.data());
+        pw_->set_block<uint16_t>(nearir_mat.data(), W_, ouster::sdk::core::ChanField::NEAR_IR,      pkt_buf_.data());
 
         new_pkts[static_cast<size_t>(p)].buf.assign(pkt_buf_.begin(), pkt_buf_.end());
     }
