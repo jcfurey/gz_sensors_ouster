@@ -134,8 +134,7 @@ INSTANTIATE_TEST_SUITE_P(
         "os1_64_rev7.json",
         "os1_128_rev7.json",
         "os2_128_rev7.json",
-        "osdome_128_rev7.json"
-    ),
+        "osdome_128_rev7.json"),  // NOLINT(whitespace/parens) — INSTANTIATE_TEST_SUITE_P macro layout
     [](const ::testing::TestParamInfo<std::string> & info) {
         // Sanitise filename for test name (replace dots/hyphens with underscores)
         std::string name = info.param;

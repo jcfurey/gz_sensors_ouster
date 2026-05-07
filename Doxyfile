@@ -1,0 +1,40 @@
+# Minimal Doxyfile for the lint gate.
+# Goal: surface broken doc comments on PR (mismatched @param, dangling
+# @ref, etc.). Not used to publish HTML — flip GENERATE_HTML when/if you
+# want hosted docs.
+
+PROJECT_NAME           = "gz_sensors_ouster"
+PROJECT_BRIEF          = "Gazebo system plugin: GPU Ouster lidar sensor + IMU noise"
+
+# README.md is intentionally excluded — it's GitHub-flavored Markdown
+# (anchors auto-generated from headings), and Doxygen interprets [text](#anchor)
+# as \ref which requires explicit \anchor declarations. The README serves
+# human readers; doc lint only needs to scan headers/sources.
+INPUT                  = include src cuda
+RECURSIVE              = YES
+
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+
+# Gate behavior — fail CI on broken doc comments only, not on missing docs.
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = YES
+
+# Doxygen requires at least one output format to actually traverse the AST,
+# so generate HTML to a throwaway tmp dir. CI artifacts are not published.
+GENERATE_HTML          = YES
+HTML_OUTPUT            = /tmp/gz_sensors_ouster_doxygen
+GENERATE_LATEX         = NO
+GENERATE_XML           = NO
+
+# Make doxygen understand our extensions.
+FILE_PATTERNS          = *.cpp *.hpp *.h *.cu *.cuh
+EXTENSION_MAPPING      = cu=C++ cuh=C++
+
+# Don't try to render call graphs — graphviz is fine but irrelevant for a lint pass.
+HAVE_DOT               = NO

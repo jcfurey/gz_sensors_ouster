@@ -90,6 +90,75 @@ jobs:
           colcon test --packages-select gz_sensors_ouster --event-handlers console_direct+
           colcon test-result --verbose --all
 
+  # ── Quality gates ────────────────────────────────────────────────────────────
+  # Mirrors what gazebo-tooling/action-gz-ci runs on upstream gazebosim/gz-sensors:
+  # cppcheck (static analysis), cpplint (Google C++ style), doxygen (doc-comment
+  # lint), and package.xml schema validation. Each runs as its own job so PR
+  # status checks show which gate failed.
+
+  cppcheck:
+    name: cppcheck (static analysis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      - name: Run cppcheck
+        run: |
+          # test/ excluded — gtest's TEST(...) / TEST_P(...) macros confuse
+          # cppcheck's preprocessor and surface false-positive syntaxErrors.
+          # GZ_ADD_PLUGIN is the gz-plugin2 registration macro; cppcheck can't
+          # see its definition without the full Gazebo headers, so suppress
+          # `unknownMacro` rather than chasing the toolchain.
+          cppcheck --quiet \
+            --enable=warning,style,performance,portability \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            --suppress=unknownMacro \
+            --error-exitcode=1 \
+            -I include -I cuda \
+            src/ include/ cuda/
+
+  cpplint:
+    name: cpplint (Google C++ style)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cpplint
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip
+          pip install --user --no-cache-dir cpplint==1.6.1
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      - name: Run cpplint
+        # CPPLINT.cfg at the repo root configures linelength + filter rules
+        # (the rules we silence are documented inline in that file).
+        run: cpplint --recursive src/ include/ cuda/ test/
+
+  doxygen:
+    name: doxygen (doc-comment lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install doxygen
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq doxygen graphviz
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      - name: Run doxygen
+        # Doxyfile sets WARN_AS_ERROR=YES; HTML output is generated under /tmp
+        # but discarded — this is a lint pass, not a docs-publish step.
+        run: doxygen Doxyfile
+
+  package-xml:
+    name: Validate package.xml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gazebo-tooling/action-gz-ci/validate_package_xml@jammy
+
   # Compile-only smoke test for the HIP (AMD) backend. No AMD GPU in CI, so
   # we only verify the source compiles under hipcc. Runtime coverage must
   # be done on real ROCm hardware.

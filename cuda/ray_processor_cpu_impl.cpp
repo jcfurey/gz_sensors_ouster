@@ -172,7 +172,7 @@ void processRawCpu(
     std::vector<float> depth_buf(static_cast<size_t>(out_n));
     std::vector<float> retro_buf(static_cast<size_t>(out_n), 0.0f);
 
-    #pragma omp parallel for schedule(static) if(out_n > 65536)
+    #pragma omp parallel for schedule(static) if(out_n > 65536)  // NOLINT(whitespace/parens)
     for (int idx = 0; idx < out_n; ++idx) {
         const int beam = idx / W;
         const int col  = idx % W;

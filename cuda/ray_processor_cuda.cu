@@ -72,7 +72,7 @@ __global__ void resampleKernel(
     const float v_frac = (beam_angle - min_alt) / v_range;
     const float row_f  = v_frac * (gpu_H - 1);
     const int row_lo   = max(min(__float2int_rd(row_f), gpu_H - 1), 0);
-    const int row_hi   = min(row_lo + 1, gpu_H - 1);
+    const int row_hi   = min(row_lo + 1, gpu_H - 1);  // NOLINT(build/include_what_you_use) — CUDA device-side min, not std::min
     const float v_alpha = row_f - row_lo;
 
     // Per-beam azimuth offset → fractional column shift.
