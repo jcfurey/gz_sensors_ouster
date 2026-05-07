@@ -128,7 +128,12 @@ jobs:
       - name: Compile SYCL backend in isolation
         shell: bash
         run: |
-          . /opt/intel/oneapi/setvars.sh
+          # The intel/oneapi-basekit image sets SETVARS_COMPLETED=1 in its
+          # baked env, so a plain `. setvars.sh` exits with code 3 ("already
+          # run") and bash -e aborts the step. --force re-runs idempotently
+          # — the "excessive PATH" warning only matters in long-lived shells,
+          # not a fresh CI runner.
+          . /opt/intel/oneapi/setvars.sh --force
           icpx -fsycl -std=c++17 -fPIC \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_sycl.cpp \
