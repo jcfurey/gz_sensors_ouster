@@ -122,19 +122,13 @@ if(NOT GZ_GPU_OUSTER_USE_CUDA AND NOT GZ_GPU_OUSTER_USE_HIP AND NOT GZ_GPU_OUSTE
   message(STATUS "${PROJECT_NAME}: no GPU backend enabled; CPU fallback only")
 endif()
 
-# ── Ouster SDK headers (same pattern as gz_ouster_packet_bridge) ──────────────
-# Try drivers/ouster-ros/ first, then drivers/lidar/ouster/ (alternate workspace layout).
-set(_ouster_sdk_src "${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/ouster-ros/ouster-ros/ouster-sdk")
-if(NOT EXISTS "${_ouster_sdk_src}/ouster_client/include")
-  set(_ouster_sdk_src "${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/lidar/ouster/ouster-ros/ouster-sdk")
-endif()
-if(NOT EXISTS "${_ouster_sdk_src}/ouster_client/include")
-  message(FATAL_ERROR
-    "Ouster SDK not found. Searched:\n"
-    "  ${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/ouster-ros/ouster-ros/ouster-sdk\n"
-    "  ${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/lidar/ouster/ouster-ros/ouster-sdk\n"
-    "Ensure ouster-ros submodule is initialized: git submodule update --init --recursive")
-endif()
+# ── Ouster SDK headers ────────────────────────────────────────────────────────
+# Headers (<ouster/types.h>, <ouster/metadata.h>, <ouster/impl/packet_writer.h>)
+# are propagated by ament_target_dependencies(ouster_ros) below — upstream
+# ouster_ros installs ouster-sdk/ouster_client/include/ouster to its install
+# prefix and re-exports it via ament_export_include_directories(include). No
+# explicit path manipulation needed; works against either an apt-installed
+# ros-${ROS_DISTRO}-ouster-ros or a workspace colcon build of the submodule.
 
 # OpenMP (optional): parallelise CPU-side bilinear resampling for high-density
 # sensors.  Falls back to single-threaded if not found.
@@ -156,8 +150,6 @@ add_library(${PROJECT_NAME} SHARED
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  PRIVATE
-  "${_ouster_sdk_src}/ouster_client/include"
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -199,7 +191,6 @@ if(BUILD_TESTING)
   ament_add_gtest(test_parameter_validation test/test_parameter_validation.cpp)
   target_include_directories(test_parameter_validation PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    "${_ouster_sdk_src}/ouster_client/include"
   )
   target_link_libraries(test_parameter_validation
     gz_gpu_ouster_lidar_cuda
@@ -220,9 +211,6 @@ if(BUILD_TESTING)
       "testing with -DBUILD_TESTING=OFF.")
   endif()
   ament_add_gtest(test_metadata_parsing test/test_metadata_parsing.cpp)
-  target_include_directories(test_metadata_parsing PRIVATE
-    "${_ouster_sdk_src}/ouster_client/include"
-  )
   ament_target_dependencies(test_metadata_parsing
     ouster_ros
   )
