@@ -129,7 +129,10 @@ jobs:
       - name: Install cpplint
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip
-          pip install --user --no-cache-dir cpplint==1.6.1
+          # ubuntu-latest is now noble (24.04) which enforces PEP 668; pip
+          # refuses system installs without --break-system-packages. Safe in
+          # an ephemeral CI container — there is no host Python to corrupt.
+          pip install --user --break-system-packages --no-cache-dir cpplint==1.6.1
           echo "$HOME/.local/bin" >> $GITHUB_PATH
         env:
           DEBIAN_FRONTEND: noninteractive
