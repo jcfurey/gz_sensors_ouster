@@ -191,9 +191,12 @@ TEST(ImuNoise, BiasDriftGrowsLinearly)
 
 TEST(ImuNoise, NoWhiteNoiseSkipsRngDraws)
 {
-    // If white-noise stds are 0, applyImuNoise should not consume RNG state
-    // for the white-noise step. Verify by comparing two RNGs: one driven
-    // through applyImuNoise (with bias walk only), one drawn from manually.
+    // If white-noise stds are 0, applyImuNoise should consume the engine
+    // exactly as if only the bias-walk step ran (3 gyro + 3 accel = 6
+    // normal_distribution draws). Compare engine state directly — going
+    // through a separate normal_distribution would inject the polar-method
+    // cache state, which differs from applyImuNoise's internal cache and
+    // makes equality checks unreliable on rejection-heavy seeds.
     Vec3 gb = kZeroVec, ab = kZeroVec;
     std::mt19937_64 rng_a{99};
     std::mt19937_64 rng_b{99};
@@ -204,19 +207,20 @@ TEST(ImuNoise, NoWhiteNoiseSkipsRngDraws)
     applyImuNoise(kZeroVec, kZeroVec, gb, ab,
                   0.0, 0.0, walk, walk, dt, rng_a);
 
-    // Manually draw 6 samples (3 gyro bias + 3 accel bias) from rng_b.
+    // Reference path: same number of normal draws, same dist algo, fresh
+    // distribution mirrors applyImuNoise's internal `norm` lifecycle.
     std::normal_distribution<double> n{0.0, 1.0};
     for (int i = 0; i < 6; ++i) (void)n(rng_b);
 
-    // Now both RNGs should be in identical state — next draw must match.
-    EXPECT_DOUBLE_EQ(n(rng_a), n(rng_b));
+    EXPECT_EQ(rng_a, rng_b);
 }
 
 TEST(ImuNoise, NoBiasWalkSkipsRngDraws)
 {
     // Symmetric: with both bias_walks=0 and only white noise enabled,
-    // applyImuNoise should consume exactly 6 RNG draws (3 gyro white + 3
-    // accel white) — not 12.
+    // applyImuNoise should consume exactly 6 normal_distribution draws (3
+    // gyro white + 3 accel white) — not 12. See NoWhiteNoiseSkipsRngDraws
+    // above for why this checks engine state directly.
     Vec3 gb = kZeroVec, ab = kZeroVec;
     std::mt19937_64 rng_a{31337};
     std::mt19937_64 rng_b{31337};
@@ -226,7 +230,8 @@ TEST(ImuNoise, NoBiasWalkSkipsRngDraws)
 
     std::normal_distribution<double> n{0.0, 1.0};
     for (int i = 0; i < 6; ++i) (void)n(rng_b);
-    EXPECT_DOUBLE_EQ(n(rng_a), n(rng_b));
+
+    EXPECT_EQ(rng_a, rng_b);
 }
 
 TEST(ImuNoise, NominalValuePreservedAsMean)

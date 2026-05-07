@@ -19,9 +19,36 @@
 
 #include <gtest/gtest.h>
 
+#include <rclcpp/rclcpp.hpp>
+
 #include "gz_gpu_ouster_lidar/gz_gpu_ouster_lidar_system.hpp"
 
 namespace gz_gpu_ouster_lidar {
+
+// The plugin default-constructs an rclcpp::executors::SingleThreadedExecutor
+// member, which provisions its wait-set guard condition off the default
+// rclcpp context — that requires rclcpp::init(). Configure once for the
+// suite and shut down on tear-down so each TEST gets a live context without
+// repeatedly initialising rcl.
+class LifecycleEnv : public ::testing::Environment
+{
+public:
+    void SetUp() override
+    {
+        if (!rclcpp::ok()) {
+            rclcpp::init(0, nullptr);
+        }
+    }
+    void TearDown() override
+    {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+        }
+    }
+};
+// gtest takes ownership; raw new is the documented idiom.
+::testing::Environment * const kLifecycleEnv =
+    ::testing::AddGlobalTestEnvironment(new LifecycleEnv);
 
 TEST(Lifecycle, ConstructAndDestructWithoutConfigure)
 {
