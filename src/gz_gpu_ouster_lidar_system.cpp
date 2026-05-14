@@ -620,6 +620,9 @@ void GzGpuOusterLidarSystem::initRosInterface()
                 const auto & name = p.get_name();
                 // Reject changes to structural parameters.
                 if (name == "lidar_hz" || name == "max_range" || name == "imu_hz") {
+                    RCLCPP_WARN(kLogger,
+                        "rejecting runtime change to '%s' (structural; "
+                        "set in SDF instead)", name.c_str());
                     rcl_interfaces::msg::SetParametersResult r;
                     r.successful = false;
                     r.reason = name + " cannot be changed at runtime";
