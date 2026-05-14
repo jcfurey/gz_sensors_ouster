@@ -46,10 +46,10 @@ public:
 // Factories. Return nullptr if the backend is not compiled in OR if it is
 // compiled in but no usable device is detected at runtime. Implementations
 // of the non-compiled-in backends live in backend_stubs.cpp.
-std::unique_ptr<Backend> makeCudaBackend(uint64_t seed);
-std::unique_ptr<Backend> makeHipBackend(uint64_t seed);
-std::unique_ptr<Backend> makeSyclBackend(uint64_t seed);
-std::unique_ptr<Backend> makeCpuBackend(uint64_t seed);
+[[nodiscard]] std::unique_ptr<Backend> makeCudaBackend(uint64_t seed);
+[[nodiscard]] std::unique_ptr<Backend> makeHipBackend(uint64_t seed);
+[[nodiscard]] std::unique_ptr<Backend> makeSyclBackend(uint64_t seed);
+[[nodiscard]] std::unique_ptr<Backend> makeCpuBackend(uint64_t seed);
 
 /// True if any noise/dropout/edge-suppression term is non-zero. Backends
 /// use this to skip RNG state allocation and the curand/hiprand init
