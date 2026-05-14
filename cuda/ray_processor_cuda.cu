@@ -313,8 +313,10 @@ __global__ void rayProcessKernel(
     signal_out[idx] = static_cast<uint16_t>(fminf(fmaxf(sig, 0.f), 65535.f));
 
     // ── Reflectivity from retro (Ouster calibrated scale) ──────────────────
-    // Ouster reflectivity: 0-100 = Lambertian diffuse (linear),
-    // 101-255 = retroreflective (log-scaled).
+    // 0-100 = Lambertian (linear), 101-255 = retroreflective (log).
+    // Slope 22 ≈ (255-100)/7 → 7 doublings of headroom above rv=1 before
+    // saturating at 255. See ray_processor_cpu_impl.cpp for the full
+    // derivation and upstream Ouster references.
     // Gazebo retro is typically [0,1] for diffuse surfaces, >1 for retro.
     if (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f) {
         float rv = retro[idx];

@@ -251,6 +251,9 @@ __global__ void rayProcessKernelHip(
     }
     signal_out[idx] = static_cast<uint16_t>(fminf(fmaxf(sig, 0.f), 65535.f));
 
+    // Ouster reflectivity scale: 0-100 Lambertian linear, 101-255 retro log.
+    // Slope 22 = (255-100)/7 → 7 doublings of headroom above rv=1.
+    // Canonical derivation + upstream Ouster refs in ray_processor_cpu_impl.cpp.
     if (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f) {
         float rv = retro[idx];
         uint8_t refl;

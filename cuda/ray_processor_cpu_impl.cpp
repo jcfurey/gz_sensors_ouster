@@ -127,8 +127,22 @@ void processCpu(
         }
         signal_out[idx] = static_cast<uint16_t>(std::clamp(sig, 0.0f, 65535.0f));
 
-        // Reflectivity (Ouster calibrated scale):
-        // 0-100 = Lambertian (linear), 101-255 = retroreflective (log).
+        // Reflectivity (Ouster calibrated scale, mirrors firmware output):
+        //   0-100   Lambertian diffuse, linear in surface reflectance %
+        //   101-255 retroreflective, log-scaled so traffic-sign / retro-tape
+        //           returns don't saturate the linear band.
+        // Refs:
+        //   - ouster_client/include/ouster/chanfield.h: REFLECTIVITY field is
+        //     "calibrated by range and sensor sensitivity" (the on-sensor
+        //     firmware does this at production time).
+        //   - Ouster Sensor Documentation, "Reflectivity" section
+        //     (https://static.ouster.dev/sensor-docs/).
+        // Slope choice: 22 ≈ (255 - 100) / 7, so rv ∈ (1, 128] maps into
+        // [101, 254]; rv > 128 saturates at 255. That gives ~7 doublings of
+        // dynamic range above the Lambertian band before clipping, which
+        // matches how a real OS-1 grades retro-tape strength in practice.
+        // Same scaling is duplicated in the CUDA/HIP/SYCL backends; this is
+        // the canonical reference.
         if (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f) {
             float rv = retro_host[idx];
             uint8_t refl;

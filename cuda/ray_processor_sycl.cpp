@@ -238,7 +238,9 @@ private:
                 signal_out[idx] = static_cast<uint16_t>(
                     sycl::fmin(sycl::fmax(sig, 0.f), 65535.f));
 
-                // Reflectivity
+                // Reflectivity (Ouster scale: 0-100 Lambertian, 101-255 retro
+                // log). Slope 22 = (255-100)/7. Canonical derivation +
+                // upstream Ouster refs in ray_processor_cpu_impl.cpp.
                 if (retro && sycl::isfinite(retro[idx]) && retro[idx] > 0.f) {
                     float rv = retro[idx];
                     uint8_t refl;
