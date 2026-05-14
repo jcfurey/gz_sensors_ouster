@@ -218,7 +218,15 @@ private:
     // thread-safe for concurrent publishes on the same node.
     std::mutex publish_mtx_;
     rclcpp::Node::SharedPtr ros_node_;
-    rclcpp::executors::SingleThreadedExecutor ros_executor_;
+    // Lazy-construct the executor inside Configure() *after* rclcpp::init().
+    // If we declare it as a value member here, its constructor runs at plugin
+    // instantiation time (gz::plugin::Loader::Instantiate) — before any
+    // rclcpp::init() has been called by anyone — and crashes with
+    // "failed to create guard condition: context argument is null".
+    // This made the plugin silently dependent on gz_ros2_control loading
+    // first and pulling rclcpp into existence. unique_ptr defers the
+    // executor's construction until we own a context.
+    std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> ros_executor_;
     std::thread ros_spin_thread_;
     rclcpp::Publisher<ouster_sensor_msgs::msg::PacketMsg>::SharedPtr pkt_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr meta_pub_;

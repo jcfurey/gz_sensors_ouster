@@ -83,7 +83,9 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     if (drain_thread_.joinable()) {
         drain_thread_.join();
     }
-    ros_executor_.cancel();
+    if (ros_executor_) {
+        ros_executor_->cancel();
+    }
     if (ros_spin_thread_.joinable()) {
         ros_spin_thread_.join();
     }
@@ -310,7 +312,9 @@ void GzGpuOusterLidarSystem::Configure(
     } catch (const std::exception & e) {
         RCLCPP_ERROR(kLogger,
             "ROS interface init failed: %s; plugin disabled", e.what());
-        ros_executor_.cancel();
+        if (ros_executor_) {
+            ros_executor_->cancel();
+        }
         if (ros_spin_thread_.joinable()) {
             ros_spin_thread_.join();
         }
@@ -475,6 +479,14 @@ void GzGpuOusterLidarSystem::initRosInterface()
     if (!rclcpp::ok()) {
         rclcpp::init(0, nullptr);
     }
+
+    // Construct the executor lazily here, AFTER rclcpp::init() above. The
+    // header member is a unique_ptr so the executor's constructor —
+    // which requires a live rclcpp context — doesn't run at plugin
+    // instantiation time. Without this, sim setups that don't load
+    // gz_ros2_control crash here because nothing else has called
+    // rclcpp::init() yet.
+    ros_executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
 
     rclcpp::NodeOptions opts;
     opts.use_intra_process_comms(false);
@@ -642,9 +654,9 @@ void GzGpuOusterLidarSystem::initRosInterface()
     // Spin the node on a background thread so Zenoh completes peer discovery.
     // Without this, rmw_zenoh_cpp never processes incoming control messages
     // and publish() calls go undelivered even when subscribers exist.
-    ros_executor_.add_node(ros_node_);
+    ros_executor_->add_node(ros_node_);
     ros_spin_thread_ = std::thread([this]() {
-        ros_executor_.spin();
+        ros_executor_->spin();
     });
 
     // Publish initial metadata AFTER executor is spinning.  rmw_zenoh_cpp
