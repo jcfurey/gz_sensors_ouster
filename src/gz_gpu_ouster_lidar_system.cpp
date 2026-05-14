@@ -74,11 +74,23 @@ GzGpuOusterLidarSystem::GzGpuOusterLidarSystem() = default;
 
 GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
 {
+    // Order matters here: see render_busy_mtx_ comment in the header.
+    // 1. Set shutdown_ first so a render callback that begins (or is
+    //    already past the lock) can observe it and bail before touching
+    //    teardown-fragile state.
+    // 2. Disconnect the render hooks. gz::common::Connection::reset() does
+    //    not wait for in-flight callbacks, so this only prevents *new*
+    //    invocations.
+    // 3. Take render_busy_mtx_ to flush any in-flight callback. By the
+    //    time we own the lock and release it, no render-thread code is
+    //    executing in this instance.
+    // 4. Tear down the rest in reverse construction order.
+    shutdown_.store(true, std::memory_order_release);
     render_conn_.reset();
     frame_conn_.reset();
+    { std::lock_guard<std::mutex> lk(render_busy_mtx_); }
     DestroyGpuRays();
 
-    shutdown_.store(true, std::memory_order_release);
     drain_cv_.notify_all();
     if (drain_thread_.joinable()) {
         drain_thread_.join();
@@ -683,6 +695,13 @@ void GzGpuOusterLidarSystem::initRosInterface()
 
 void GzGpuOusterLidarSystem::OnRender()
 {
+    // See render_busy_mtx_ comment in the header: hold the barrier for the
+    // entire render-thread callback so the dtor can't race us into freed
+    // members. shutdown_ check is the cheap early-out for the case where
+    // the dtor set the flag and is now waiting on this same lock.
+    std::lock_guard<std::mutex> render_lk(render_busy_mtx_);
+    if (shutdown_.load(std::memory_order_acquire)) return;
+
     if (sensor_initialized_.load(std::memory_order_acquire)) {
         // Republish metadata periodically until os_cloud confirms receipt.
         // rmw_zenoh_cpp transient_local replay is unreliable across processes,
@@ -960,6 +979,13 @@ void GzGpuOusterLidarSystem::onNewFrame(
     unsigned int height, unsigned int channels,
     const std::string & /*format*/)
 {
+    // See render_busy_mtx_ comment in the header. Same shutdown barrier as
+    // OnRender — both render-thread entry points must hold this so the dtor
+    // can guarantee no in-flight callback is touching frame_mtx_/buffers
+    // when teardown begins.
+    std::lock_guard<std::mutex> render_lk(render_busy_mtx_);
+    if (shutdown_.load(std::memory_order_acquire)) return;
+
     // Fast path: just memcpy the raw GpuRays buffer into a staging area.
     // Bilinear resampling is done later on the GPU (CUDA) or CPU (fallback)
     // in encodeAndPublish(), avoiding heavy computation under this lock.

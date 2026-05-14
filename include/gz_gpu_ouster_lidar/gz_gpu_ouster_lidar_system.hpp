@@ -253,6 +253,19 @@ private:
     std::atomic<bool> drain_ready_{false};
     std::atomic<bool> shutdown_{false};
 
+    // ── Render-thread shutdown barrier ───────────────────────────────────────
+    // gz::common::Connection::reset() does NOT wait for in-flight callbacks:
+    // EventT::Disconnect() flips an atomic flag that prevents future Signal
+    // dispatches but immediately destroys the held std::function while a
+    // concurrent Signal call may still be inside the callback (UB by the
+    // letter of the standard, racy in practice). Without an explicit
+    // barrier, the dtor can race the render thread, freeing drain_cv_ /
+    // frame_mtx_ / publish_mtx_ out from under an in-flight OnRender or
+    // onNewFrame. Both render-thread entry points lock this for the
+    // duration of their work, and the dtor takes it once after disconnect()
+    // to flush any in-flight callback before tearing down the rest.
+    mutable std::mutex render_busy_mtx_;
+
     // ── IMU timing ───────────────────────────────────────────────────────────
     std::chrono::nanoseconds last_imu_sim_time_{0};
 
