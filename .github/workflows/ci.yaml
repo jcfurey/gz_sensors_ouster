@@ -43,19 +43,28 @@ jobs:
       # because it carries an in-tree ouster-sdk submodule at v0.16.2+. The
       # apt package ros-${ROS_DISTRO}-ouster-ros lags (currently 0.14.1) and
       # exposes an older PacketWriter::set_block signature that the plugin
-      # source no longer targets. Bump OUSTER_ROS_REF to a tag/SHA for stricter
-      # reproducibility once the workspace settles on one.
+      # source no longer targets.
+      #
+      # OUSTER_ROS_REF is pinned to an exact commit (not the floating `ros2`
+      # branch) for reproducibility: a force-push to ros2 can no longer change
+      # what CI builds, and a dropped commit fails the checkout loudly instead
+      # of silently building different source. To intentionally move forward,
+      # bump this to the new tip SHA of jcfurey/ouster-ros@ros2.
       OUSTER_ROS_REPO: https://github.com/jcfurey/ouster-ros.git
-      OUSTER_ROS_REF: ros2
+      OUSTER_ROS_REF: 6ab9402c1a8275f600945c3d8dfd5a73b40585c8
     steps:
       - uses: actions/checkout@v4
         with:
           path: src/gz_sensors_ouster
 
-      - name: Clone ouster-ros (jcfurey fork)
+      - name: Clone ouster-ros (jcfurey fork, pinned commit)
         run: |
-          git clone --depth 1 --branch "${OUSTER_ROS_REF}" --recurse-submodules \
-            "${OUSTER_ROS_REPO}" src/ouster-ros
+          # Full clone (no --depth/--branch) so the pinned SHA is fetchable
+          # even after ros2 advances, then check it out and sync submodules
+          # to the gitlink recorded at that commit.
+          git clone --recurse-submodules "${OUSTER_ROS_REPO}" src/ouster-ros
+          git -C src/ouster-ros checkout "${OUSTER_ROS_REF}"
+          git -C src/ouster-ros submodule update --init --recursive
 
       - name: Install gz_sensors_ouster-only apt deps
         run: |
@@ -80,7 +89,12 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/${ROS_DISTRO}/setup.bash
-          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+          # -DBUILD_TESTING=ON is required: the gz_sensors_ouster test targets
+          # are guarded by if(BUILD_TESTING) and the workspace colcon_defaults
+          # set it OFF, so without this the test job below silently runs zero
+          # tests and "passes". Keep it here so the Test step has something to
+          # execute.
+          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Test
         shell: bash
@@ -89,6 +103,19 @@ jobs:
           source install/setup.bash
           colcon test --packages-select gz_sensors_ouster --event-handlers console_direct+
           colcon test-result --verbose --all
+
+          # Guard against the silent-zero-tests regression: assert the summary
+          # reports at least one test. `colcon test-result` prints a final
+          # "Summary: N test(s), ..." line; if N is 0 (or absent), the test
+          # wiring is broken and we must fail rather than report a green no-op.
+          summary="$(colcon test-result --all | grep -E '^Summary:' || true)"
+          echo "test-result ${summary:-<no summary>}"
+          n="$(printf '%s' "$summary" | grep -oE '[0-9]+ test' | grep -oE '[0-9]+' | head -1)"
+          if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+            echo "::error::No tests were executed — BUILD_TESTING wiring is broken."
+            exit 1
+          fi
+          echo "Executed $n test(s)."
 
   # ── Quality gates ────────────────────────────────────────────────────────────
   # Mirrors what gazebo-tooling/action-gz-ci runs on upstream gazebosim/gz-sensors:
@@ -161,6 +188,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: gazebo-tooling/action-gz-ci/validate_package_xml@jammy
+
+  # Compile-only smoke test for the CUDA (NVIDIA) backend. No NVIDIA GPU in
+  # CI, so we only verify the kernel source compiles under nvcc. Runtime
+  # coverage must be done on real CUDA hardware. Mirrors hip-smoke/sycl-smoke
+  # so a build-breaking change to the .cu (or to the shared ray_processor_math
+  # header it includes) is caught on every PR — previously CUDA was the only
+  # backend with no CI compile check at all.
+  cuda-smoke:
+    name: CUDA smoke build (no device)
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile CUDA backend in isolation
+        shell: bash
+        run: |
+          # The devel image ships nvcc + curand headers but not cmake; we only
+          # need to compile the one TU. Link errors on unresolved Backend
+          # symbols are expected and ignored (compile-only via -c).
+          nvcc -std=c++17 -c -Xcompiler -fPIC \
+            -I"$GITHUB_WORKSPACE/include" -I"$GITHUB_WORKSPACE/cuda" \
+            "$GITHUB_WORKSPACE/cuda/ray_processor_cuda.cu" \
+            -o ray_processor_cuda.o
+          echo "CUDA backend compiled OK."
 
   # Compile-only smoke test for the HIP (AMD) backend. No AMD GPU in CI, so
   # we only verify the source compiles under hipcc. Runtime coverage must

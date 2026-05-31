@@ -33,11 +33,13 @@ CI** — the `test` job is a green no-op.
 
 ### HIGH
 
-**H1 — GPU backends are never exercised.** All test suites call the CPU paths directly
-(`processCpu()`, `applyImuNoise()`); none construct `RayProcessor` or exercise the
-dispatch/factory selection. CUDA is not even compile-checked in CI (HIP and SYCL get
-compile-only smoke jobs; CUDA gets nothing). The CUDA/HIP/SYCL kernels have zero
-automated coverage of any kind.
+**H1 — GPU backends are never exercised; backend selection is untested.** Most suites call
+the CPU paths directly (`processCpu()`, `applyImuNoise()`). `test_resample` does construct
+`RayProcessor`, but only the default/auto path — which always resolves to CPU in a CPU-only
+build — so the dispatch/factory **selection** logic (the `GZ_OUSTER_BACKEND` override, the
+CUDA→HIP→SYCL→CPU fallback order, `backendName()`/`usesCpuFallback()`) has no coverage.
+CUDA is not even compile-checked in CI (HIP and SYCL get compile-only smoke jobs; CUDA gets
+nothing). The CUDA/HIP/SYCL kernels have zero automated coverage of any kind.
 
 **H2 — `ouster-ros` dependency pinned to a floating branch.** CI source-builds
 `jcfurey/ouster-ros.git` at branch `ros2`, not a tag/SHA (the comment itself flags this).
