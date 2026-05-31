@@ -72,11 +72,20 @@ jobs:
 
       - name: Clone ouster-ros (jcfurey fork, pinned commit)
         run: |
-          # Full clone (no --depth/--branch) so the pinned SHA is fetchable
-          # even after ros2 advances, then check it out and sync submodules
-          # to the gitlink recorded at that commit.
-          git clone --recurse-submodules "${OUSTER_ROS_REPO}" src/ouster-ros
+          # Clone the ros2 branch specifically — NOT the fork's default branch
+          # (master), which has a different repo layout (a root-level ouster-sdk
+          # submodule). Cloning master and checking out a ros2 commit leaves
+          # master's stale ouster-sdk/ tree beside ros2's nested
+          # ouster-ros/ouster-sdk/, giving the workspace two `sophus` packages
+          # and aborting colcon before anything builds.
+          #
+          # A full (non-shallow) clone of ros2 keeps the pinned commit reachable
+          # even after the branch advances; we then check it out exactly and
+          # resync submodules to that commit's gitlink (sync handles a submodule
+          # URL/path change between the branch tip and the pinned commit).
+          git clone --branch ros2 --recurse-submodules "${OUSTER_ROS_REPO}" src/ouster-ros
           git -C src/ouster-ros checkout "${OUSTER_ROS_REF}"
+          git -C src/ouster-ros submodule sync --recursive
           git -C src/ouster-ros submodule update --init --recursive
 
       - name: Install gz_sensors_ouster-only apt deps
