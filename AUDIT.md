@@ -102,5 +102,33 @@ reconfigures, downstream resampling can over-read.
 
 ## Remediation status
 
-All findings above are being addressed on the `claude/repo-audit-Xv70n` branch. See the
-git history for the corresponding changes.
+All findings have been addressed on the `claude/repo-audit-Xv70n` branch:
+
+| ID | Resolution |
+|----|------------|
+| C1 | CI builds with `-DBUILD_TESTING=ON` and fails if `colcon test-result` reports 0 tests. |
+| H1 | Added `test_dispatch` (backend selection coverage) and a `cuda-smoke` compile job. |
+| H2 | `OUSTER_ROS_REF` pinned to an exact commit; clone reworked to fetch the SHA. |
+| M1 | False positive (gates were already equivalent); the dedup makes them visibly identical. |
+| M2 | Shared `cuda/ray_processor_math.hpp` now drives all four backends. |
+| M3 | README marks HIP/SYCL/CPU perf as estimates and clarifies CI test scope. |
+| M4 | `onNewFrame` validates GpuRays frame dimensions before resampling. |
+| L1, L3 | Magic numbers (π, slope 22, reflectivity factors) are now named constants in the shared header. |
+| L2 | `applyImuNoise` guards non-positive `dt`. |
+| L4 | `metadata_published_`/`metadata_pub_count_` are now atomic. |
+| L5 | `event_mgr_` documented as a non-owning borrow. |
+| L6 | False positive — the drain thread already scopes `publish_mtx_` to the `publish()` call. |
+
+### Verification notes
+
+The CI environment used for this work has only a host C++ toolchain (no ROS/Gazebo/Ouster
+SDK, no CUDA/HIP/SYCL, no gtest), so the full package and the gtest suite cannot be built
+here — they are validated by CI on push. What *was* verified locally:
+
+- The CPU backend's output is **bit-identical** before and after the M2 refactor (golden
+  digest over the full pipeline with noise enabled).
+- The complete CPU-only backend library (dispatch + stubs + CPU impl + IMU) compiles,
+  links, and runs end-to-end through `RayProcessor`.
+- The GPU backends (CUDA/HIP/SYCL) compile only under their respective toolchains, so they
+  rely on the `cuda-smoke`/`hip-smoke`/`sycl-smoke` CI jobs; the shared math they now call
+  is the same code the CPU golden test exercises.
