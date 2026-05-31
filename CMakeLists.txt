@@ -22,27 +22,32 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
-find_package(ament_cmake REQUIRED)
+# ament_cmake_auto discovers every build/buildtool/run dependency declared in
+# package.xml (rclcpp, the sensor/std msgs, ouster_sensor_msgs, ouster_ros and
+# the gz_*_vendor packages) and wires their include dirs + link libs into any
+# target created with ament_auto_add_library below. This finds the gz_*_vendor
+# packages, which is what installs the version-agnostic gz CMake shims used
+# just after.
+find_package(ament_cmake_auto REQUIRED)
+ament_auto_find_build_dependencies()
 
-# Gazebo vendor packages (must be found BEFORE the actual gz-* packages;
-# the vendor extras append to CMAKE_PREFIX_PATH).
-find_package(gz_sim_vendor REQUIRED)
-find_package(gz_rendering_vendor REQUIRED)
-find_package(gz_sensors_vendor REQUIRED)
-find_package(gz_plugin_vendor REQUIRED)
+# Version-agnostic Gazebo discovery. Finding the gz_*_vendor packages (done
+# above by ament_auto_find_build_dependencies) installs CMake shims that let us
+# find_package the underlying gz libraries WITHOUT a version suffix and link
+# their targets without a version in the name. The SAME CMakeLists therefore
+# builds against whichever Gazebo the active ROS distro vendors:
+#   ROS Jazzy   → Gazebo Harmonic (gz-sim 8)
+#   ROS Kilted  → Gazebo Ionic    (gz-sim 9)
+#   ROS Lyrical → Gazebo Jetty    (gz-sim 10)
+# (Set GZ_RELAX_VERSION_MATCH=1 to let a vendor build a different Gazebo from
+# source — e.g. Jetty on Jazzy — matching just the major version.)
+find_package(gz-sim REQUIRED)
+find_package(gz-rendering REQUIRED)
+find_package(gz-sensors REQUIRED COMPONENTS gpu_lidar)
+find_package(gz-plugin REQUIRED COMPONENTS register)
 
-# Actual Gazebo libraries
-find_package(gz-sim8 REQUIRED)
-find_package(gz-rendering8 REQUIRED)
-find_package(gz-sensors8 REQUIRED COMPONENTS gpu_lidar)
-find_package(gz-plugin2 REQUIRED COMPONENTS register)
-
-# ROS 2
-find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(ouster_sensor_msgs REQUIRED)
-find_package(ouster_ros REQUIRED)
+# Eigen's CMake package is named Eigen3 (the package.xml rosdep key is `eigen`),
+# so it is found explicitly rather than via ament_auto.
 find_package(Eigen3 REQUIRED)
 
 # GPU backends (all optional). Each probes for its toolchain; missing
@@ -143,41 +148,25 @@ endif()
 add_subdirectory(cuda)
 
 # ── Gazebo system plugin ─────────────────────────────────────────────────────
-add_library(${PROJECT_NAME} SHARED
+# ament_auto_add_library auto-links the ament dependencies found above
+# (rclcpp, the msg packages, ouster_ros, the gz_*_vendor packages) and adds
+# include/ to the target's public include path.
+ament_auto_add_library(${PROJECT_NAME} SHARED
   src/gz_gpu_ouster_lidar_system.cpp
 )
 
-target_include_directories(${PROJECT_NAME} PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-
+# The non-ament targets — the version-agnostic gz libraries (linked via the
+# unversioned vendor-shim aliases), Eigen, the GPU backend static lib, and the
+# optional OpenMP runtime — are linked explicitly.
 target_link_libraries(${PROJECT_NAME}
-  gz-sim8::gz-sim8
-  gz-rendering8::gz-rendering8
-  gz-sensors8::gz-sensors8
-  gz-plugin2::register
+  gz-sim::gz-sim
+  gz-rendering::gz-rendering
+  gz-sensors::gz-sensors
+  gz-plugin::register
   Eigen3::Eigen
   gz_gpu_ouster_lidar_cuda
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
-
-ament_target_dependencies(${PROJECT_NAME}
-  rclcpp
-  sensor_msgs
-  std_msgs
-  ouster_sensor_msgs
-  ouster_ros
-)
-
-# ── Install ───────────────────────────────────────────────────────────────────
-install(TARGETS ${PROJECT_NAME}
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION lib/${PROJECT_NAME}
-)
-install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 if(BUILD_TESTING)
@@ -237,4 +226,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_lifecycle ${PROJECT_NAME})
 endif()
 
-ament_package()
+# Installs the plugin library + include/ headers, exports the ament package,
+# and installs the runtime config (metadata JSONs + example SDF) to
+# share/${PROJECT_NAME}/config.
+ament_auto_package(INSTALL_TO_SHARE config)

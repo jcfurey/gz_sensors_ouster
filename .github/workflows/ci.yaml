@@ -34,10 +34,23 @@ jobs:
         run: test -f .clang-format
 
   build:
-    name: Build (CPU fallback)
+    # One build per supported ROS distro. The package is version-agnostic
+    # (see CMakeLists: find_package(gz-sim) via the gz_*_vendor shims), so each
+    # distro exercises a different Gazebo: Jazzy→Harmonic (gz 8),
+    # Kilted→Ionic (gz 9), Lyrical→Jetty (gz 10). All build the CPU fallback
+    # (no GPU in CI). fail-fast is off so one distro's failure doesn't cancel
+    # the others; Lyrical is advisory (continue-on-error) because it and its
+    # upstream deps are brand new — flip it to required once the ecosystem on
+    # that distro has settled.
+    name: Build + test (${{ matrix.ros_distro }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ros_distro: [jazzy, kilted, lyrical]
+    continue-on-error: ${{ matrix.ros_distro == 'lyrical' }}
     container:
-      image: osrf/ros:jazzy-desktop
+      image: osrf/ros:${{ matrix.ros_distro }}-desktop
     env:
       # ouster-ros source is pinned to jcfurey/ouster-ros (workspace fork)
       # because it carries an in-tree ouster-sdk submodule at v0.16.2+. The

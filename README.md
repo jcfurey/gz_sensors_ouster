@@ -1,7 +1,7 @@
 # gz_sensors_ouster
 
-Gazebo Harmonic system plugin that simulates Ouster LiDAR sensors
-(OS0, OS1, OS2) with GPU-accelerated ray casting, realistic noise
+Gazebo system plugin (Harmonic / Ionic / Jetty) that simulates Ouster
+LiDAR sensors (OS0, OS1, OS2) with GPU-accelerated ray casting, realistic noise
 models, and native Ouster packet output. Downstream nodes like
 `ouster_ros` `os_cloud` consume the packets identically to real
 hardware -- no driver changes needed.
@@ -42,10 +42,28 @@ For example, with `<sensor_name>/sensor/lidar/lidar0</sensor_name>`:
 
 Image, CameraInfo, and IMU topics are only published when subscribers are present.
 
+## Supported ROS 2 / Gazebo versions
+
+The build is **version-agnostic**: `CMakeLists.txt` discovers Gazebo through the
+`gz_*_vendor` CMake shims (`find_package(gz-sim)` with no version suffix), so
+the same source builds against whichever Gazebo your ROS 2 distro vendors. CI
+builds all three:
+
+| ROS 2 distro | Gazebo release | gz-sim | Status |
+|--------------|----------------|--------|--------|
+| Jazzy        | Harmonic       | 8      | Supported (CI, required) |
+| Kilted       | Ionic          | 9      | Supported (CI, required) |
+| Lyrical      | Jetty          | 10     | Supported (CI, advisory while the distro is new) |
+
+To build against a Gazebo version other than the one your distro vendors (for
+example Jetty on Jazzy), set `GZ_RELAX_VERSION_MATCH=1` so the vendor package
+builds the requested Gazebo from source, matching just the major version.
+
 ## Prerequisites
 
-- **Gazebo Harmonic** (gz-sim8, gz-rendering8, gz-sensors8)
-- **ROS 2** (Jazzy or later) with `rclcpp`, `sensor_msgs`, `std_msgs`
+- **Gazebo** Harmonic, Ionic, or Jetty — provided by the `gz_*_vendor`
+  packages of your ROS 2 distro (see the table above)
+- **ROS 2** Jazzy, Kilted, or Lyrical with `rclcpp`, `sensor_msgs`, `std_msgs`
 - **Ouster SDK** (via the `ouster-ros` submodule -- run
   `git submodule update --init --recursive`)
 - **Eigen3**
@@ -390,7 +408,7 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
 | `test_imu_noise` | IMU white-noise variance vs. density²/dt, bias drift growth, RNG-draw gating, determinism under fixed seed |
 | `test_dispatch` | Backend selection: `GZ_OUSTER_BACKEND` override, auto fallback to CPU, `backendName()`/`usesCpuFallback()`, and `processRaw()` end-to-end through the `RayProcessor` wrapper |
-| `test_lifecycle` | Plugin construct + destruct without ever calling `Configure` (catches member-init regressions; build-time vtable check against gz-sim8) |
+| `test_lifecycle` | Plugin construct + destruct without ever calling `Configure` (catches member-init regressions; build-time vtable check against the vendored gz-sim) |
 
 These tests run on the **CPU backend** — they exercise the shared math
 (`ray_processor_math.hpp`), the class lifecycle, and the dispatcher's
