@@ -3,8 +3,9 @@
   <name>gz_sensors_ouster</name>
   <version>1.0.0</version>
   <description>
-    Gazebo Harmonic system plugin that creates a GPU-based lidar sensor with
-    per-beam non-uniform elevation angles matching Ouster calibration metadata.
+    Gazebo system plugin (Harmonic / Ionic / Jetty) that creates a GPU-based
+    lidar sensor with per-beam non-uniform elevation angles matching Ouster
+    calibration metadata.
     Fires rays via gz::rendering::GpuRays and produces Ouster lidar_packets
     (PacketMsg) through a vendor-neutral post-processing pipeline that
     dispatches at runtime to CUDA (NVIDIA), HIP (AMD incl. APUs), SYCL
@@ -16,7 +17,7 @@
   <url type="repository">https://github.com/jcfurey/gz_sensors_ouster</url>
   <url type="bugtracker">https://github.com/jcfurey/gz_sensors_ouster/issues</url>
 
-  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
 
   <!-- Gazebo vendor packages: headers at build, shared libs at runtime -->
   <depend>gz_sim_vendor</depend>

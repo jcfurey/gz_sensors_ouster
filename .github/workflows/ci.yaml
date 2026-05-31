@@ -34,28 +34,59 @@ jobs:
         run: test -f .clang-format
 
   build:
-    name: Build (CPU fallback)
+    # One build per supported ROS distro. The package is version-agnostic
+    # (see CMakeLists: find_package(gz-sim) via the gz_*_vendor shims), so each
+    # distro exercises a different Gazebo: Jazzy→Harmonic (gz 8),
+    # Kilted→Ionic (gz 9), Lyrical→Jetty (gz 10). All build the CPU fallback
+    # (no GPU in CI). fail-fast is off so one distro's failure doesn't cancel
+    # the others; Lyrical is advisory (continue-on-error) because it and its
+    # upstream deps are brand new — flip it to required once the ecosystem on
+    # that distro has settled.
+    name: Build + test (${{ matrix.ros_distro }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ros_distro: [jazzy, kilted, lyrical]
+    continue-on-error: ${{ matrix.ros_distro == 'lyrical' }}
     container:
-      image: osrf/ros:jazzy-desktop
+      image: osrf/ros:${{ matrix.ros_distro }}-desktop
     env:
       # ouster-ros source is pinned to jcfurey/ouster-ros (workspace fork)
       # because it carries an in-tree ouster-sdk submodule at v0.16.2+. The
       # apt package ros-${ROS_DISTRO}-ouster-ros lags (currently 0.14.1) and
       # exposes an older PacketWriter::set_block signature that the plugin
-      # source no longer targets. Bump OUSTER_ROS_REF to a tag/SHA for stricter
-      # reproducibility once the workspace settles on one.
+      # source no longer targets.
+      #
+      # OUSTER_ROS_REF is pinned to an exact commit (not the floating `ros2`
+      # branch) for reproducibility: a force-push to ros2 can no longer change
+      # what CI builds, and a dropped commit fails the checkout loudly instead
+      # of silently building different source. To intentionally move forward,
+      # bump this to the new tip SHA of jcfurey/ouster-ros@ros2.
       OUSTER_ROS_REPO: https://github.com/jcfurey/ouster-ros.git
-      OUSTER_ROS_REF: ros2
+      OUSTER_ROS_REF: 6ab9402c1a8275f600945c3d8dfd5a73b40585c8
     steps:
       - uses: actions/checkout@v4
         with:
           path: src/gz_sensors_ouster
 
-      - name: Clone ouster-ros (jcfurey fork)
+      - name: Clone ouster-ros (jcfurey fork, pinned commit)
         run: |
-          git clone --depth 1 --branch "${OUSTER_ROS_REF}" --recurse-submodules \
-            "${OUSTER_ROS_REPO}" src/ouster-ros
+          # Clone the ros2 branch specifically — NOT the fork's default branch
+          # (master), which has a different repo layout (a root-level ouster-sdk
+          # submodule). Cloning master and checking out a ros2 commit leaves
+          # master's stale ouster-sdk/ tree beside ros2's nested
+          # ouster-ros/ouster-sdk/, giving the workspace two `sophus` packages
+          # and aborting colcon before anything builds.
+          #
+          # A full (non-shallow) clone of ros2 keeps the pinned commit reachable
+          # even after the branch advances; we then check it out exactly and
+          # resync submodules to that commit's gitlink (sync handles a submodule
+          # URL/path change between the branch tip and the pinned commit).
+          git clone --branch ros2 --recurse-submodules "${OUSTER_ROS_REPO}" src/ouster-ros
+          git -C src/ouster-ros checkout "${OUSTER_ROS_REF}"
+          git -C src/ouster-ros submodule sync --recursive
+          git -C src/ouster-ros submodule update --init --recursive
 
       - name: Install gz_sensors_ouster-only apt deps
         run: |
@@ -80,7 +111,12 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/${ROS_DISTRO}/setup.bash
-          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+          # -DBUILD_TESTING=ON is required: the gz_sensors_ouster test targets
+          # are guarded by if(BUILD_TESTING) and the workspace colcon_defaults
+          # set it OFF, so without this the test job below silently runs zero
+          # tests and "passes". Keep it here so the Test step has something to
+          # execute.
+          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Test
         shell: bash
@@ -89,6 +125,19 @@ jobs:
           source install/setup.bash
           colcon test --packages-select gz_sensors_ouster --event-handlers console_direct+
           colcon test-result --verbose --all
+
+          # Guard against the silent-zero-tests regression: assert the summary
+          # reports at least one test. `colcon test-result` prints a final
+          # "Summary: N test(s), ..." line; if N is 0 (or absent), the test
+          # wiring is broken and we must fail rather than report a green no-op.
+          summary="$(colcon test-result --all | grep -E '^Summary:' || true)"
+          echo "test-result ${summary:-<no summary>}"
+          n="$(printf '%s' "$summary" | grep -oE '[0-9]+ test' | grep -oE '[0-9]+' | head -1)"
+          if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+            echo "::error::No tests were executed — BUILD_TESTING wiring is broken."
+            exit 1
+          fi
+          echo "Executed $n test(s)."
 
   # ── Quality gates ────────────────────────────────────────────────────────────
   # Mirrors what gazebo-tooling/action-gz-ci runs on upstream gazebosim/gz-sensors:
@@ -162,6 +211,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: gazebo-tooling/action-gz-ci/validate_package_xml@jammy
 
+  # Compile-only smoke test for the CUDA (NVIDIA) backend. No NVIDIA GPU in
+  # CI, so we only verify the kernel source compiles under nvcc. Runtime
+  # coverage must be done on real CUDA hardware. Mirrors hip-smoke/sycl-smoke
+  # so a build-breaking change to the .cu (or to the shared ray_processor_math
+  # header it includes) is caught on every PR — previously CUDA was the only
+  # backend with no CI compile check at all.
+  cuda-smoke:
+    name: CUDA smoke build (no device)
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile CUDA backend in isolation
+        shell: bash
+        run: |
+          # The devel image ships nvcc + curand headers but not cmake; we only
+          # need to compile the one TU. Link errors on unresolved Backend
+          # symbols are expected and ignored (compile-only via -c).
+          # Match the package's C++ standard (CMAKE_CXX/CUDA_STANDARD 20) so the
+          # smoke check can't reject valid C++20 the real build accepts.
+          nvcc -std=c++20 -c -Xcompiler -fPIC \
+            -I"$GITHUB_WORKSPACE/include" -I"$GITHUB_WORKSPACE/cuda" \
+            "$GITHUB_WORKSPACE/cuda/ray_processor_cuda.cu" \
+            -o ray_processor_cuda.o
+          echo "CUDA backend compiled OK."
+
   # Compile-only smoke test for the HIP (AMD) backend. No AMD GPU in CI, so
   # we only verify the source compiles under hipcc. Runtime coverage must
   # be done on real ROCm hardware.
@@ -182,7 +258,7 @@ jobs:
           # the full ROS stack in this container, so we only check that the
           # HIP kernel source compiles. Link errors on unresolved Backend
           # symbols are expected and ignored.
-          /opt/rocm/bin/hipcc -std=c++17 -fPIC -D__HIP_PLATFORM_AMD__=1 \
+          /opt/rocm/bin/hipcc -std=c++20 -fPIC -D__HIP_PLATFORM_AMD__=1 \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_hip.cpp \
             -o ray_processor_hip.o
@@ -206,7 +282,7 @@ jobs:
           # — the "excessive PATH" warning only matters in long-lived shells,
           # not a fresh CI runner.
           . /opt/intel/oneapi/setvars.sh --force
-          icpx -fsycl -std=c++17 -fPIC \
+          icpx -fsycl -std=c++20 -fPIC \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_sycl.cpp \
             -o ray_processor_sycl.o

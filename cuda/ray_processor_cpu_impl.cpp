@@ -3,6 +3,7 @@
 
 #include "ray_processor_cpu_impl.hpp"
 #include "backend.hpp"
+#include "ray_processor_math.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -41,7 +42,7 @@ void processCpu(
 
     for (int idx = 0; idx < n; ++idx) {
         float d = depth_host[idx];
-        const bool valid = std::isfinite(d) && d > 0.001f;
+        const bool valid = std::isfinite(d) && d > rpmath::kValidDepthMin;
 
         if (!valid) {
             range_out[idx] = 0u;
@@ -51,25 +52,12 @@ void processCpu(
             continue;
         }
 
-        // Depth-discontinuity suppression
+        // Depth-discontinuity suppression. (has_noise is redundant with
+        // edge_discon_threshold > 0 — noiseEnabled() already covers it — but
+        // kept for parity of structure with the other gates.)
         if (has_noise && p.edge_discon_threshold > 0.f) {
-            const int beam = idx / W;
-            const int col  = idx % W;
-            bool suppress = false;
-
-            auto checkNeighbor = [&](int nb, int nc) {
-                if (nb < 0 || nb >= H || nc < 0 || nc >= W) return;
-                float nd = depth_host[nb * W + nc];
-                if (!std::isfinite(nd) || nd < 0.001f ||
-                    std::abs(nd - d) > p.edge_discon_threshold)
-                    suppress = true;
-            };
-            checkNeighbor(beam - 1, col);
-            checkNeighbor(beam + 1, col);
-            checkNeighbor(beam, col - 1);
-            checkNeighbor(beam, col + 1);
-
-            if (suppress && uni(rng) < 0.5f) {
+            if (rpmath::edgeDiscontinuity(depth_host, idx, H, W, p.edge_discon_threshold)
+                && uni(rng) < rpmath::kEdgeSuppressProb) {
                 range_out[idx] = 0u;
                 signal_out[idx] = 0u;
                 reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
@@ -80,15 +68,9 @@ void processCpu(
 
         // Random dropouts — probability scales with range and inverse reflectivity
         if (has_noise && (p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f)) {
-            float t = std::min(d / std::max(p.max_range, 0.1f), 1.0f);
-            float p_drop = p.dropout_rate_close + t * (p.dropout_rate_far - p.dropout_rate_close);
-
-            float retro_val = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.f)
-                ? retro_host[idx] : 0.5f;
-            float refl_factor = std::min(1.0f / std::max(retro_val, 0.33f), 3.0f);
-            // Clamp to [0,1] — see cuda.cu comment.
-            p_drop = std::min(p_drop * refl_factor, 1.0f);
-
+            const float retro_val = rpmath::retroForNoise(retro_host, idx);
+            const float p_drop = rpmath::dropoutProbability(
+                d, retro_val, p.dropout_rate_close, p.dropout_rate_far, p.max_range);
             if (uni(rng) < p_drop) {
                 range_out[idx] = 0u;
                 signal_out[idx] = 0u;
@@ -100,17 +82,13 @@ void processCpu(
 
         // Range noise (scales with range and reflectivity)
         if (has_noise && (p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f)) {
-            float t = std::min(d / std::max(p.max_range, 0.1f), 1.0f);
-            float sigma = p.range_noise_min_std + t * (p.range_noise_max_std - p.range_noise_min_std);
-
-            float retro_val = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.f)
-                ? retro_host[idx] : 0.5f;
-            sigma *= std::min(1.0f / std::max(retro_val, 0.5f), 2.0f);
-
+            const float retro_val = rpmath::retroForNoise(retro_host, idx);
+            const float sigma = rpmath::rangeNoiseSigma(
+                d, retro_val, p.range_noise_min_std, p.range_noise_max_std, p.max_range);
             d = std::max(d + norm(rng) * sigma, 0.0f);
         }
 
-        range_out[idx] = static_cast<uint32_t>(d * 1000.0f);
+        range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
         // Signal with Poisson shot noise
         float intensity = 1.0f;
@@ -118,14 +96,12 @@ void processCpu(
             intensity = retro_host[idx];
         }
 
-        const float r_sq = std::max(d * d, 0.0001f);
-        float sig = p.base_signal * intensity / r_sq;
-
+        float sig = rpmath::signalFromRange(d, intensity, p.base_signal);
         if (has_noise && p.signal_noise_scale > 0.f) {
             float sigma_sig = std::sqrt(std::max(sig, 0.0f)) * p.signal_noise_scale;
             sig = std::max(sig + norm(rng) * sigma_sig, 0.0f);
         }
-        signal_out[idx] = static_cast<uint16_t>(std::clamp(sig, 0.0f, 65535.0f));
+        signal_out[idx] = rpmath::clampU16(sig);
 
         // Reflectivity (Ouster calibrated scale, mirrors firmware output):
         //   0-100   Lambertian diffuse, linear in surface reflectance %
@@ -140,30 +116,23 @@ void processCpu(
         // Slope choice: 22 ≈ (255 - 100) / 7, so rv ∈ (1, 128] maps into
         // [101, 254]; rv > 128 saturates at 255. That gives ~7 doublings of
         // dynamic range above the Lambertian band before clipping, which
-        // matches how a real OS-1 grades retro-tape strength in practice.
-        // Same scaling is duplicated in the CUDA/HIP/SYCL backends; this is
-        // the canonical reference.
+        // matches how a real OS-1 grades retro-tape strength in practice. The
+        // mapping itself lives in rpmath::reflectivityToByte (shared by all
+        // backends); this comment is the canonical derivation.
         if (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f) {
-            float rv = retro_host[idx];
-            uint8_t refl;
-            if (rv <= 1.0f) {
-                refl = static_cast<uint8_t>(std::min(rv * 100.0f, 100.0f));
-            } else {
-                refl = static_cast<uint8_t>(std::min(100.0f + std::log2(rv) * 22.0f, 255.0f));
-            }
-            reflectivity_out[idx] = refl;
+            reflectivity_out[idx] = rpmath::reflectivityToByte(retro_host[idx]);
         } else {
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
         }
 
         // Near-IR with Poisson shot noise
         float nir = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f)
-            ? retro_host[idx] * 256.0f : 0.0f;
+            ? retro_host[idx] * rpmath::kNearIrScale : 0.0f;
         if (has_noise && p.nearir_noise_scale > 0.f && nir > 0.f) {
             float sigma_nir = std::sqrt(std::max(nir, 0.0f)) * p.nearir_noise_scale;
             nir = std::max(nir + norm(rng) * sigma_nir, 0.0f);
         }
-        nearir_out[idx] = static_cast<uint16_t>(std::clamp(nir, 0.0f, 65535.0f));
+        nearir_out[idx] = rpmath::clampU16(nir);
     }
 }
 
@@ -217,26 +186,10 @@ void processRawCpu(
         const bool v10 = !std::isinf(d10), v11 = !std::isinf(d11);
         const int n_valid = v00 + v01 + v10 + v11;
 
-        float depth;
-        if (n_valid == 0) {
-            depth = std::numeric_limits<float>::infinity();
-        } else if (n_valid == 4) {
-            const float d_top = d00 * (1.f - h_alpha) + d01 * h_alpha;
-            const float d_bot = d10 * (1.f - h_alpha) + d11 * h_alpha;
-            depth = d_top * (1.f - v_alpha) + d_bot * v_alpha;
-        } else {
-            float sum = 0.f;
-            if (v00) sum += d00;
-            if (v01) sum += d01;
-            if (v10) sum += d10;
-            if (v11) sum += d11;
-            depth = sum / static_cast<float>(n_valid);
-        }
-
-        if (std::isfinite(depth) && rp.beam_origin_m > 0.f) {
-            const float elev_rad = beam_angle * 3.14159265358979f / 180.f;
-            depth = std::max(0.f, depth - rp.beam_origin_m * std::cos(elev_rad));
-        }
+        float depth = rpmath::bilinearOrAverage(
+            d00, d01, d10, d11, h_alpha, v_alpha, v00, v01, v10, v11,
+            n_valid, std::numeric_limits<float>::infinity());
+        depth = rpmath::applyBeamOrigin(depth, beam_angle, rp.beam_origin_m);
 
         const int m_id = (rp.half_W - col + W) % W;
         const int ouster_idx = beam * W + m_id;
@@ -245,21 +198,9 @@ void processRawCpu(
         if (gpu_chan >= 2) {
             const float r00 = raw_host[idx_00+1], r01 = raw_host[idx_01+1];
             const float r10 = raw_host[idx_10+1], r11 = raw_host[idx_11+1];
-            float retro;
-            if (n_valid == 4) {
-                const float r_top = r00*(1.f-h_alpha) + r01*h_alpha;
-                const float r_bot = r10*(1.f-h_alpha) + r11*h_alpha;
-                retro = r_top*(1.f-v_alpha) + r_bot*v_alpha;
-            } else if (n_valid > 0) {
-                float sum = 0.f;
-                if (v00) sum += r00;
-                if (v01) sum += r01;
-                if (v10) sum += r10;
-                if (v11) sum += r11;
-                retro = sum / static_cast<float>(n_valid);
-            } else {
-                retro = 0.f;
-            }
+            const float retro = rpmath::bilinearOrAverage(
+                r00, r01, r10, r11, h_alpha, v_alpha, v00, v01, v10, v11,
+                n_valid, 0.0f);
             retro_buf[static_cast<size_t>(ouster_idx)] = retro;
         }
     }

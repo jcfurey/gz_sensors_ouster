@@ -171,6 +171,9 @@ private:
     bool imu_entity_found_ = false;
 
     // ── Rendering-thread event connection ────────────────────────────────────
+    // Non-owning. The EventManager is owned by the gz-sim server and outlives
+    // this plugin; we only borrow it (in Configure) to register the render
+    // callback. Do not delete.
     ::gz::sim::EventManager *event_mgr_{nullptr};
     gz::common::ConnectionPtr render_conn_;
     std::chrono::steady_clock::time_point last_render_time_{};
@@ -241,8 +244,11 @@ private:
     std::string image_frame_id_;
     std::string imu_frame_id_;
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
-    bool metadata_published_ = false;   // true once a subscriber has acked
-    int metadata_pub_count_ = 0;       // render ticks since sensor init
+    // Touched only on the render thread today (OnRender is serialized by the
+    // Gazebo rendering system), but kept atomic so the metadata-republish
+    // state stays well-defined if a future render path ever runs concurrently.
+    std::atomic<bool> metadata_published_{false};  // true once a subscriber has acked
+    std::atomic<int> metadata_pub_count_{0};       // render ticks since sensor init
     bool memory_logged_ = false;       // true after first GPU-buffer report
 
     // ── Drain thread ─────────────────────────────────────────────────────────
