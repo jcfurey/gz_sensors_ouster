@@ -734,7 +734,7 @@ void GzGpuOusterLidarSystem::OnRender()
             if (meta_subs > 0 && metadata_pub_count_ > ticks_per_sec * 2) {
                 metadata_published_ = true;
                 RCLCPP_INFO(kLogger, "metadata delivered to os_cloud (after %d publishes)",
-                    metadata_pub_count_);
+                    metadata_pub_count_.load());
             }
         }
 
@@ -992,6 +992,23 @@ void GzGpuOusterLidarSystem::onNewFrame(
 
     if (!data || width == 0 || height == 0 || channels == 0) return;
     if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0) return;
+
+    // Defensive: the resampler assumes the GpuRays frame matches the geometry
+    // configured in OnRender — exactly W_ columns (the azimuth remap and
+    // per-column offset are in W_ units) and at least H_ vertical samples to
+    // interpolate beam altitudes from. If GpuRays/OGRE2 ever hands back a
+    // differently-sized frame (cubemap resize, reconfigure), the mapping would
+    // silently mis-sample, so drop the frame and surface it rather than
+    // emitting garbage ranges.
+    if (width != static_cast<unsigned int>(W_) ||
+        height < static_cast<unsigned int>(H_)) {
+        if (ros_node_) {
+            RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
+                "%s: unexpected GpuRays frame %ux%u (expected width=%d, height>=%d); "
+                "dropping frame", sensor_name_.c_str(), width, height, W_, H_);
+        }
+        return;
+    }
 
     const size_t n = static_cast<size_t>(width) * height * channels;
 

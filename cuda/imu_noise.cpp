@@ -19,6 +19,14 @@ ImuNoiseSample applyImuNoise(
     double dt,
     std::mt19937_64 & rng)
 {
+    // A non-positive dt is degenerate: white σ = density / √dt → ∞ (and √dt is
+    // NaN for dt < 0). Treat it as "no time elapsed" — emit nominal + current
+    // bias with no fresh white noise or bias drift — rather than poisoning the
+    // output with inf/NaN. dt should always be 1/imu_hz > 0 in practice.
+    if (dt <= 0.0) {
+        return {nom_av + gyro_bias, nom_la + accel_bias, 0.0, 0.0};
+    }
+
     const double sqrt_dt = std::sqrt(dt);
     const double gyro_white  = gyro_noise_std  / sqrt_dt;
     const double accel_white = accel_noise_std / sqrt_dt;

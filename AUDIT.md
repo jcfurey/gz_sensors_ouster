@@ -83,8 +83,10 @@ reconfigures, downstream resampling can over-read.
 - **L4** — `metadata_published_` / `metadata_pub_count_` are non-atomic; safe only because
   OnRender is single-threaded by Gazebo contract.
 - **L5** — `event_mgr_` is a raw pointer assigned from a Gazebo-owned reference; correct but undocumented.
-- **L6** — The drain thread holds `publish_mtx_` across the `sleep_until` packet spacing
-  (`drainThreadFunc`); a minor lock-hold inefficiency, not a correctness bug.
+- ~~**L6** — The drain thread holds `publish_mtx_` across the `sleep_until` packet
+  spacing.~~ **False positive on re-check:** `drainThreadFunc` already scopes
+  `publish_mtx_` to just the `publish()` call, with `sleep_until` outside the lock. No
+  change needed.
 
 ## Positive notes (no action needed)
 
