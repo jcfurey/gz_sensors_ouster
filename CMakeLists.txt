@@ -185,19 +185,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_noise_model test/test_noise_model.cpp)
   target_link_libraries(test_noise_model gz_gpu_ouster_lidar_cuda)
 
-  # Test: parameter validation
-  ament_add_gtest(test_parameter_validation test/test_parameter_validation.cpp)
-  target_include_directories(test_parameter_validation PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
-  target_link_libraries(test_parameter_validation
-    gz_gpu_ouster_lidar_cuda
-  )
-  ament_target_dependencies(test_parameter_validation
-    rclcpp
-    ouster_sensor_msgs
-    ouster_ros
-  )
+  # Test: parameter validation. ament_auto_add_gtest links the package's ROS
+  # deps (rclcpp, ouster_sensor_msgs, ouster_ros) and adds include/ automatically,
+  # replacing ament_target_dependencies — which ROS 2 Lyrical (the L-turtle)
+  # removed. Works identically on Jazzy/Kilted/Lyrical.
+  ament_auto_add_gtest(test_parameter_validation test/test_parameter_validation.cpp)
+  target_link_libraries(test_parameter_validation gz_gpu_ouster_lidar_cuda)
 
   # Test: metadata parsing
   set(_test_metadata_dir "${CMAKE_CURRENT_SOURCE_DIR}/config/metadata")
@@ -208,10 +201,9 @@ if(BUILD_TESTING)
       "JSONs shipped in config/metadata/. Either restore them or disable "
       "testing with -DBUILD_TESTING=OFF.")
   endif()
-  ament_add_gtest(test_metadata_parsing test/test_metadata_parsing.cpp)
-  ament_target_dependencies(test_metadata_parsing
-    ouster_ros
-  )
+  # ament_auto_add_gtest auto-links ouster_ros (no ament_target_dependencies,
+  # which Lyrical removed).
+  ament_auto_add_gtest(test_metadata_parsing test/test_metadata_parsing.cpp)
   target_compile_definitions(test_metadata_parsing PRIVATE
     TEST_METADATA_DIR="${_test_metadata_dir}"
   )
