@@ -234,6 +234,49 @@ TEST(ImuNoise, NoBiasWalkSkipsRngDraws)
     EXPECT_EQ(rng_a, rng_b);
 }
 
+TEST(ImuNoise, NonPositiveDtIsGuarded)
+{
+    // dt <= 0 is degenerate (white σ = density/√dt → ∞, and √dt is NaN for
+    // dt < 0). The guard must emit nominal + current bias, leave the bias
+    // state untouched, report zero white stds, and consume no RNG — for both
+    // dt == 0 and dt < 0, even with all noise terms enabled.
+    for (double dt : {0.0, -0.01}) {
+        Vec3 gb{0.01, -0.02, 0.03};
+        Vec3 ab{0.04, -0.05, 0.06};
+        const Vec3 gb0 = gb, ab0 = ab;
+        const Vec3 nom_av{0.1, -0.2, 0.05};
+        const Vec3 nom_la{0.0, 0.0, 9.81};
+
+        std::mt19937_64 rng_a{777};
+        const std::mt19937_64 rng_untouched{777};
+
+        const auto out = applyImuNoise(
+            nom_av, nom_la, gb, ab,
+            1e-2, 1e-2, 1e-3, 1e-3, dt, rng_a);
+
+        // Output is nominal + the (unchanged) current bias.
+        EXPECT_DOUBLE_EQ(out.av.x, nom_av.x + gb0.x);
+        EXPECT_DOUBLE_EQ(out.av.y, nom_av.y + gb0.y);
+        EXPECT_DOUBLE_EQ(out.av.z, nom_av.z + gb0.z);
+        EXPECT_DOUBLE_EQ(out.la.x, nom_la.x + ab0.x);
+        EXPECT_DOUBLE_EQ(out.la.y, nom_la.y + ab0.y);
+        EXPECT_DOUBLE_EQ(out.la.z, nom_la.z + ab0.z);
+
+        // Bias state untouched.
+        EXPECT_DOUBLE_EQ(gb.x, gb0.x);
+        EXPECT_DOUBLE_EQ(gb.y, gb0.y);
+        EXPECT_DOUBLE_EQ(gb.z, gb0.z);
+        EXPECT_DOUBLE_EQ(ab.x, ab0.x);
+        EXPECT_DOUBLE_EQ(ab.y, ab0.y);
+        EXPECT_DOUBLE_EQ(ab.z, ab0.z);
+
+        // Zero reported white-noise stds, and no RNG consumed.
+        EXPECT_DOUBLE_EQ(out.gyro_white_std, 0.0);
+        EXPECT_DOUBLE_EQ(out.accel_white_std, 0.0);
+        EXPECT_EQ(rng_a, rng_untouched);
+    }
+}
+
 TEST(ImuNoise, NominalValuePreservedAsMean)
 {
     // With non-zero nominal input and noise enabled, the long-run mean of

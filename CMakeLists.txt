@@ -157,8 +157,12 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
 
 # The non-ament targets — the version-agnostic gz libraries (linked via the
 # unversioned vendor-shim aliases), Eigen, the GPU backend static lib, and the
-# optional OpenMP runtime — are linked explicitly.
-target_link_libraries(${PROJECT_NAME}
+# optional OpenMP runtime — are linked PRIVATE. The plugin is a runtime-loaded
+# (dlopen'd) Gazebo system plugin that nothing links against, so none of these
+# belong in its public interface. PRIVATE also keeps them out of the
+# ament_auto_package install(EXPORT) interface, which otherwise rejects the
+# bundled-in gz_gpu_ouster_lidar_cuda static lib ("not in any export set").
+target_link_libraries(${PROJECT_NAME} PRIVATE
   gz-sim::gz-sim
   gz-rendering::gz-rendering
   gz-sensors::gz-sensors

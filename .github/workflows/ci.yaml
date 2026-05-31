@@ -221,7 +221,9 @@ jobs:
           # The devel image ships nvcc + curand headers but not cmake; we only
           # need to compile the one TU. Link errors on unresolved Backend
           # symbols are expected and ignored (compile-only via -c).
-          nvcc -std=c++17 -c -Xcompiler -fPIC \
+          # Match the package's C++ standard (CMAKE_CXX/CUDA_STANDARD 20) so the
+          # smoke check can't reject valid C++20 the real build accepts.
+          nvcc -std=c++20 -c -Xcompiler -fPIC \
             -I"$GITHUB_WORKSPACE/include" -I"$GITHUB_WORKSPACE/cuda" \
             "$GITHUB_WORKSPACE/cuda/ray_processor_cuda.cu" \
             -o ray_processor_cuda.o
@@ -247,7 +249,7 @@ jobs:
           # the full ROS stack in this container, so we only check that the
           # HIP kernel source compiles. Link errors on unresolved Backend
           # symbols are expected and ignored.
-          /opt/rocm/bin/hipcc -std=c++17 -fPIC -D__HIP_PLATFORM_AMD__=1 \
+          /opt/rocm/bin/hipcc -std=c++20 -fPIC -D__HIP_PLATFORM_AMD__=1 \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_hip.cpp \
             -o ray_processor_hip.o
@@ -271,7 +273,7 @@ jobs:
           # — the "excessive PATH" warning only matters in long-lived shells,
           # not a fresh CI runner.
           . /opt/intel/oneapi/setvars.sh --force
-          icpx -fsycl -std=c++17 -fPIC \
+          icpx -fsycl -std=c++20 -fPIC \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_sycl.cpp \
             -o ray_processor_sycl.o
