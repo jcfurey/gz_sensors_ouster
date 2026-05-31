@@ -14,6 +14,7 @@
 // copies.
 
 #include "backend.hpp"
+#include "ray_processor_math.hpp"
 
 #include <hip/hip_runtime.h>
 #include <hiprand/hiprand_kernel.h>
@@ -100,26 +101,10 @@ __global__ void resampleKernelHip(
     const bool v10 = !isinf(d10), v11 = !isinf(d11);
     const int n_valid = v00 + v01 + v10 + v11;
 
-    float depth;
-    if (n_valid == 0) {
-        depth = __int_as_float(0x7f800000);  // +inf
-    } else if (n_valid == 4) {
-        const float d_top = d00 * (1.f - h_alpha) + d01 * h_alpha;
-        const float d_bot = d10 * (1.f - h_alpha) + d11 * h_alpha;
-        depth = d_top * (1.f - v_alpha) + d_bot * v_alpha;
-    } else {
-        float sum = 0.f;
-        if (v00) sum += d00;
-        if (v01) sum += d01;
-        if (v10) sum += d10;
-        if (v11) sum += d11;
-        depth = sum / static_cast<float>(n_valid);
-    }
-
-    if (isfinite(depth) && beam_origin_m > 0.f) {
-        const float elev_rad = beam_angle * 3.14159265358979f / 180.f;
-        depth = fmaxf(0.f, depth - beam_origin_m * cosf(elev_rad));
-    }
+    float depth = rpmath::bilinearOrAverage(
+        d00, d01, d10, d11, h_alpha, v_alpha, v00, v01, v10, v11,
+        n_valid, __int_as_float(0x7f800000));  // empty → +inf
+    depth = rpmath::applyBeamOrigin(depth, beam_angle, beam_origin_m);
 
     const int m_id = (half_W - col + W) % W;
     const int ouster_idx = beam * W + m_id;
@@ -128,22 +113,9 @@ __global__ void resampleKernelHip(
     if (gpu_chan >= 2) {
         const float r00 = raw[idx_00 + 1], r01 = raw[idx_01 + 1];
         const float r10 = raw[idx_10 + 1], r11 = raw[idx_11 + 1];
-        float retro;
-        if (n_valid == 4) {
-            const float r_top = r00 * (1.f - h_alpha) + r01 * h_alpha;
-            const float r_bot = r10 * (1.f - h_alpha) + r11 * h_alpha;
-            retro = r_top * (1.f - v_alpha) + r_bot * v_alpha;
-        } else if (n_valid > 0) {
-            float sum = 0.f;
-            if (v00) sum += r00;
-            if (v01) sum += r01;
-            if (v10) sum += r10;
-            if (v11) sum += r11;
-            retro = sum / static_cast<float>(n_valid);
-        } else {
-            retro = 0.f;
-        }
-        retro_out[ouster_idx] = retro;
+        retro_out[ouster_idx] = rpmath::bilinearOrAverage(
+            r00, r01, r10, r11, h_alpha, v_alpha, v00, v01, v10, v11,
+            n_valid, 0.f);
     } else {
         retro_out[ouster_idx] = 0.f;
     }
@@ -174,7 +146,7 @@ __global__ void rayProcessKernelHip(
     if (idx >= n) return;
 
     float d = depth[idx];
-    const bool valid = isfinite(d) && d > 0.001f;
+    const bool valid = isfinite(d) && d > rpmath::kValidDepthMin;
 
     if (!valid) {
         range_out[idx]  = 0u;
@@ -186,38 +158,20 @@ __global__ void rayProcessKernelHip(
 
     hiprandState * rs = (rand_states != nullptr) ? &rand_states[idx] : nullptr;
 
-    if (edge_discon_threshold > 0.f) {
-        const int beam = idx / W;
-        const int col  = idx % W;
-        bool suppress = false;
-        auto checkNeighbor = [&](int nb, int nc) {
-            if (nb < 0 || nb >= H || nc < 0 || nc >= W) return;
-            float nd = depth[nb * W + nc];
-            if (!isfinite(nd) || nd < 0.001f || fabsf(nd - d) > edge_discon_threshold)
-                suppress = true;
-        };
-        checkNeighbor(beam - 1, col);
-        checkNeighbor(beam + 1, col);
-        checkNeighbor(beam, col - 1);
-        checkNeighbor(beam, col + 1);
-
-        if (suppress && rs != nullptr && hiprand_uniform(rs) < 0.5f) {
-            range_out[idx]  = 0u;
-            signal_out[idx] = 0u;
-            refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
-            nearir_out[idx] = 0u;
-            return;
-        }
+    if (edge_discon_threshold > 0.f && rs != nullptr &&
+        rpmath::edgeDiscontinuity(depth, idx, H, W, edge_discon_threshold) &&
+        hiprand_uniform(rs) < rpmath::kEdgeSuppressProb) {
+        range_out[idx]  = 0u;
+        signal_out[idx] = 0u;
+        refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+        nearir_out[idx] = 0u;
+        return;
     }
 
     if (rs != nullptr && (dropout_rate_close > 0.f || dropout_rate_far > 0.f)) {
-        float t = fminf(d / fmaxf(max_range, 0.1f), 1.f);
-        float p_dropout = dropout_rate_close + t * (dropout_rate_far - dropout_rate_close);
-        float retro_val = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
-            ? retro[idx] : 0.5f;
-        float refl_factor = fminf(1.0f / fmaxf(retro_val, 0.33f), 3.0f);
-        // Clamp to [0,1] so the curve is honest at dark+far. See cuda.cu.
-        p_dropout = fminf(p_dropout * refl_factor, 1.0f);
+        const float retro_val = rpmath::retroForNoise(retro, idx);
+        const float p_dropout = rpmath::dropoutProbability(
+            d, retro_val, dropout_rate_close, dropout_rate_far, max_range);
         if (hiprand_uniform(rs) < p_dropout) {
             range_out[idx]  = 0u;
             signal_out[idx] = 0u;
@@ -228,52 +182,41 @@ __global__ void rayProcessKernelHip(
     }
 
     if (rs != nullptr && (range_noise_min_std > 0.f || range_noise_max_std > 0.f)) {
-        float t = fminf(d / fmaxf(max_range, 0.1f), 1.f);
-        float sigma = range_noise_min_std + t * (range_noise_max_std - range_noise_min_std);
-        float retro_val = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
-            ? retro[idx] : 0.5f;
-        sigma *= fminf(1.0f / fmaxf(retro_val, 0.5f), 2.0f);
+        const float retro_val = rpmath::retroForNoise(retro, idx);
+        const float sigma = rpmath::rangeNoiseSigma(
+            d, retro_val, range_noise_min_std, range_noise_max_std, max_range);
         d = fmaxf(d + hiprand_normal(rs) * sigma, 0.f);
     }
 
-    range_out[idx] = static_cast<uint32_t>(d * 1000.f);
+    range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
     float intensity = 1.0f;
     if (retro != nullptr) {
         float r = retro[idx];
         if (isfinite(r) && r > 0.f) intensity = r;
     }
-    const float r_sq = d * d;
-    float sig = base_signal * intensity / fmaxf(r_sq, 0.0001f);
+    float sig = rpmath::signalFromRange(d, intensity, base_signal);
     if (rs != nullptr && signal_noise_scale > 0.f) {
         float sigma_sig = sqrtf(fmaxf(sig, 0.f)) * signal_noise_scale;
         sig = fmaxf(sig + hiprand_normal(rs) * sigma_sig, 0.f);
     }
-    signal_out[idx] = static_cast<uint16_t>(fminf(fmaxf(sig, 0.f), 65535.f));
+    signal_out[idx] = rpmath::clampU16(sig);
 
-    // Ouster reflectivity scale: 0-100 Lambertian linear, 101-255 retro log.
-    // Slope 22 = (255-100)/7 → 7 doublings of headroom above rv=1.
-    // Canonical derivation + upstream Ouster refs in ray_processor_cpu_impl.cpp.
+    // Ouster reflectivity scale (shared rpmath::reflectivityToByte); canonical
+    // derivation + upstream refs live in ray_processor_cpu_impl.cpp.
     if (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f) {
-        float rv = retro[idx];
-        uint8_t refl;
-        if (rv <= 1.0f) {
-            refl = static_cast<uint8_t>(fminf(rv * 100.f, 100.f));
-        } else {
-            refl = static_cast<uint8_t>(fminf(100.f + log2f(rv) * 22.f, 255.f));
-        }
-        refl_out[idx] = refl;
+        refl_out[idx] = rpmath::reflectivityToByte(retro[idx]);
     } else {
         refl_out[idx] = static_cast<uint8_t>(base_reflectivity);
     }
 
     float nir = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
-        ? retro[idx] * 256.f : 0.f;
+        ? retro[idx] * rpmath::kNearIrScale : 0.f;
     if (rs != nullptr && nearir_noise_scale > 0.f && nir > 0.f) {
         float sigma_nir = sqrtf(fmaxf(nir, 0.f)) * nearir_noise_scale;
         nir = fmaxf(nir + hiprand_normal(rs) * sigma_nir, 0.f);
     }
-    nearir_out[idx] = static_cast<uint16_t>(fminf(fmaxf(nir, 0.f), 65535.f));
+    nearir_out[idx] = rpmath::clampU16(nir);
 }
 
 // ── HipBackend ──────────────────────────────────────────────────────────────
