@@ -155,20 +155,25 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/gz_gpu_ouster_lidar_system.cpp
 )
 
-# The non-ament targets — the version-agnostic gz libraries (linked via the
-# unversioned vendor-shim aliases), Eigen, the GPU backend static lib, and the
-# optional OpenMP runtime — are linked PRIVATE. The plugin is a runtime-loaded
-# (dlopen'd) Gazebo system plugin that nothing links against, so none of these
-# belong in its public interface. PRIVATE also keeps them out of the
-# ament_auto_package install(EXPORT) interface, which otherwise rejects the
-# bundled-in gz_gpu_ouster_lidar_cuda static lib ("not in any export set").
-target_link_libraries(${PROJECT_NAME} PRIVATE
+# Link the non-ament targets. ament_auto_add_library already linked the ROS
+# deps using target_link_libraries' *plain* signature (via
+# ament_target_dependencies), so these must use the plain signature too —
+# CMake forbids mixing plain and keyword (PUBLIC/PRIVATE) forms on one target.
+#
+# The gz/Eigen/OpenMP imported targets are safe in the plain (interface) list.
+# The in-tree static lib gz_gpu_ouster_lidar_cuda is wrapped in
+# $<BUILD_INTERFACE:...> so it is linked into the plugin .so at build time but
+# kept out of the install/export interface — otherwise ament_auto_package's
+# install(EXPORT) fails ("requires target gz_gpu_ouster_lidar_cuda that is not
+# in any export set"). The plugin is dlopen'd and never linked against, so it
+# needs no link interface anyway.
+target_link_libraries(${PROJECT_NAME}
   gz-sim::gz-sim
   gz-rendering::gz-rendering
   gz-sensors::gz-sensors
   gz-plugin::register
   Eigen3::Eigen
-  gz_gpu_ouster_lidar_cuda
+  $<BUILD_INTERFACE:gz_gpu_ouster_lidar_cuda>
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
 
