@@ -30,7 +30,7 @@ def generate_launch_description():
     world = os.path.join(pkg_share, 'examples', 'worlds', 'ouster_demo.sdf')
     urdf = os.path.join(pkg_share, 'examples', 'urdf', 'sensor_stack.urdf.xacro')
     bridge_cfg = os.path.join(pkg_share, 'examples', 'config', 'ouster_bridge.yaml')
-    rviz_cfg = os.path.join(pkg_share, 'examples', 'rviz', 'ouster.rviz')
+    rviz_cfg = os.path.join(pkg_share, 'examples', 'rviz', 'sensor_stack.rviz')
 
     # ABSOLUTE metadata paths (see ouster_standalone.launch.py for rationale).
     metadata_dir = os.path.join(pkg_share, 'config', 'metadata')
