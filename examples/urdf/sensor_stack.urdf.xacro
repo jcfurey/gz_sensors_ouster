@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!--
+  "Sensor stack" example: a mobile platform body carrying TWO Ousters, mirroring
+  the README "Multiple Sensors" pattern:
+
+    front : OS1-64, with IMU   -> /sensor/lidar/front/...   (frames front/lidar_frame, front/imu_frame)
+    rear  : OS0-128, no IMU    -> /sensor/lidar/rear/...    (frames rear/lidar_frame)
+
+  Each ouster_sensor macro emits its own model-level <plugin> block, so two
+  independent GzGpuOusterLidarSystem instances run on this one model.
+
+  Spawn with examples/launch/sensor_stack.launch.py (passes ABSOLUTE metadata
+  paths for each sensor).
+-->
+<robot name="sensor_stack" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:arg name="metadata_front" default="metadata/os1_64_rev7.json"/>
+  <xacro:arg name="metadata_rear"  default="metadata/os0_128_rev7.json"/>
+  <xacro:arg name="anchor_type"    default="altimeter"/>
+
+  <xacro:include filename="$(find gz_sensors_ouster)/examples/urdf/ouster_macro.xacro"/>
+
+  <xacro:property name="pi" value="3.14159265359"/>
+
+  <!-- Platform body -->
+  <link name="base_footprint"/>
+
+  <link name="base_link">
+    <inertial>
+      <mass value="20.0"/>
+      <origin xyz="0 0 0.15"/>
+      <inertia ixx="0.6" ixy="0" ixz="0" iyy="1.0" iyz="0" izz="1.2"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.15"/>
+      <geometry><box size="1.0 0.6 0.3"/></geometry>
+      <material name="chassis"><color rgba="0.2 0.3 0.5 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.15"/>
+      <geometry><box size="1.0 0.6 0.3"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.1"/>
+  </joint>
+
+  <!-- Front OS1-64 (primary, with IMU), looking forward -->
+  <xacro:ouster_sensor
+    name="front"
+    parent="base_link"
+    xyz="0.45 0 0.35" rpy="0 0 0"
+    metadata_path="$(arg metadata_front)"
+    lidar_hz="10.0"
+    enable_imu="true" imu_hz="100.0"
+    anchor_type="$(arg anchor_type)"/>
+
+  <!-- Rear OS0-128 (short-range, no IMU), looking backward -->
+  <xacro:ouster_sensor
+    name="rear"
+    parent="base_link"
+    xyz="-0.45 0 0.35" rpy="0 0 ${pi}"
+    metadata_path="$(arg metadata_rear)"
+    lidar_hz="10.0"
+    enable_imu="false"
+    anchor_type="$(arg anchor_type)"/>
+
+</robot>

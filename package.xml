@@ -42,6 +42,15 @@
        so downstream consumers don't need to find it. Build-only. -->
   <build_depend>eigen</build_depend>
 
+  <!-- Runtime-only deps for the examples/ launch files (URDF demo bringup).
+       Not needed to build the plugin itself. -->
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
   <test_depend>ament_cmake_gtest</test_depend>
 
   <export>

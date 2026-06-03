@@ -1,0 +1,37 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Global Options:
+    Fixed Frame: base_footprint
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 20
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+    - Class: rviz_default_plugins/Image
+      Name: RangeImage
+      Enabled: true
+      Topic:
+        Value: /sensor/lidar/lidar0/range_image
+        Depth: 5
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
+      Name: SignalImage
+      Enabled: true
+      Topic:
+        Value: /sensor/lidar/lidar0/signal_image
+        Depth: 5
+        Reliability Policy: Reliable
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 15
+      Name: Orbit

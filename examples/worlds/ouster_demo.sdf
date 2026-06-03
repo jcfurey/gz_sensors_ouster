@@ -1,0 +1,106 @@
+<?xml version="1.0"?>
+<!--
+  Demo world for the gz_sensors_ouster examples.
+
+  Loads the systems the plugin needs:
+    * Physics            - steps the sim.
+    * Sensors (ogre2)    - builds the ogre2 scene the plugin attaches its
+                           GpuRays to (the plugin idles without a scene).
+    * SceneBroadcaster   - GUI / state.
+    * UserCommands       - lets `ros_gz_sim create` spawn the URDF at runtime.
+    * Imu                - populates AngularVelocity/LinearAcceleration on imu
+                           sensors; REQUIRED for the plugin's /imu output.
+
+  Ground + a ring of obstacles at varied ranges so the LiDAR returns are
+  non-empty.
+-->
+<sdf version="1.9">
+  <world name="ouster_demo">
+
+    <physics name="default" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu"/>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.8 0.9 1</background>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.5 0.3 -1</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Obstacles at increasing range to exercise the depth channels -->
+    <model name="box_near">
+      <static>true</static>
+      <pose>4 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1 1 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1 1 1</size></box></geometry>
+          <material><diffuse>0.8 0.2 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="cyl_mid">
+      <static>true</static>
+      <pose>0 8 1 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry>
+          <material><diffuse>0.2 0.8 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="wall_far">
+      <static>true</static>
+      <pose>-12 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.4 8 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.4 8 3</size></box></geometry>
+          <material><diffuse>0.3 0.3 0.8 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="box_side">
+      <static>true</static>
+      <pose>3 -6 0.75 0 0 0.5</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.5 1.5 1.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.5 1.5 1.5</size></box></geometry>
+          <material><diffuse>0.8 0.7 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
