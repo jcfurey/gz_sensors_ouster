@@ -15,6 +15,10 @@ log/
 *.a
 *.dylib
 
+# Python
+__pycache__/
+*.pyc
+
 # CMake
 CMakeCache.txt
 CMakeFiles/

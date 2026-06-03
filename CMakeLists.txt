@@ -229,5 +229,6 @@ endif()
 
 # Installs the plugin library + include/ headers, exports the ament package,
 # and installs the runtime config (metadata JSONs + example SDF) to
-# share/${PROJECT_NAME}/config.
-ament_auto_package(INSTALL_TO_SHARE config)
+# share/${PROJECT_NAME}/config plus the example URDFs / world / launch files to
+# share/${PROJECT_NAME}/examples.
+ament_auto_package(INSTALL_TO_SHARE config examples)

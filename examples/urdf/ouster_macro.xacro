@@ -1,0 +1,129 @@
+<?xml version="1.0"?>
+<!--
+  Reusable xacro macro for a simulated Ouster LiDAR driven by the
+  gz_sensors_ouster system plugin (gz_gpu_ouster_lidar::GzGpuOusterLidarSystem).
+
+  The plugin is a Gazebo *system* plugin attached to the model. It does NOT use
+  a gz <sensor type="gpu_lidar"> for ray casting; it creates its own GpuRays
+  directly in the ogre2 scene. It only needs two things from the model:
+
+    1. A gz <sensor> entity whose NAME equals the last path segment of
+       <sensor_name> (e.g. "lidar0"). The plugin looks that entity up purely to
+       read its world pose (the ray-cast origin). Because this anchor is only a
+       pose source, we default it to a cheap NON-rendering sensor type
+       (altimeter) so Gazebo does not schedule a second, redundant ray cast.
+       Set anchor_type:=gpu_lidar if you also want a native gz point cloud.
+
+    2. (Optional) A real <sensor type="imu"> whose name contains "imu", on the
+       same model. The plugin reads the AngularVelocity / LinearAcceleration
+       components that the gz Imu *world* system populates, so the world MUST
+       load gz-sim-imu-system when enable_imu is true.
+
+  The plugin stamps message frame_ids as "<name>/lidar_frame" and
+  "<name>/imu_frame". This macro declares URDF links with exactly those names so
+  robot_state_publisher publishes matching TF frames.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="ouster_sensor"
+    params="name parent metadata_path
+            topic_prefix:=''
+            xyz:='0 0 0' rpy:='0 0 0'
+            lidar_hz:=10.0
+            enable_imu:=false imu_hz:=100.0
+            anchor_type:=altimeter">
+
+    <!-- ROS topic prefix == <sensor_name>. Its last segment must equal `name`
+         so the plugin's gz-sensor lookup succeeds. -->
+    <xacro:property name="ns"
+      value="${'/sensor/lidar/' + name if topic_prefix == '' else topic_prefix}"/>
+
+    <!-- ── LiDAR frame (matches plugin's image/lidar frame_id "<name>/lidar_frame") ── -->
+    <link name="${name}/lidar_frame">
+      <inertial>
+        <mass value="0.33"/>
+        <origin xyz="0 0 0"/>
+        <inertia ixx="2.6e-4" ixy="0" ixz="0" iyy="2.6e-4" iyz="0" izz="2.6e-4"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0"/>
+        <geometry><cylinder radius="0.04" length="0.074"/></geometry>
+        <material name="ouster_dark"><color rgba="0.15 0.15 0.18 1"/></material>
+      </visual>
+      <collision>
+        <geometry><cylinder radius="0.04" length="0.074"/></geometry>
+      </collision>
+    </link>
+
+    <joint name="${name}_mount_joint" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${name}/lidar_frame"/>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+    </joint>
+
+    <!-- Pose-anchor sensor. NAME must equal `name` (plugin lookup). Default
+         altimeter = non-rendering; switch to gpu_lidar for a native gz cloud. -->
+    <gazebo reference="${name}/lidar_frame">
+      <sensor name="${name}" type="${anchor_type}">
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>1</always_on>
+        <update_rate>${lidar_hz}</update_rate>
+        <visualize>false</visualize>
+        <xacro:if value="${anchor_type == 'altimeter'}">
+          <altimeter/>
+        </xacro:if>
+        <xacro:if value="${anchor_type == 'gpu_lidar'}">
+          <topic>${ns}/gz_native_scan</topic>
+          <lidar>
+            <scan>
+              <horizontal><samples>512</samples><resolution>1</resolution>
+                <min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal>
+              <vertical><samples>64</samples><resolution>1</resolution>
+                <min_angle>-0.2897</min_angle><max_angle>0.2897</max_angle></vertical>
+            </scan>
+            <range><min>0.5</min><max>120.0</max><resolution>0.001</resolution></range>
+          </lidar>
+        </xacro:if>
+      </sensor>
+    </gazebo>
+
+    <!-- ── Optional IMU frame + real gz imu sensor ── -->
+    <xacro:if value="${enable_imu}">
+      <link name="${name}/imu_frame">
+        <inertial>
+          <mass value="0.01"/>
+          <origin xyz="0 0 0"/>
+          <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+        </inertial>
+      </link>
+      <joint name="${name}_imu_joint" type="fixed">
+        <parent link="${name}/lidar_frame"/>
+        <child link="${name}/imu_frame"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+      </joint>
+      <gazebo reference="${name}/imu_frame">
+        <sensor name="${name}_imu" type="imu">
+          <pose>0 0 0 0 0 0</pose>
+          <always_on>1</always_on>
+          <update_rate>${imu_hz}</update_rate>
+          <imu/>
+        </sensor>
+      </gazebo>
+    </xacro:if>
+
+    <!-- ── Model-level system plugin (one per sensor) ── -->
+    <gazebo>
+      <plugin filename="libgz_sensors_ouster.so"
+              name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
+        <metadata_path>${metadata_path}</metadata_path>
+        <sensor_name>${ns}</sensor_name>
+        <lidar_hz>${lidar_hz}</lidar_hz>
+        <xacro:if value="${enable_imu}">
+          <imu_name>auto</imu_name>
+          <imu_hz>${imu_hz}</imu_hz>
+        </xacro:if>
+      </plugin>
+    </gazebo>
+
+  </xacro:macro>
+</robot>

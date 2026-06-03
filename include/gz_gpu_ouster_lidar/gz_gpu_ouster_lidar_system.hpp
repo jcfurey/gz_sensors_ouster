@@ -290,7 +290,6 @@ private:
     void publishImu(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm);
     void drainThreadFunc();
-    bool HasActiveLidarSubscribers() const;
 };
 
 }  // namespace gz_gpu_ouster_lidar

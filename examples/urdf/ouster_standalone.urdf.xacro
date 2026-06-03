@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<!--
+  Standalone example: a single Ouster OS1-64 (with IMU) on a short pedestal.
+
+  Spawn with examples/launch/ouster_standalone.launch.py, which passes an
+  ABSOLUTE metadata path (relative paths are resolved against an on-disk SDF
+  directory, which does not exist for a model spawned from a URDF topic):
+
+    xacro ouster_standalone.urdf.xacro metadata_lidar0:=/abs/path/os1_64_rev7.json
+
+  Produces topics under /sensor/lidar/lidar0/... and TF frames
+  lidar0/lidar_frame, lidar0/imu_frame (published by robot_state_publisher).
+-->
+<robot name="ouster_standalone" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:arg name="metadata_lidar0" default="metadata/os1_64_rev7.json"/>
+  <xacro:arg name="anchor_type" default="altimeter"/>
+
+  <xacro:include filename="$(find gz_sensors_ouster)/examples/urdf/ouster_macro.xacro"/>
+
+  <!-- Root frame -->
+  <link name="base_footprint"/>
+
+  <!-- Pedestal so the sensor sits ~0.5 m above ground and has visible geometry -->
+  <link name="base_link">
+    <inertial>
+      <mass value="2.0"/>
+      <origin xyz="0 0 0.2"/>
+      <inertia ixx="0.05" ixy="0" ixz="0" iyy="0.05" iyz="0" izz="0.02"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.2"/>
+      <geometry><box size="0.12 0.12 0.4"/></geometry>
+      <material name="pedestal"><color rgba="0.4 0.4 0.45 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.2"/>
+      <geometry><box size="0.12 0.12 0.4"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0"/>
+  </joint>
+
+  <!-- The Ouster, mounted on top of the pedestal -->
+  <xacro:ouster_sensor
+    name="lidar0"
+    parent="base_link"
+    xyz="0 0 0.44" rpy="0 0 0"
+    metadata_path="$(arg metadata_lidar0)"
+    lidar_hz="10.0"
+    enable_imu="true" imu_hz="100.0"
+    anchor_type="$(arg anchor_type)"/>
+
+</robot>

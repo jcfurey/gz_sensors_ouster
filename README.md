@@ -196,6 +196,69 @@ Each sensor adds ~100 MB GPU VRAM (Ogre2 cubemap) and two threads
 render thread, so 2-3 sensors at 10 Hz is comfortable. For 4+
 sensors, consider staggering scan rates or reducing beam density.
 
+## Examples (URDF + world + launch)
+
+Ready-to-run examples live in [`examples/`](examples/) and install to
+`share/gz_sensors_ouster/examples/`:
+
+| File | Purpose |
+|------|---------|
+| `urdf/ouster_macro.xacro` | Reusable `ouster_sensor` xacro macro (the building block) |
+| `urdf/ouster_standalone.urdf.xacro` | Single OS1-64 + IMU on a pedestal |
+| `urdf/sensor_stack.urdf.xacro` | Platform with front OS1-64+IMU and rear OS0-128 |
+| `worlds/ouster_demo.sdf` | Demo world (physics + sensors + IMU systems, ground + obstacles) |
+| `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
+| `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
+
+Run (after `colcon build` + `source install/setup.bash`):
+
+```bash
+ros2 launch gz_sensors_ouster ouster_standalone.launch.py
+# multi-sensor: ros2 launch gz_sensors_ouster sensor_stack.launch.py
+# with RViz:    ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
+```
+
+Each launch starts Gazebo with the demo world, runs
+`robot_state_publisher` on the xacro, spawns the model with
+`ros_gz_sim create` (which loads the system plugin), and bridges only
+`/clock` (the LiDAR/IMU/image topics are published directly by the
+plugin via `rclcpp`, so they need no bridge).
+
+### How the URDF wires to the plugin
+
+The plugin is a Gazebo **system** plugin on the model; it ray-casts with
+its own `GpuRays` rather than a gz `<sensor type="gpu_lidar">`. The macro
+therefore emits, per sensor:
+
+- A **pose-anchor `<sensor>`** named exactly like the last segment of
+  `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up only
+  to read its world pose (the ray-cast origin). It defaults to a cheap
+  non-rendering `type="altimeter"` so Gazebo does not run a second,
+  redundant ray cast. Pass `anchor_type:=gpu_lidar` to the launch if you
+  also want a native gz point cloud (at the cost of that extra ray cast).
+- An optional real **`<sensor type="imu">`** (name contains `imu`) when
+  `enable_imu` is set. This requires `gz-sim-imu-system` in the world
+  (the demo world loads it) — the plugin reads the IMU components that
+  system populates.
+- URDF links named **`<name>/lidar_frame`** and **`<name>/imu_frame`** so
+  `robot_state_publisher` publishes TF frames that match the frame_ids
+  the plugin stamps on its image/IMU messages.
+
+> **Metadata path:** the launch files pass an **absolute**
+> `metadata_path` into xacro. Relative paths resolve against the SDF
+> file's directory, which does not exist for a model spawned from the
+> `robot_description` topic.
+
+### Frames vs. `ouster_ros` `os_cloud`
+
+This plugin stamps `<name>/lidar_frame` and `<name>/imu_frame` (published
+by `robot_state_publisher` from the example URDF). The downstream
+`ouster_ros` `os_cloud` node, which turns `lidar_packets` into a
+`PointCloud2`, uses its own `os_sensor` / `os_lidar` / `os_imu` frames.
+If you run `os_cloud`, set its `sensor_frame` / `lidar_frame` /
+`imu_frame` parameters (or add `static_transform_publisher`s) to tie the
+`os_*` frames to `<name>/lidar_frame`.
+
 ## Included Metadata Files
 
 Example Ouster calibration JSONs are provided in `config/metadata/` for

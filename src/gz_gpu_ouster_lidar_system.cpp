@@ -738,12 +738,6 @@ void GzGpuOusterLidarSystem::OnRender()
             }
         }
 
-        // Skip expensive GPU raycasts when no lidar outputs are consumed.
-        // IMU publishing runs independently in PostUpdate().
-        if (!this->HasActiveLidarSubscribers()) {
-            return;
-        }
-
         // ── Throttle to lidar_hz_ ───────────────────────────────────────────
         auto now = std::chrono::steady_clock::now();
         const auto period = std::chrono::duration_cast<
@@ -1484,17 +1478,6 @@ void GzGpuOusterLidarSystem::drainThreadFunc()
             RCLCPP_ERROR(kLogger, "drainThread publish failed: %s", e.what());
         }
     }
-}
-
-bool GzGpuOusterLidarSystem::HasActiveLidarSubscribers() const
-{
-    if (pkt_pub_ && pkt_pub_->get_subscription_count() > 0) return true;
-    if (range_image_pub_ && range_image_pub_->get_subscription_count() > 0) return true;
-    if (signal_image_pub_ && signal_image_pub_->get_subscription_count() > 0) return true;
-    if (reflec_image_pub_ && reflec_image_pub_->get_subscription_count() > 0) return true;
-    if (nearir_image_pub_ && nearir_image_pub_->get_subscription_count() > 0) return true;
-    if (camera_info_pub_ && camera_info_pub_->get_subscription_count() > 0) return true;
-    return false;
 }
 
 void GzGpuOusterLidarSystem::DestroyGpuRays()

@@ -1,0 +1,10 @@
+# ros_gz_bridge config for the gz_sensors_ouster examples.
+#
+# The plugin publishes all LiDAR/IMU/image topics DIRECTLY to ROS 2 via rclcpp,
+# so they do NOT need bridging. Only the Gazebo /clock has to be bridged so the
+# ROS side can run on simulation time (use_sim_time:=true).
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
