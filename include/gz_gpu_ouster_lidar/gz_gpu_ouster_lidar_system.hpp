@@ -277,7 +277,16 @@ private:
     // onNewFrame. Both render-thread entry points lock this for the
     // duration of their work, and the dtor takes it once after disconnect()
     // to flush any in-flight callback before tearing down the rest.
-    mutable std::mutex render_busy_mtx_;
+    //
+    // MUST be recursive: gz-rendering signals the NewGpuRaysFrame event
+    // synchronously from inside Ogre2GpuRays::PostRender(), so onNewFrame()
+    // runs nested on the SAME render thread, *inside* OnRender() which already
+    // holds this lock across its gpu_rays_->PostRender() call. A plain
+    // std::mutex self-deadlocks the render thread there (which in turn stalls
+    // the gz-sim Sensors render loop and freezes /clock). The dtor still takes
+    // the lock from a different thread, so it blocks until the render thread
+    // has fully unwound both frames — the barrier guarantee is preserved.
+    mutable std::recursive_mutex render_busy_mtx_;
 
     // ── IMU timing ───────────────────────────────────────────────────────────
     std::chrono::nanoseconds last_imu_sim_time_{0};

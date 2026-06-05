@@ -88,7 +88,7 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     shutdown_.store(true, std::memory_order_release);
     render_conn_.reset();
     frame_conn_.reset();
-    { std::lock_guard<std::mutex> lk(render_busy_mtx_); }
+    { std::lock_guard<std::recursive_mutex> lk(render_busy_mtx_); }
     DestroyGpuRays();
 
     drain_cv_.notify_all();
@@ -699,7 +699,7 @@ void GzGpuOusterLidarSystem::OnRender()
     // entire render-thread callback so the dtor can't race us into freed
     // members. shutdown_ check is the cheap early-out for the case where
     // the dtor set the flag and is now waiting on this same lock.
-    std::lock_guard<std::mutex> render_lk(render_busy_mtx_);
+    std::lock_guard<std::recursive_mutex> render_lk(render_busy_mtx_);
     if (shutdown_.load(std::memory_order_acquire)) return;
 
     // Record that events::Render fired at least once. PostUpdate() reads this
@@ -1008,11 +1008,13 @@ void GzGpuOusterLidarSystem::onNewFrame(
     unsigned int height, unsigned int channels,
     const std::string & /*format*/)
 {
-    // See render_busy_mtx_ comment in the header. Same shutdown barrier as
-    // OnRender — both render-thread entry points must hold this so the dtor
-    // can guarantee no in-flight callback is touching frame_mtx_/buffers
-    // when teardown begins.
-    std::lock_guard<std::mutex> render_lk(render_busy_mtx_);
+    // See render_busy_mtx_ comment in the header. This callback is signaled
+    // synchronously by gpu_rays_->PostRender(), so it runs nested on the render
+    // thread inside OnRender() which already holds this lock — hence the lock
+    // is recursive. Re-taking it here keeps the dtor's shutdown barrier honest
+    // for the (defensive) case of an out-of-band signal, and is a no-op cost
+    // in the normal nested path.
+    std::lock_guard<std::recursive_mutex> render_lk(render_busy_mtx_);
     if (shutdown_.load(std::memory_order_acquire)) return;
 
     // Fast path: just memcpy the raw GpuRays buffer into a staging area.
