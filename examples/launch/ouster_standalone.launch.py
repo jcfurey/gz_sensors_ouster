@@ -3,6 +3,7 @@
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py anchor_type:=gpu_lidar
+#   ros2 launch gz_sensors_ouster ouster_standalone.launch.py lidar_profile:=legacy
 #
 # Brings up: gz sim (demo world) + robot_state_publisher (URDF) +
 # `ros_gz_sim create` (spawns the model, which loads the system plugin) +
@@ -21,7 +22,12 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    Command,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -36,11 +42,20 @@ def generate_launch_description():
     bridge_cfg = os.path.join(pkg_share, 'examples', 'config', 'ouster_bridge.yaml')
     rviz_cfg = os.path.join(pkg_share, 'examples', 'rviz', 'ouster.rviz')
 
+    anchor_type = LaunchConfiguration('anchor_type')
+    lidar_profile = LaunchConfiguration('lidar_profile')
+
     # ABSOLUTE metadata path: relative paths resolve against an on-disk SDF dir,
     # which does not exist for a model spawned from the robot_description topic.
-    metadata = os.path.join(pkg_share, 'config', 'metadata', 'os1_64_rev7.json')
-
-    anchor_type = LaunchConfiguration('anchor_type')
+    # The OS1-64 metadata ships in two variants; lidar_profile selects which:
+    #   modern -> os1_64_rev7.json        (RNG19_RFL8_SIG16_NIR16, FW v3.2.0)
+    #   legacy -> os1_64_rev7_legacy.json (LEGACY profile, no WINDOW field)
+    # os_cloud needs no matching config — it reads the profile from the
+    # plugin's metadata topic.
+    meta_name = PythonExpression(
+        ["'os1_64_rev7_legacy.json' if '", lidar_profile,
+         "' == 'legacy' else 'os1_64_rev7.json'"])
+    metadata = PathJoinSubstitution([pkg_share, 'config', 'metadata', meta_name])
 
     robot_description = ParameterValue(
         Command([
@@ -65,6 +80,11 @@ def generate_launch_description():
                                           'Must be a rendering type (gpu_lidar) unless the '
                                           'world already contains another camera/gpu_lidar, '
                                           'or the plugin never starts rendering.'),
+        DeclareLaunchArgument('lidar_profile', default_value='modern',
+                              description='Ouster generation the metadata simulates: '
+                                          'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '
+                                          'legacy (LEGACY profile). Use legacy to simulate '
+                                          'pre-3.2 firmware; modern is recommended.'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config'),
 

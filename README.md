@@ -311,9 +311,30 @@ simulation without real hardware:
 | `os2_128_rev7.json` | OS2-128 | 128 | 22.5° | Nominal | Long-range narrow |
 | `osdome_128_rev7.json` | OSDome-128 | 128 | 180° | Nominal | Hemispheric (experimental) |
 
-All files use the `RNG19_RFL8_SIG16_NIR16` lidar profile, `LEGACY` IMU
-profile, and 1024 columns/frame at 10 Hz. `max_range` is auto-derived
+The default files use the `RNG19_RFL8_SIG16_NIR16` lidar profile, `LEGACY`
+IMU profile, and 1024 columns/frame at 10 Hz. `max_range` is auto-derived
 from `prod_line` when not set in SDF.
+
+### Profile variants (modern vs LEGACY)
+
+Each sensor ships in **two variants**, selected by the `metadata_path` you
+pass (or, in the example launch, the `lidar_profile:=modern|legacy` arg):
+
+| Variant | Files | Profile | Firmware | When to use |
+|---------|-------|---------|----------|-------------|
+| **modern** (default) | `<name>.json` | `RNG19_RFL8_SIG16_NIR16` | v3.2.0 | Current OS sensors; **required for `os_cloud`** |
+| **legacy** | `<name>_legacy.json` | `LEGACY` | v3.1.0 | Simulating pre-3.2 firmware |
+
+Why two? `ouster-sdk` (≥ 0.16, bundled by `ouster-ros`) added a `WINDOW`
+field to the `RNG19_RFL8_SIG16_NIR16` profile that exists only for
+**firmware ≥ 3.2.0**. The metadata previously declared that modern profile
+with firmware **v3.1.0** — a combination real hardware never produces — so
+`os_cloud` allocated a `LidarScan` *without* `WINDOW` while its `ScanBatcher`
+still tried to parse one, crashing with **"Field 'WINDOW' not found in
+LidarScan."** The modern files now declare firmware **v3.2.0** so the field
+set is consistent; the LEGACY profile has no `WINDOW` field at all, so it
+also works (on any firmware). Both produce a correct point cloud — the
+plugin marks column validity via the packet `STATUS` byte, not `WINDOW`.
 
 > **Note**: For production use, replace these with real calibration data
 > from your hardware (`ouster-cli sensor-info` or the sensor HTTP API).
