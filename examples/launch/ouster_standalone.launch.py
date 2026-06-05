@@ -134,15 +134,40 @@ def generate_launch_description():
                 # Stamp the cloud in the URDF lidar frame that
                 # robot_state_publisher already places in the TF tree, so RViz
                 # (fixed frame base_footprint) can display it.
+                # Stamp the cloud in the URDF lidar frame, NOT os_lidar: the
+                # plugin generates points aligned with lidar0/lidar_frame, while
+                # the metadata's lidar_to_sensor_transform is the real Ouster
+                # 180deg + 36mm offset — publishing in os_lidar would rotate the
+                # sim cloud. (Set this to lidar0/os_lidar if you want the full
+                # physical sensor<->lidar offset instead.)
                 'point_cloud_frame': 'lidar0/lidar_frame',
-                # robot_state_publisher owns base_footprint -> lidar0/lidar_frame;
-                # don't let os_cloud broadcast a conflicting os_sensor/os_lidar
-                # transform tree.
-                'pub_static_tf': False,
+                # Let the ouster driver broadcast its own static TF subtree
+                # (lidar0/lidar_frame -> lidar0/os_lidar, lidar0/os_imu) from the
+                # metadata, anchored at the robot's lidar frame.
+                'pub_static_tf': True,
+                'sensor_frame': 'lidar0/lidar_frame',
+                'lidar_frame': 'lidar0/os_lidar',
+                'imu_frame': 'lidar0/os_imu',
                 # Stamp on receipt with ROS (sim) time, sidestepping any epoch
                 # mismatch between the packet column timestamps and /clock.
                 'timestamp_mode': 'TIME_FROM_ROS_TIME',
             }],
+        ),
+
+        # Explicit mount transform base_link -> lidar0/lidar_frame, matching the
+        # URDF mount joint (xyz 0 0 0.44). robot_state_publisher also publishes
+        # this from the URDF; broadcasting it here too guarantees the cloud
+        # reaches base_link even if RSP is not running (harmless TF_REPEATED_DATA
+        # warning when both are up).
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='lidar0_mount_stp',
+            arguments=['--x', '0', '--y', '0', '--z', '0.44',
+                       '--yaw', '0', '--pitch', '0', '--roll', '0',
+                       '--frame-id', 'base_link',
+                       '--child-frame-id', 'lidar0/lidar_frame'],
+            parameters=[{'use_sim_time': True}],
         ),
 
         Node(

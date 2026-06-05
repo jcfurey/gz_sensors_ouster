@@ -290,13 +290,27 @@ therefore emits, per sensor:
 
 ### Frames vs. `ouster_ros` `os_cloud`
 
-This plugin stamps `<name>/lidar_frame` and `<name>/imu_frame` (published
-by `robot_state_publisher` from the example URDF). The downstream
-`ouster_ros` `os_cloud` node, which turns `lidar_packets` into a
-`PointCloud2`, uses its own `os_sensor` / `os_lidar` / `os_imu` frames.
-If you run `os_cloud`, set its `sensor_frame` / `lidar_frame` /
-`imu_frame` parameters (or add `static_transform_publisher`s) to tie the
-`os_*` frames to `<name>/lidar_frame`.
+This plugin generates its points aligned with `<name>/lidar_frame` (the URDF
+sensor frame, published by `robot_state_publisher`). The example launches
+therefore configure `os_cloud` so the cloud's full TF chain to `base_link`
+is explicit:
+
+- `point_cloud_frame:=<name>/lidar_frame` — the `PointCloud2` is stamped in the
+  robot's lidar frame. It is **not** put in `os_lidar`: the metadata's
+  `lidar_to_sensor_transform` is the real Ouster 180° + 36 mm offset, which
+  would rotate the simulated cloud. (Set `point_cloud_frame:=<name>/os_lidar`
+  if you want that physical offset applied.)
+- `pub_static_tf:=true` with `sensor_frame:=<name>/lidar_frame` — the ouster
+  driver broadcasts its own `<name>/lidar_frame → <name>/os_lidar` and
+  `→ <name>/os_imu` static transforms from the metadata.
+- A `static_transform_publisher` publishes `base_link → <name>/lidar_frame`
+  (matching the URDF mount joint), so the cloud reaches `base_link` even if
+  `robot_state_publisher` is not running. When RSP is up it publishes the same
+  edge, which is harmless (a one-time `TF_REPEATED_DATA` warning).
+
+Net TF chain: `points (<name>/lidar_frame) → base_link → base_footprint`, via
+both the launch stack (RSP / the mount `static_transform_publisher`) and the
+ouster driver.
 
 ## Included Metadata Files
 

@@ -43,9 +43,12 @@ def _metadata_path(pkg_share, lidar_profile, modern_name):
 
 def _os_cloud(name):
     """ouster_ros os_cloud for one sensor: assemble lidar_packets into a
-    PointCloud2 on /sensor/lidar/<name>/points, stamped in <name>/lidar_frame
-    (which robot_state_publisher places under base_link), so it has a static
-    TF path to base_link. pub_static_tf is off — RSP owns those frames."""
+    PointCloud2 on /sensor/lidar/<name>/points, stamped in <name>/lidar_frame.
+    pub_static_tf=true so the driver also broadcasts its own static TF subtree
+    (<name>/lidar_frame -> <name>/os_lidar, <name>/os_imu) anchored at the robot
+    lidar frame. The cloud stays in <name>/lidar_frame (NOT os_lidar) because the
+    plugin generates points there and the metadata lidar_to_sensor_transform is
+    the real 180deg+36mm offset, which would rotate the sim cloud."""
     return Node(
         package='ouster_ros',
         executable='os_cloud',
@@ -56,9 +59,29 @@ def _os_cloud(name):
             'use_sim_time': True,
             'proc_mask': 'PCL',  # plugin publishes /imu itself; cloud only
             'point_cloud_frame': name + '/lidar_frame',
-            'pub_static_tf': False,
+            'pub_static_tf': True,
+            'sensor_frame': name + '/lidar_frame',
+            'lidar_frame': name + '/os_lidar',
+            'imu_frame': name + '/os_imu',
             'timestamp_mode': 'TIME_FROM_ROS_TIME',
         }],
+    )
+
+
+def _mount_stp(name, x, y, z, yaw=0.0):
+    """Explicit base_link -> <name>/lidar_frame mount transform, matching the
+    URDF mount joint. robot_state_publisher also publishes this; broadcasting it
+    here too guarantees the cloud reaches base_link even without RSP (harmless
+    TF_REPEATED_DATA warning when both run)."""
+    return Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name=name + '_mount_stp',
+        arguments=['--x', str(x), '--y', str(y), '--z', str(z),
+                   '--yaw', str(yaw), '--pitch', '0', '--roll', '0',
+                   '--frame-id', 'base_link',
+                   '--child-frame-id', name + '/lidar_frame'],
+        parameters=[{'use_sim_time': True}],
     )
 
 
@@ -137,9 +160,15 @@ def generate_launch_description():
             parameters=[{'config_file': bridge_cfg, 'use_sim_time': True}],
         ),
 
-        # One os_cloud per sensor → /sensor/lidar/{front,rear}/points.
+        # One os_cloud per sensor → /sensor/lidar/{front,rear}/points, each
+        # broadcasting its own os_lidar/os_imu TF subtree.
         _os_cloud('front'),
         _os_cloud('rear'),
+
+        # Explicit mount transforms base_link -> {front,rear}/lidar_frame,
+        # matching the URDF (front xyz 0.45 0 0.35; rear xyz -0.45 0 0.35 yaw π).
+        _mount_stp('front', 0.45, 0.0, 0.35),
+        _mount_stp('rear', -0.45, 0.0, 0.35, yaw=3.14159265359),
 
         Node(
             package='rviz2',
