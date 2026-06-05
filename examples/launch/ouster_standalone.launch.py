@@ -58,8 +58,11 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('anchor_type', default_value='altimeter',
-                              description='Pose-anchor sensor type: altimeter | gpu_lidar'),
+        DeclareLaunchArgument('anchor_type', default_value='gpu_lidar',
+                              description='Pose-anchor sensor type: gpu_lidar | altimeter. '
+                                          'Must be a rendering type (gpu_lidar) unless the '
+                                          'world already contains another camera/gpu_lidar, '
+                                          'or the plugin never starts rendering.'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config'),
 

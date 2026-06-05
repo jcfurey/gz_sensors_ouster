@@ -82,6 +82,32 @@ For IMU simulation, your world SDF must also load the Gazebo IMU system:
 <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
 ```
 
+### World requirements (read this if no point cloud is published)
+
+This plugin does **not** register a `<sensor type="gpu_lidar">`. It creates its
+own `GpuRays` inside the ogre2 scene that `gz-sim-sensors-system` owns, and it is
+driven by that system's `events::Render` event. Therefore the world must:
+
+1. Load the Sensors system with the ogre2 engine:
+   ```xml
+   <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+     <render_engine>ogre2</render_engine>
+   </plugin>
+   ```
+2. Contain **at least one rendering sensor** (`camera`, `gpu_lidar`,
+   `depth_camera`, …). On Gazebo Harmonic the Sensors system only initialises
+   rendering — building the scene and emitting `events::Render` — once such a
+   sensor exists in the ECM. With **only** non-rendering sensors (e.g. an
+   `altimeter` pose anchor plus an `imu`), the Sensors system never starts
+   rendering, `OnRender()` never fires, the `GpuRays` is never created, and **no
+   point cloud is produced**.
+
+The bundled examples satisfy (2) by defaulting the pose-anchor sensor to
+`gpu_lidar` (see `examples/urdf/ouster_macro.xacro`, `anchor_type:=gpu_lidar`).
+If this requirement is unmet the plugin logs a one-shot error after ~2 s of sim
+time: *"events::Render has not fired … add a rendering sensor (e.g.
+anchor_type:=gpu_lidar)"*.
+
 ## Build
 
 ```bash
@@ -537,6 +563,16 @@ previous one. Rare under the lidar_hz throttle; sustained drops mean
 PostUpdate is starved (sim-time stall, post-pause burst, or the GPU
 pipeline can't keep up with the configured rate). The cumulative
 counter is per-sensor and lifetime-of-process.
+
+### One-shot ERROR: Sensors system not rendering
+
+```
+events::Render has not fired after 2.0s of sim time — gz-sim's Sensors system
+has not started rendering. ... Add a rendering sensor (e.g. anchor_type:=gpu_lidar) ...
+```
+The world has no rendering sensor, so `gz-sim-sensors-system` never built the
+ogre2 scene this plugin attaches to. See
+[World requirements](#world-requirements-read-this-if-no-point-cloud-is-published).
 
 ### `/imu` covariance
 

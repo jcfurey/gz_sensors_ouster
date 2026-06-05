@@ -702,9 +702,10 @@ void GzGpuOusterLidarSystem::OnRender()
     std::lock_guard<std::mutex> render_lk(render_busy_mtx_);
     if (shutdown_.load(std::memory_order_acquire)) return;
 
-    // TEMP DEBUG: count every OnRender entry (before any throttle/return) so we
-    // can tell "events::Render stopped firing" from "render branch throttled".
-    onrender_entries_.fetch_add(1);
+    // Record that events::Render fired at least once. PostUpdate() reads this
+    // to emit a one-shot diagnostic when the Sensors system never starts
+    // rendering (no rendering sensor in the world); see PostUpdate().
+    onrender_entries_.fetch_add(1, std::memory_order_relaxed);
 
     if (sensor_initialized_.load(std::memory_order_acquire)) {
         // Republish metadata periodically until os_cloud confirms receipt.
@@ -759,30 +760,8 @@ void GzGpuOusterLidarSystem::OnRender()
                 std::lock_guard<std::mutex> lk(pose_mtx_);
                 gpu_rays_->SetWorldPose(cached_pose_);
             }
-            // TEMP DEBUG: prove the render branch runs, and surface any
-            // exception out of Ogre2GpuRays::Render/PostRender (EGL/ogre2
-            // failures otherwise unwind silently through the event emit).
-            const uint64_t tick = render_tick_.fetch_add(1) + 1;
-            try {
-                gpu_rays_->Render();
-                gpu_rays_->PostRender();
-            } catch (const std::exception & e) {
-                RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 2000,
-                    "TEMP DEBUG: GpuRays Render/PostRender threw: %s", e.what());
-            } catch (...) {
-                RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 2000,
-                    "TEMP DEBUG: GpuRays Render/PostRender threw unknown exception");
-            }
-            if (tick <= 3 || tick % 50 == 0) {
-                RCLCPP_INFO(kLogger,
-                    "TEMP DEBUG: render tick=%lu (frame_cb=%lu encode=%lu)",
-                    static_cast<unsigned long>(tick),
-                    static_cast<unsigned long>(frame_cb_count_.load()),
-                    static_cast<unsigned long>(encode_count_.load()));
-            }
-        } else {
-            RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 2000,
-                "TEMP DEBUG: render branch reached but gpu_rays_ is null");
+            gpu_rays_->Render();
+            gpu_rays_->PostRender();
         }
         return;
     }
@@ -861,22 +840,34 @@ void GzGpuOusterLidarSystem::PostUpdate(
     const ::gz::sim::UpdateInfo & info,
     const ::gz::sim::EntityComponentManager & ecm)
 {
-    // TEMP DEBUG: count PostUpdate calls BEFORE the pause gate, and report
-    // pause state + all counters every ~5 s worth of calls (call-count based,
-    // independent of any clock so a frozen sim-time can't suppress it).
-    const uint64_t pu = postupdate_calls_.fetch_add(1) + 1;
-    if (pu == 1 || pu % 300 == 0) {
-        const double sim_s =
+    // ── Silent-failure guard ─────────────────────────────────────────────────
+    // The plugin attaches its GpuRays to the ogre2 scene owned by
+    // gz-sim-sensors-system and is driven by the events::Render event. On
+    // Gazebo Harmonic the Sensors system only initialises rendering (and emits
+    // events::Render) when the world contains at least one *rendering* sensor
+    // (camera / gpu_lidar / depth_camera ...). With only non-rendering sensors
+    // (altimeter, imu) present, OnRender() never fires and no point cloud is
+    // ever produced. Detect that and tell the user exactly what to fix, once.
+    if (!no_render_warned_ &&
+        !sensor_initialized_.load(std::memory_order_acquire) &&
+        onrender_entries_.load(std::memory_order_relaxed) == 0)
+    {
+        constexpr int64_t kRenderWaitNs = 2'000'000'000;  // 2 s of sim time
+        const int64_t sim_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
-                info.simTime).count() / 1e9;
-        RCLCPP_INFO(kLogger,
-            "TEMP DEBUG: PostUpdate #%lu paused=%d simTime=%.3f "
-            "onrender_entries=%lu render_tick=%lu frame_cb=%lu encode=%lu",
-            static_cast<unsigned long>(pu), info.paused ? 1 : 0, sim_s,
-            static_cast<unsigned long>(onrender_entries_.load()),
-            static_cast<unsigned long>(render_tick_.load()),
-            static_cast<unsigned long>(frame_cb_count_.load()),
-            static_cast<unsigned long>(encode_count_.load()));
+                info.simTime).count();
+        if (sim_ns > kRenderWaitNs) {
+            no_render_warned_ = true;
+            RCLCPP_ERROR(kLogger,
+                "events::Render has not fired after %.1fs of sim time — gz-sim's "
+                "Sensors system has not started rendering. This plugin attaches "
+                "its GpuRays to the ogre2 scene owned by gz-sim-sensors-system, "
+                "which only initialises rendering when the world contains at "
+                "least one rendering sensor (camera or gpu_lidar). Add a "
+                "rendering sensor (e.g. anchor_type:=gpu_lidar in the example "
+                "URDF) or no point cloud will be produced.",
+                static_cast<double>(sim_ns) / 1e9);
+        }
     }
 
     if (info.paused) {
@@ -1000,18 +991,8 @@ void GzGpuOusterLidarSystem::PostUpdate(
         const auto stamp_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 info.simTime).count();
-        encode_count_.fetch_add(1);  // TEMP DEBUG
         encodeAndPublish(stamp_ns, process_buf_.data(),
                          local_H, local_W, local_chan);
-    } else if (ros_node_) {
-        // TEMP DEBUG: heartbeat while no GpuRays frame has been drained yet.
-        RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
-            "TEMP DEBUG: no GpuRays frame to drain "
-            "(render_tick=%lu frame_cb=%lu encode=%lu sensor_init=%d)",
-            static_cast<unsigned long>(render_tick_.load()),
-            static_cast<unsigned long>(frame_cb_count_.load()),
-            static_cast<unsigned long>(encode_count_.load()),
-            sensor_initialized_.load() ? 1 : 0);
     }
 
     // ── Publish IMU at configured rate ──────────────────────────────────────
@@ -1033,16 +1014,6 @@ void GzGpuOusterLidarSystem::onNewFrame(
     // when teardown begins.
     std::lock_guard<std::mutex> render_lk(render_busy_mtx_);
     if (shutdown_.load(std::memory_order_acquire)) return;
-
-    // TEMP DEBUG: prove the GpuRays frame callback fires at all, and with
-    // what dimensions, before any guard below can silently drop it.
-    const uint64_t cb = frame_cb_count_.fetch_add(1) + 1;
-    if ((cb <= 3 || cb % 50 == 0) && ros_node_) {
-        RCLCPP_INFO(kLogger,
-            "TEMP DEBUG: onNewFrame #%lu w=%u h=%u c=%u data=%p (expect w=%d h>=%d)",
-            static_cast<unsigned long>(cb), width, height, channels,
-            static_cast<const void *>(data), W_, H_);
-    }
 
     // Fast path: just memcpy the raw GpuRays buffer into a staging area.
     // Bilinear resampling is done later on the GPU (CUDA) or CPU (fallback)

@@ -16,7 +16,7 @@
 
   <xacro:arg name="metadata_front" default="metadata/os1_64_rev7.json"/>
   <xacro:arg name="metadata_rear"  default="metadata/os0_128_rev7.json"/>
-  <xacro:arg name="anchor_type"    default="altimeter"/>
+  <xacro:arg name="anchor_type"    default="gpu_lidar"/>
 
   <xacro:include filename="$(find gz_sensors_ouster)/examples/urdf/ouster_macro.xacro"/>
 

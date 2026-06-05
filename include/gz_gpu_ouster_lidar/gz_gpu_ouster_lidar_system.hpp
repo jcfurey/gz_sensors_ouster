@@ -215,15 +215,12 @@ private:
     // drain in time and the older frame was overwritten unobserved.
     std::atomic<uint64_t> dropped_frames_{0};
 
-    // ── TEMP DEBUG counters (remove once lidar_packets path verified) ─────────
-    // render_tick_  : times OnRender's render branch called Render()/PostRender()
-    // frame_cb_count_: times onNewFrame fired (any args)
-    // encode_count_ : times PostUpdate handed a frame to encodeAndPublish
-    std::atomic<uint64_t> render_tick_{0};
-    std::atomic<uint64_t> frame_cb_count_{0};
-    std::atomic<uint64_t> encode_count_{0};
-    std::atomic<uint64_t> onrender_entries_{0};  // OnRender calls (pre-throttle)
-    std::atomic<uint64_t> postupdate_calls_{0};   // PostUpdate calls (post-pause-gate)
+    // Counts OnRender() entries, i.e. how many times events::Render has fired.
+    // Stays 0 when the Sensors system never starts rendering (no rendering
+    // sensor in the world); PostUpdate() uses it to emit a one-shot diagnostic.
+    std::atomic<uint64_t> onrender_entries_{0};
+    // Set once the above diagnostic has been logged, so it fires only once.
+    bool no_render_warned_{false};
 
     // ── ROS 2 node & publishers ──────────────────────────────────────────────
     // publish_mtx_ serialises all publish() calls across threads (render,
