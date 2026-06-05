@@ -1041,6 +1041,15 @@ void GzGpuOusterLidarSystem::onNewFrame(
         return;
     }
 
+    // One-shot: report the actual raw GpuRays frame geometry. The resample
+    // assumes width == W_ and treats `height` as the oversampled vertical count;
+    // if OGRE2 hands back a height other than the requested SetVerticalRayCount,
+    // the vertical mapping silently scales. Logged once to aid diagnosis.
+    RCLCPP_INFO_ONCE(kLogger,
+        "%s: raw GpuRays frame %ux%ux%u (requested vertical_rays=%d, beams H=%d, W=%d)",
+        sensor_name_.c_str(), width, height, channels,
+        std::max(H_ * 4, 256), H_, W_);
+
     const size_t n = static_cast<size_t>(width) * height * channels;
 
     // Memcpy into the render-only pending_buf_ FIRST, no lock held. After
