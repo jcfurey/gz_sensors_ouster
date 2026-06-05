@@ -75,11 +75,14 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('anchor_type', default_value='gpu_lidar',
-                              description='Pose-anchor sensor type: gpu_lidar | altimeter. '
-                                          'Must be a rendering type (gpu_lidar) unless the '
-                                          'world already contains another camera/gpu_lidar, '
-                                          'or the plugin never starts rendering.'),
+        DeclareLaunchArgument('anchor_type', default_value='camera',
+                              description='Render-bootstrap / pose-anchor sensor type: '
+                                          'camera | gpu_lidar | altimeter. Default camera is '
+                                          'the cheapest renderer and adds no second lidar. '
+                                          'gpu_lidar also emits a native gz scan '
+                                          '(<ns>/gz_native_scan, a 2nd lidar source). '
+                                          'altimeter is non-rendering — only if the world '
+                                          'already has another camera/gpu_lidar.'),
         DeclareLaunchArgument('lidar_profile', default_value='modern',
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '

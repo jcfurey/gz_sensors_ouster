@@ -864,8 +864,8 @@ void GzGpuOusterLidarSystem::PostUpdate(
                 "its GpuRays to the ogre2 scene owned by gz-sim-sensors-system, "
                 "which only initialises rendering when the world contains at "
                 "least one rendering sensor (camera or gpu_lidar). Add a "
-                "rendering sensor (e.g. anchor_type:=gpu_lidar in the example "
-                "URDF) or no point cloud will be produced.",
+                "rendering sensor (the example URDF's anchor_type defaults to a "
+                "camera) or no point cloud will be produced.",
                 static_cast<double>(sim_ns) / 1e9);
         }
     }

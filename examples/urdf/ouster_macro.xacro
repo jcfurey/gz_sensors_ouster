@@ -39,7 +39,7 @@
             xyz:='0 0 0' rpy:='0 0 0'
             lidar_hz:=10.0
             enable_imu:=false imu_hz:=100.0
-            anchor_type:=gpu_lidar">
+            anchor_type:=camera">
 
     <!-- ROS topic prefix == <sensor_name>. Its last segment must equal `name`
          so the plugin's gz-sensor lookup succeeds. -->
@@ -69,11 +69,15 @@
       <origin xyz="${xyz}" rpy="${rpy}"/>
     </joint>
 
-    <!-- Pose-anchor sensor. NAME must equal `name` (plugin lookup). Default
-         gpu_lidar is a *rendering* sensor: it makes gz-sim-sensors-system build
-         the ogre2 scene and emit events::Render, which is what drives this
-         plugin. altimeter (non-rendering) only works if the world already has
-         another camera/gpu_lidar. -->
+    <!-- Pose-anchor sensor. NAME must equal `name` (plugin lookup). It must be a
+         *rendering* sensor so gz-sim-sensors-system builds the ogre2 scene and
+         emits events::Render, which is what drives this plugin's own GpuRays.
+         Default `camera` is the cheapest renderer and is NOT a lidar, so it
+         bootstraps rendering + supplies the pose without adding a second lidar
+         source. `gpu_lidar` also works but additionally emits a native gz scan
+         on <ns>/gz_native_scan (a second lidar raycast). `altimeter` is
+         non-rendering — only valid if the world already has another
+         camera/gpu_lidar. -->
     <gazebo reference="${name}/lidar_frame">
       <sensor name="${name}" type="${anchor_type}">
         <pose>0 0 0 0 0 0</pose>
@@ -82,6 +86,16 @@
         <visualize>false</visualize>
         <xacro:if value="${anchor_type == 'altimeter'}">
           <altimeter/>
+        </xacro:if>
+        <!-- Default: a tiny camera purely to start the render loop (its image
+             is unused / not bridged). Not a lidar → no second scan. -->
+        <xacro:if value="${anchor_type == 'camera'}">
+          <topic>${ns}/render_anchor</topic>
+          <camera>
+            <horizontal_fov>1.0</horizontal_fov>
+            <image><width>16</width><height>16</height></image>
+            <clip><near>0.1</near><far>100.0</far></clip>
+          </camera>
         </xacro:if>
         <xacro:if value="${anchor_type == 'gpu_lidar'}">
           <topic>${ns}/gz_native_scan</topic>
