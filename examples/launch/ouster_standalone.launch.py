@@ -6,7 +6,9 @@
 #
 # Brings up: gz sim (demo world) + robot_state_publisher (URDF) +
 # `ros_gz_sim create` (spawns the model, which loads the system plugin) +
-# ros_gz_bridge (/clock only). The LiDAR/IMU/image topics are published
+# ros_gz_bridge (/clock only) + ouster_ros os_cloud (turns the plugin's
+# lidar_packets into a PointCloud2 on /sensor/lidar/lidar0/points, exactly
+# as it would for a real Ouster). The LiDAR/IMU/image topics are published
 # directly by the plugin, so they are NOT bridged.
 import os
 
@@ -91,6 +93,36 @@ def generate_launch_description():
             executable='parameter_bridge',
             output='screen',
             parameters=[{'config_file': bridge_cfg, 'use_sim_time': True}],
+        ),
+
+        # ouster_ros os_cloud: assembles the plugin's lidar_packets + metadata
+        # into a PointCloud2, identically to a real Ouster. Run in the plugin's
+        # topic namespace so its relative subscriptions (lidar_packets,
+        # metadata) and publication (points) line up with /sensor/lidar/lidar0.
+        Node(
+            package='ouster_ros',
+            executable='os_cloud',
+            name='os_cloud',
+            namespace='/sensor/lidar/lidar0',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                # Build only the point cloud. The plugin already publishes
+                # /sensor/lidar/lidar0/imu directly, so don't let os_cloud
+                # republish a second 'imu' from imu_packets.
+                'proc_mask': 'PCL',
+                # Stamp the cloud in the URDF lidar frame that
+                # robot_state_publisher already places in the TF tree, so RViz
+                # (fixed frame base_footprint) can display it.
+                'point_cloud_frame': 'lidar0/lidar_frame',
+                # robot_state_publisher owns base_footprint -> lidar0/lidar_frame;
+                # don't let os_cloud broadcast a conflicting os_sensor/os_lidar
+                # transform tree.
+                'pub_static_tf': False,
+                # Stamp on receipt with ROS (sim) time, sidestepping any epoch
+                # mismatch between the packet column timestamps and /clock.
+                'timestamp_mode': 'TIME_FROM_ROS_TIME',
+            }],
         ),
 
         Node(

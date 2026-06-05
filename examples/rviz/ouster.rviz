@@ -28,6 +28,18 @@ Visualization Manager:
         Value: /sensor/lidar/lidar0/signal_image
         Depth: 5
         Reliability Policy: Reliable
+    - Class: rviz_default_plugins/PointCloud2
+      Name: PointCloud
+      Enabled: true
+      Topic:
+        Value: /sensor/lidar/lidar0/points
+        Depth: 5
+        # os_cloud publishes 'points' on SensorDataQoS (BEST_EFFORT).
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: Intensity
+      Channel Name: intensity
   Tools:
     - Class: rviz_default_plugins/MoveCamera
   Views:

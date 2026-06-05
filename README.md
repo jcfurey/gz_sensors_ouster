@@ -250,6 +250,16 @@ Each launch starts Gazebo with the demo world, runs
 `/clock` (the LiDAR/IMU/image topics are published directly by the
 plugin via `rclcpp`, so they need no bridge).
 
+`ouster_standalone.launch.py` additionally runs the `ouster_ros`
+`os_cloud` node (in the `/sensor/lidar/lidar0` namespace) so the plugin's
+`lidar_packets` are assembled into a `PointCloud2` on
+`/sensor/lidar/lidar0/points`, exactly as for a real Ouster — verify with
+`ros2 topic hz /sensor/lidar/lidar0/points`. `os_cloud` is configured with
+`point_cloud_frame:=lidar0/lidar_frame` and `pub_static_tf:=false` so the
+cloud lands in the `robot_state_publisher` TF tree (RViz fixed frame
+`base_footprint`) without a duplicate static-transform broadcaster. The
+RViz config includes a `PointCloud` display for that topic.
+
 ### How the URDF wires to the plugin
 
 The plugin is a Gazebo **system** plugin on the model; it ray-casts with
@@ -257,11 +267,14 @@ its own `GpuRays` rather than a gz `<sensor type="gpu_lidar">`. The macro
 therefore emits, per sensor:
 
 - A **pose-anchor `<sensor>`** named exactly like the last segment of
-  `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up only
-  to read its world pose (the ray-cast origin). It defaults to a cheap
-  non-rendering `type="altimeter"` so Gazebo does not run a second,
-  redundant ray cast. Pass `anchor_type:=gpu_lidar` to the launch if you
-  also want a native gz point cloud (at the cost of that extra ray cast).
+  `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up to read
+  its world pose (the ray-cast origin). It defaults to `type="gpu_lidar"`,
+  which is also what makes `gz-sim-sensors-system` start rendering and emit
+  the `events::Render` event the plugin needs (see [World
+  requirements](#world-requirements-read-this-if-no-point-cloud-is-published)),
+  and it publishes a native gz scan on `<sensor_name>/gz_native_scan` as a
+  bonus. Pass `anchor_type:=altimeter` only if the world already contains
+  another rendering sensor to bootstrap the scene.
 - An optional real **`<sensor type="imu">`** (name contains `imu`) when
   `enable_imu` is set. This requires `gz-sim-imu-system` in the world
   (the demo world loads it) — the plugin reads the IMU components that
