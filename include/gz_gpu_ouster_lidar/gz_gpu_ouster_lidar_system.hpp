@@ -215,6 +215,16 @@ private:
     // drain in time and the older frame was overwritten unobserved.
     std::atomic<uint64_t> dropped_frames_{0};
 
+    // ── TEMP DEBUG counters (remove once lidar_packets path verified) ─────────
+    // render_tick_  : times OnRender's render branch called Render()/PostRender()
+    // frame_cb_count_: times onNewFrame fired (any args)
+    // encode_count_ : times PostUpdate handed a frame to encodeAndPublish
+    std::atomic<uint64_t> render_tick_{0};
+    std::atomic<uint64_t> frame_cb_count_{0};
+    std::atomic<uint64_t> encode_count_{0};
+    std::atomic<uint64_t> onrender_entries_{0};  // OnRender calls (pre-throttle)
+    std::atomic<uint64_t> postupdate_calls_{0};   // PostUpdate calls (post-pause-gate)
+
     // ── ROS 2 node & publishers ──────────────────────────────────────────────
     // publish_mtx_ serialises all publish() calls across threads (render,
     // simulation/PostUpdate, drain).  rmw_zenoh_cpp is not guaranteed
