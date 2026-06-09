@@ -39,6 +39,7 @@
 
 #include <ouster/metadata.h>
 #include <ouster/impl/packet_writer.h>
+#include <ouster/lidar_scan.h>
 #include <ouster/types.h>
 
 #include <rclcpp/rclcpp.hpp>
@@ -458,6 +459,48 @@ bool GzGpuOusterLidarSystem::loadMetadata()
         beam_alt_angles_ = info.beam_altitude_angles;
         beam_az_offsets_ = info.beam_azimuth_angles;
         beam_origin_mm_  = info.lidar_origin_to_beam_origin_mm;
+
+        // Ensure the published firmware exposes the WINDOW channel field.
+        //
+        // The Ouster SDK only materialises WINDOW in the LidarScan when the
+        // reported firmware is >= v3.2.0 (get_field_types() strips it below
+        // that — see lidar_scan.cpp), and the version is read from image_rev,
+        // not build_rev (SensorInfo::get_version()). The bundled ouster-ros
+        // point-cloud processor, however, lists WINDOW unconditionally in its
+        // per-profile field table and does a strict scan.field(WINDOW) lookup.
+        // Metadata that reports older firmware (captured v2.4.0 dumps) or an
+        // unparseable string (the "sim" placeholder) therefore makes os_cloud
+        // drop WINDOW and then abort with
+        // "Field 'WINDOW' not found in LidarScan".
+        //
+        // The simulated packets use the modern profile byte layout regardless
+        // of the firmware string, so advertise a firmware that keeps the field
+        // present and re-serialise the metadata we publish so every consumer
+        // stays consistent. pw_ was already built from the parsed info above
+        // and is unaffected (firmware does not change the packet layout).
+        //
+        // Only profiles whose modern (>= v3.2.0) layout actually carries WINDOW
+        // are bumped — LEGACY-profile sims are intentionally pre-3.2 and have no
+        // WINDOW field, so they are left untouched.
+        const ouster::sdk::core::Version kWindowFieldMinFw{3, 2, 0};
+        const auto modern_fields =
+            ouster::sdk::core::get_field_types(info.format, kWindowFieldMinFw);
+        const bool profile_has_window = std::any_of(
+            modern_fields.begin(), modern_fields.end(),
+            [](const ouster::sdk::core::FieldType & ft) {
+                return ft.name == ouster::sdk::core::ChanField::WINDOW;
+            });
+        if (profile_has_window && info.get_version() < kWindowFieldMinFw) {
+            const std::string reported =
+                info.image_rev.empty() ? info.fw_rev : info.image_rev;
+            RCLCPP_INFO(kLogger,
+                "Metadata firmware '%s' predates the WINDOW field (< v3.2.0); "
+                "advertising v3.2.0 so os_cloud retains the WINDOW channel.",
+                reported.c_str());
+            info.image_rev = "ousteros-image-prod-aries-v3.2.0";
+            info.fw_rev    = "v3.2.0";
+            metadata_str_  = info.to_json_string();
+        }
     } catch (const std::exception & e) {
         RCLCPP_ERROR(kLogger, "Failed to parse metadata: %s", e.what());
         return false;
