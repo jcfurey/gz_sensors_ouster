@@ -82,6 +82,35 @@ For IMU simulation, your world SDF must also load the Gazebo IMU system:
 <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
 ```
 
+### World requirements (read this if no point cloud is published)
+
+This plugin does **not** register a `<sensor type="gpu_lidar">`. It creates its
+own `GpuRays` inside the ogre2 scene that `gz-sim-sensors-system` owns, and it is
+driven by that system's `events::Render` event. Therefore the world must:
+
+1. Load the Sensors system with the ogre2 engine:
+   ```xml
+   <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+     <render_engine>ogre2</render_engine>
+   </plugin>
+   ```
+2. Contain **at least one rendering sensor** (`camera`, `gpu_lidar`,
+   `depth_camera`, …). On Gazebo Harmonic the Sensors system only initialises
+   rendering — building the scene and emitting `events::Render` — once such a
+   sensor exists in the ECM. With **only** non-rendering sensors (e.g. an
+   `altimeter` pose anchor plus an `imu`), the Sensors system never starts
+   rendering, `OnRender()` never fires, the `GpuRays` is never created, and **no
+   point cloud is produced**.
+
+The bundled examples satisfy (2) by defaulting the pose-anchor sensor to a tiny
+**`camera`** (see `examples/urdf/ouster_macro.xacro`, `anchor_type:=camera`) —
+the cheapest renderer, which bootstraps the scene **without** adding a second
+lidar. Use `anchor_type:=gpu_lidar` if you also want a native gz scan on
+`<sensor_name>/gz_native_scan` (note: that is a second lidar raycast source and
+will show as an extra cloud if visualised). If this requirement is unmet the
+plugin logs a one-shot error after ~2 s of sim time: *"events::Render has not
+fired … add a rendering sensor"*.
+
 ## Build
 
 ```bash
@@ -224,6 +253,16 @@ Each launch starts Gazebo with the demo world, runs
 `/clock` (the LiDAR/IMU/image topics are published directly by the
 plugin via `rclcpp`, so they need no bridge).
 
+`ouster_standalone.launch.py` additionally runs the `ouster_ros`
+`os_cloud` node (in the `/sensor/lidar/lidar0` namespace) so the plugin's
+`lidar_packets` are assembled into a `PointCloud2` on
+`/sensor/lidar/lidar0/points`, exactly as for a real Ouster — verify with
+`ros2 topic hz /sensor/lidar/lidar0/points`. `os_cloud` is configured with
+`point_cloud_frame:=lidar0/lidar_frame` and `pub_static_tf:=false` so the
+cloud lands in the `robot_state_publisher` TF tree (RViz fixed frame
+`base_footprint`) without a duplicate static-transform broadcaster. The
+RViz config includes a `PointCloud` display for that topic.
+
 ### How the URDF wires to the plugin
 
 The plugin is a Gazebo **system** plugin on the model; it ray-casts with
@@ -231,11 +270,17 @@ its own `GpuRays` rather than a gz `<sensor type="gpu_lidar">`. The macro
 therefore emits, per sensor:
 
 - A **pose-anchor `<sensor>`** named exactly like the last segment of
-  `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up only
-  to read its world pose (the ray-cast origin). It defaults to a cheap
-  non-rendering `type="altimeter"` so Gazebo does not run a second,
-  redundant ray cast. Pass `anchor_type:=gpu_lidar` to the launch if you
-  also want a native gz point cloud (at the cost of that extra ray cast).
+  `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up to read
+  its world pose (the ray-cast origin). It must be a *rendering* sensor so
+  `gz-sim-sensors-system` starts rendering and emits the `events::Render` event
+  the plugin needs (see [World
+  requirements](#world-requirements-read-this-if-no-point-cloud-is-published)).
+  It defaults to a minimal **`camera`** — the cheapest renderer, and **not** a
+  lidar, so it does not add a second raycast source. Pass
+  `anchor_type:=gpu_lidar` if you also want a native gz scan on
+  `<sensor_name>/gz_native_scan` (a second lidar source), or
+  `anchor_type:=altimeter` only if the world already contains another rendering
+  sensor.
 - An optional real **`<sensor type="imu">`** (name contains `imu`) when
   `enable_imu` is set. This requires `gz-sim-imu-system` in the world
   (the demo world loads it) — the plugin reads the IMU components that
@@ -251,13 +296,27 @@ therefore emits, per sensor:
 
 ### Frames vs. `ouster_ros` `os_cloud`
 
-This plugin stamps `<name>/lidar_frame` and `<name>/imu_frame` (published
-by `robot_state_publisher` from the example URDF). The downstream
-`ouster_ros` `os_cloud` node, which turns `lidar_packets` into a
-`PointCloud2`, uses its own `os_sensor` / `os_lidar` / `os_imu` frames.
-If you run `os_cloud`, set its `sensor_frame` / `lidar_frame` /
-`imu_frame` parameters (or add `static_transform_publisher`s) to tie the
-`os_*` frames to `<name>/lidar_frame`.
+This plugin generates its points aligned with `<name>/lidar_frame` (the URDF
+sensor frame, published by `robot_state_publisher`). The example launches
+therefore configure `os_cloud` so the cloud's full TF chain to `base_link`
+is explicit:
+
+- `point_cloud_frame:=<name>/lidar_frame` — the `PointCloud2` is stamped in the
+  robot's lidar frame. It is **not** put in `os_lidar`: the metadata's
+  `lidar_to_sensor_transform` is the real Ouster 180° + 36 mm offset, which
+  would rotate the simulated cloud. (Set `point_cloud_frame:=<name>/os_lidar`
+  if you want that physical offset applied.)
+- `pub_static_tf:=true` with `sensor_frame:=<name>/lidar_frame` — the ouster
+  driver broadcasts its own `<name>/lidar_frame → <name>/os_lidar` and
+  `→ <name>/os_imu` static transforms from the metadata.
+- A `static_transform_publisher` publishes `base_link → <name>/lidar_frame`
+  (matching the URDF mount joint), so the cloud reaches `base_link` even if
+  `robot_state_publisher` is not running. When RSP is up it publishes the same
+  edge, which is harmless (a one-time `TF_REPEATED_DATA` warning).
+
+Net TF chain: `points (<name>/lidar_frame) → base_link → base_footprint`, via
+both the launch stack (RSP / the mount `static_transform_publisher`) and the
+ouster driver.
 
 ## Included Metadata Files
 
@@ -272,9 +331,30 @@ simulation without real hardware:
 | `os2_128_rev7.json` | OS2-128 | 128 | 22.5° | Nominal | Long-range narrow |
 | `osdome_128_rev7.json` | OSDome-128 | 128 | 180° | Nominal | Hemispheric (experimental) |
 
-All files use the `RNG19_RFL8_SIG16_NIR16` lidar profile, `LEGACY` IMU
-profile, and 1024 columns/frame at 10 Hz. `max_range` is auto-derived
+The default files use the `RNG19_RFL8_SIG16_NIR16` lidar profile, `LEGACY`
+IMU profile, and 1024 columns/frame at 10 Hz. `max_range` is auto-derived
 from `prod_line` when not set in SDF.
+
+### Profile variants (modern vs LEGACY)
+
+Each sensor ships in **two variants**, selected by the `metadata_path` you
+pass (or, in the example launch, the `lidar_profile:=modern|legacy` arg):
+
+| Variant | Files | Profile | Firmware | When to use |
+|---------|-------|---------|----------|-------------|
+| **modern** (default) | `<name>.json` | `RNG19_RFL8_SIG16_NIR16` | v3.2.0 | Current OS sensors; **required for `os_cloud`** |
+| **legacy** | `<name>_legacy.json` | `LEGACY` | v3.1.0 | Simulating pre-3.2 firmware |
+
+Why two? `ouster-sdk` (≥ 0.16, bundled by `ouster-ros`) added a `WINDOW`
+field to the `RNG19_RFL8_SIG16_NIR16` profile that exists only for
+**firmware ≥ 3.2.0**. The metadata previously declared that modern profile
+with firmware **v3.1.0** — a combination real hardware never produces — so
+`os_cloud` allocated a `LidarScan` *without* `WINDOW` while its `ScanBatcher`
+still tried to parse one, crashing with **"Field 'WINDOW' not found in
+LidarScan."** The modern files now declare firmware **v3.2.0** so the field
+set is consistent; the LEGACY profile has no `WINDOW` field at all, so it
+also works (on any firmware). Both produce a correct point cloud — the
+plugin marks column validity via the packet `STATUS` byte, not `WINDOW`.
 
 > **Note**: For production use, replace these with real calibration data
 > from your hardware (`ouster-cli sensor-info` or the sensor HTTP API).
@@ -537,6 +617,17 @@ previous one. Rare under the lidar_hz throttle; sustained drops mean
 PostUpdate is starved (sim-time stall, post-pause burst, or the GPU
 pipeline can't keep up with the configured rate). The cumulative
 counter is per-sensor and lifetime-of-process.
+
+### One-shot ERROR: Sensors system not rendering
+
+```
+events::Render has not fired after 2.0s of sim time — gz-sim's Sensors system
+has not started rendering. ... Add a rendering sensor (the example URDF's
+anchor_type defaults to a camera) ...
+```
+The world has no rendering sensor, so `gz-sim-sensors-system` never built the
+ogre2 scene this plugin attaches to. See
+[World requirements](#world-requirements-read-this-if-no-point-cloud-is-published).
 
 ### `/imu` covariance
 

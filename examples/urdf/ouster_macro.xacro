@@ -8,11 +8,19 @@
   directly in the ogre2 scene. It only needs two things from the model:
 
     1. A gz <sensor> entity whose NAME equals the last path segment of
-       <sensor_name> (e.g. "lidar0"). The plugin looks that entity up purely to
-       read its world pose (the ray-cast origin). Because this anchor is only a
-       pose source, we default it to a cheap NON-rendering sensor type
-       (altimeter) so Gazebo does not schedule a second, redundant ray cast.
-       Set anchor_type:=gpu_lidar if you also want a native gz point cloud.
+       <sensor_name> (e.g. "lidar0"). The plugin looks that entity up to read
+       its world pose (the ray-cast origin).
+
+       IMPORTANT: this anchor MUST be a *rendering* sensor type (default
+       gpu_lidar). On Gazebo Harmonic the gz-sim-sensors-system only builds the
+       ogre2 scene and emits the events::Render event — which is what drives
+       this plugin's GpuRays — when the world contains at least one rendering
+       sensor (camera / gpu_lidar / depth_camera ...). With only non-rendering
+       sensors present (altimeter, imu) the Sensors system never starts
+       rendering and the plugin produces no point cloud. Only set
+       anchor_type:=altimeter if the world already contains another rendering
+       sensor to bootstrap the scene. The gpu_lidar anchor also publishes a
+       native gz scan on ${ns}/gz_native_scan.
 
     2. (Optional) A real <sensor type="imu"> whose name contains "imu", on the
        same model. The plugin reads the AngularVelocity / LinearAcceleration
@@ -31,7 +39,7 @@
             xyz:='0 0 0' rpy:='0 0 0'
             lidar_hz:=10.0
             enable_imu:=false imu_hz:=100.0
-            anchor_type:=altimeter">
+            anchor_type:=camera">
 
     <!-- ROS topic prefix == <sensor_name>. Its last segment must equal `name`
          so the plugin's gz-sensor lookup succeeds. -->
@@ -61,8 +69,15 @@
       <origin xyz="${xyz}" rpy="${rpy}"/>
     </joint>
 
-    <!-- Pose-anchor sensor. NAME must equal `name` (plugin lookup). Default
-         altimeter = non-rendering; switch to gpu_lidar for a native gz cloud. -->
+    <!-- Pose-anchor sensor. NAME must equal `name` (plugin lookup). It must be a
+         *rendering* sensor so gz-sim-sensors-system builds the ogre2 scene and
+         emits events::Render, which is what drives this plugin's own GpuRays.
+         Default `camera` is the cheapest renderer and is NOT a lidar, so it
+         bootstraps rendering + supplies the pose without adding a second lidar
+         source. `gpu_lidar` also works but additionally emits a native gz scan
+         on <ns>/gz_native_scan (a second lidar raycast). `altimeter` is
+         non-rendering — only valid if the world already has another
+         camera/gpu_lidar. -->
     <gazebo reference="${name}/lidar_frame">
       <sensor name="${name}" type="${anchor_type}">
         <pose>0 0 0 0 0 0</pose>
@@ -71,6 +86,16 @@
         <visualize>false</visualize>
         <xacro:if value="${anchor_type == 'altimeter'}">
           <altimeter/>
+        </xacro:if>
+        <!-- Default: a tiny camera purely to start the render loop (its image
+             is unused / not bridged). Not a lidar → no second scan. -->
+        <xacro:if value="${anchor_type == 'camera'}">
+          <topic>${ns}/render_anchor</topic>
+          <camera>
+            <horizontal_fov>1.0</horizontal_fov>
+            <image><width>16</width><height>16</height></image>
+            <clip><near>0.1</near><far>100.0</far></clip>
+          </camera>
         </xacro:if>
         <xacro:if value="${anchor_type == 'gpu_lidar'}">
           <topic>${ns}/gz_native_scan</topic>

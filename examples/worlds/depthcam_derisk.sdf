@@ -1,0 +1,113 @@
+<?xml version="1.0"?>
+<!--
+  PHASE-0 DE-RISK world (not part of the normal examples).
+
+  Purpose: determine whether a *stock* gz `depth_camera` — a normal single-pass
+  perspective render, NOT the GpuRays cubemap — duplicates objects on this
+  machine. The Ouster plugin's planned route-around (DepthCamera stitch) is only
+  viable if this renders cleanly. If the depth image / cloud here shows each
+  object ONCE, the cubemap is the culprit and the stitch will work. If it also
+  shows ~4x copies, gz rendering is broken below the cubemap and we use the
+  per-ray raycast path instead.
+
+  Run with examples/launch/depthcam_derisk.launch.py.
+-->
+<sdf version="1.9">
+  <world name="depthcam_derisk">
+
+    <physics name="default" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.8 0.9 1</background>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.5 0.3 -1</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- The same cylinder the plugin showed ghosted, plus two flanking boxes,
+         all ~8 m ahead in +Y so a single forward-facing camera frames them. -->
+    <model name="cyl_mid">
+      <static>true</static>
+      <pose>0 8 1 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry>
+          <material><diffuse>0.2 0.8 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="box_left">
+      <static>true</static>
+      <pose>-3 8 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1 1 1.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1 1 1.5</size></box></geometry>
+          <material><diffuse>0.8 0.2 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="box_right">
+      <static>true</static>
+      <pose>3 8 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1 1 1.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1 1 1.5</size></box></geometry>
+          <material><diffuse>0.2 0.2 0.8 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Stock gz depth_camera at the origin, 1 m up, yawed +90 deg to face +Y
+         (toward the obstacles). Publishes a float depth image on `depthcam` and
+         a point cloud on `depthcam/points`. NOTE: a depth_camera renders one
+         perspective pass — it does NOT use the GpuRays cubemap. -->
+    <model name="depthcam_derisk">
+      <static>true</static>
+      <pose>0 0 1 0 0 1.5708</pose>
+      <link name="link">
+        <sensor name="depthcam" type="depth_camera">
+          <always_on>1</always_on>
+          <update_rate>10</update_rate>
+          <visualize>true</visualize>
+          <topic>depthcam</topic>
+          <camera>
+            <horizontal_fov>1.4</horizontal_fov>
+            <image><width>512</width><height>512</height><format>R_FLOAT32</format></image>
+            <clip><near>0.1</near><far>120.0</far></clip>
+          </camera>
+        </sensor>
+      </link>
+    </model>
+
+  </world>
+</sdf>

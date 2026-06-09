@@ -215,15 +215,12 @@ private:
     // drain in time and the older frame was overwritten unobserved.
     std::atomic<uint64_t> dropped_frames_{0};
 
-    // ── TEMP DEBUG counters (remove once lidar_packets path verified) ─────────
-    // render_tick_  : times OnRender's render branch called Render()/PostRender()
-    // frame_cb_count_: times onNewFrame fired (any args)
-    // encode_count_ : times PostUpdate handed a frame to encodeAndPublish
-    std::atomic<uint64_t> render_tick_{0};
-    std::atomic<uint64_t> frame_cb_count_{0};
-    std::atomic<uint64_t> encode_count_{0};
-    std::atomic<uint64_t> onrender_entries_{0};  // OnRender calls (pre-throttle)
-    std::atomic<uint64_t> postupdate_calls_{0};   // PostUpdate calls (post-pause-gate)
+    // Counts OnRender() entries, i.e. how many times events::Render has fired.
+    // Stays 0 when the Sensors system never starts rendering (no rendering
+    // sensor in the world); PostUpdate() uses it to emit a one-shot diagnostic.
+    std::atomic<uint64_t> onrender_entries_{0};
+    // Set once the above diagnostic has been logged, so it fires only once.
+    bool no_render_warned_{false};
 
     // ── ROS 2 node & publishers ──────────────────────────────────────────────
     // publish_mtx_ serialises all publish() calls across threads (render,
@@ -280,7 +277,16 @@ private:
     // onNewFrame. Both render-thread entry points lock this for the
     // duration of their work, and the dtor takes it once after disconnect()
     // to flush any in-flight callback before tearing down the rest.
-    mutable std::mutex render_busy_mtx_;
+    //
+    // MUST be recursive: gz-rendering signals the NewGpuRaysFrame event
+    // synchronously from inside Ogre2GpuRays::PostRender(), so onNewFrame()
+    // runs nested on the SAME render thread, *inside* OnRender() which already
+    // holds this lock across its gpu_rays_->PostRender() call. A plain
+    // std::mutex self-deadlocks the render thread there (which in turn stalls
+    // the gz-sim Sensors render loop and freezes /clock). The dtor still takes
+    // the lock from a different thread, so it blocks until the render thread
+    // has fully unwound both frames — the barrier guarantee is preserved.
+    mutable std::recursive_mutex render_busy_mtx_;
 
     // ── IMU timing ───────────────────────────────────────────────────────────
     std::chrono::nanoseconds last_imu_sim_time_{0};

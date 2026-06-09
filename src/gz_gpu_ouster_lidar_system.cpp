@@ -39,6 +39,7 @@
 
 #include <ouster/metadata.h>
 #include <ouster/impl/packet_writer.h>
+#include <ouster/lidar_scan.h>
 #include <ouster/types.h>
 
 #include <rclcpp/rclcpp.hpp>
@@ -88,7 +89,7 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     shutdown_.store(true, std::memory_order_release);
     render_conn_.reset();
     frame_conn_.reset();
-    { std::lock_guard<std::mutex> lk(render_busy_mtx_); }
+    { std::lock_guard<std::recursive_mutex> lk(render_busy_mtx_); }
     DestroyGpuRays();
 
     drain_cv_.notify_all();
@@ -458,6 +459,48 @@ bool GzGpuOusterLidarSystem::loadMetadata()
         beam_alt_angles_ = info.beam_altitude_angles;
         beam_az_offsets_ = info.beam_azimuth_angles;
         beam_origin_mm_  = info.lidar_origin_to_beam_origin_mm;
+
+        // Ensure the published firmware exposes the WINDOW channel field.
+        //
+        // The Ouster SDK only materialises WINDOW in the LidarScan when the
+        // reported firmware is >= v3.2.0 (get_field_types() strips it below
+        // that — see lidar_scan.cpp), and the version is read from image_rev,
+        // not build_rev (SensorInfo::get_version()). The bundled ouster-ros
+        // point-cloud processor, however, lists WINDOW unconditionally in its
+        // per-profile field table and does a strict scan.field(WINDOW) lookup.
+        // Metadata that reports older firmware (captured v2.4.0 dumps) or an
+        // unparseable string (the "sim" placeholder) therefore makes os_cloud
+        // drop WINDOW and then abort with
+        // "Field 'WINDOW' not found in LidarScan".
+        //
+        // The simulated packets use the modern profile byte layout regardless
+        // of the firmware string, so advertise a firmware that keeps the field
+        // present and re-serialise the metadata we publish so every consumer
+        // stays consistent. pw_ was already built from the parsed info above
+        // and is unaffected (firmware does not change the packet layout).
+        //
+        // Only profiles whose modern (>= v3.2.0) layout actually carries WINDOW
+        // are bumped — LEGACY-profile sims are intentionally pre-3.2 and have no
+        // WINDOW field, so they are left untouched.
+        const ouster::sdk::core::Version kWindowFieldMinFw{3, 2, 0};
+        const auto modern_fields =
+            ouster::sdk::core::get_field_types(info.format, kWindowFieldMinFw);
+        const bool profile_has_window = std::any_of(
+            modern_fields.begin(), modern_fields.end(),
+            [](const ouster::sdk::core::FieldType & ft) {
+                return ft.name == ouster::sdk::core::ChanField::WINDOW;
+            });
+        if (profile_has_window && info.get_version() < kWindowFieldMinFw) {
+            const std::string reported =
+                info.image_rev.empty() ? info.fw_rev : info.image_rev;
+            RCLCPP_INFO(kLogger,
+                "Metadata firmware '%s' predates the WINDOW field (< v3.2.0); "
+                "advertising v3.2.0 so os_cloud retains the WINDOW channel.",
+                reported.c_str());
+            info.image_rev = "ousteros-image-prod-aries-v3.2.0";
+            info.fw_rev    = "v3.2.0";
+            metadata_str_  = info.to_json_string();
+        }
     } catch (const std::exception & e) {
         RCLCPP_ERROR(kLogger, "Failed to parse metadata: %s", e.what());
         return false;
@@ -699,12 +742,13 @@ void GzGpuOusterLidarSystem::OnRender()
     // entire render-thread callback so the dtor can't race us into freed
     // members. shutdown_ check is the cheap early-out for the case where
     // the dtor set the flag and is now waiting on this same lock.
-    std::lock_guard<std::mutex> render_lk(render_busy_mtx_);
+    std::lock_guard<std::recursive_mutex> render_lk(render_busy_mtx_);
     if (shutdown_.load(std::memory_order_acquire)) return;
 
-    // TEMP DEBUG: count every OnRender entry (before any throttle/return) so we
-    // can tell "events::Render stopped firing" from "render branch throttled".
-    onrender_entries_.fetch_add(1);
+    // Record that events::Render fired at least once. PostUpdate() reads this
+    // to emit a one-shot diagnostic when the Sensors system never starts
+    // rendering (no rendering sensor in the world); see PostUpdate().
+    onrender_entries_.fetch_add(1, std::memory_order_relaxed);
 
     if (sensor_initialized_.load(std::memory_order_acquire)) {
         // Republish metadata periodically until os_cloud confirms receipt.
@@ -759,30 +803,8 @@ void GzGpuOusterLidarSystem::OnRender()
                 std::lock_guard<std::mutex> lk(pose_mtx_);
                 gpu_rays_->SetWorldPose(cached_pose_);
             }
-            // TEMP DEBUG: prove the render branch runs, and surface any
-            // exception out of Ogre2GpuRays::Render/PostRender (EGL/ogre2
-            // failures otherwise unwind silently through the event emit).
-            const uint64_t tick = render_tick_.fetch_add(1) + 1;
-            try {
-                gpu_rays_->Render();
-                gpu_rays_->PostRender();
-            } catch (const std::exception & e) {
-                RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 2000,
-                    "TEMP DEBUG: GpuRays Render/PostRender threw: %s", e.what());
-            } catch (...) {
-                RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 2000,
-                    "TEMP DEBUG: GpuRays Render/PostRender threw unknown exception");
-            }
-            if (tick <= 3 || tick % 50 == 0) {
-                RCLCPP_INFO(kLogger,
-                    "TEMP DEBUG: render tick=%lu (frame_cb=%lu encode=%lu)",
-                    static_cast<unsigned long>(tick),
-                    static_cast<unsigned long>(frame_cb_count_.load()),
-                    static_cast<unsigned long>(encode_count_.load()));
-            }
-        } else {
-            RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 2000,
-                "TEMP DEBUG: render branch reached but gpu_rays_ is null");
+            gpu_rays_->Render();
+            gpu_rays_->PostRender();
         }
         return;
     }
@@ -861,22 +883,34 @@ void GzGpuOusterLidarSystem::PostUpdate(
     const ::gz::sim::UpdateInfo & info,
     const ::gz::sim::EntityComponentManager & ecm)
 {
-    // TEMP DEBUG: count PostUpdate calls BEFORE the pause gate, and report
-    // pause state + all counters every ~5 s worth of calls (call-count based,
-    // independent of any clock so a frozen sim-time can't suppress it).
-    const uint64_t pu = postupdate_calls_.fetch_add(1) + 1;
-    if (pu == 1 || pu % 300 == 0) {
-        const double sim_s =
+    // ── Silent-failure guard ─────────────────────────────────────────────────
+    // The plugin attaches its GpuRays to the ogre2 scene owned by
+    // gz-sim-sensors-system and is driven by the events::Render event. On
+    // Gazebo Harmonic the Sensors system only initialises rendering (and emits
+    // events::Render) when the world contains at least one *rendering* sensor
+    // (camera / gpu_lidar / depth_camera ...). With only non-rendering sensors
+    // (altimeter, imu) present, OnRender() never fires and no point cloud is
+    // ever produced. Detect that and tell the user exactly what to fix, once.
+    if (!no_render_warned_ &&
+        !sensor_initialized_.load(std::memory_order_acquire) &&
+        onrender_entries_.load(std::memory_order_relaxed) == 0)
+    {
+        constexpr int64_t kRenderWaitNs = 2'000'000'000;  // 2 s of sim time
+        const int64_t sim_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
-                info.simTime).count() / 1e9;
-        RCLCPP_INFO(kLogger,
-            "TEMP DEBUG: PostUpdate #%lu paused=%d simTime=%.3f "
-            "onrender_entries=%lu render_tick=%lu frame_cb=%lu encode=%lu",
-            static_cast<unsigned long>(pu), info.paused ? 1 : 0, sim_s,
-            static_cast<unsigned long>(onrender_entries_.load()),
-            static_cast<unsigned long>(render_tick_.load()),
-            static_cast<unsigned long>(frame_cb_count_.load()),
-            static_cast<unsigned long>(encode_count_.load()));
+                info.simTime).count();
+        if (sim_ns > kRenderWaitNs) {
+            no_render_warned_ = true;
+            RCLCPP_ERROR(kLogger,
+                "events::Render has not fired after %.1fs of sim time — gz-sim's "
+                "Sensors system has not started rendering. This plugin attaches "
+                "its GpuRays to the ogre2 scene owned by gz-sim-sensors-system, "
+                "which only initialises rendering when the world contains at "
+                "least one rendering sensor (camera or gpu_lidar). Add a "
+                "rendering sensor (the example URDF's anchor_type defaults to a "
+                "camera) or no point cloud will be produced.",
+                static_cast<double>(sim_ns) / 1e9);
+        }
     }
 
     if (info.paused) {
@@ -1000,18 +1034,8 @@ void GzGpuOusterLidarSystem::PostUpdate(
         const auto stamp_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 info.simTime).count();
-        encode_count_.fetch_add(1);  // TEMP DEBUG
         encodeAndPublish(stamp_ns, process_buf_.data(),
                          local_H, local_W, local_chan);
-    } else if (ros_node_) {
-        // TEMP DEBUG: heartbeat while no GpuRays frame has been drained yet.
-        RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
-            "TEMP DEBUG: no GpuRays frame to drain "
-            "(render_tick=%lu frame_cb=%lu encode=%lu sensor_init=%d)",
-            static_cast<unsigned long>(render_tick_.load()),
-            static_cast<unsigned long>(frame_cb_count_.load()),
-            static_cast<unsigned long>(encode_count_.load()),
-            sensor_initialized_.load() ? 1 : 0);
     }
 
     // ── Publish IMU at configured rate ──────────────────────────────────────
@@ -1027,22 +1051,14 @@ void GzGpuOusterLidarSystem::onNewFrame(
     unsigned int height, unsigned int channels,
     const std::string & /*format*/)
 {
-    // See render_busy_mtx_ comment in the header. Same shutdown barrier as
-    // OnRender — both render-thread entry points must hold this so the dtor
-    // can guarantee no in-flight callback is touching frame_mtx_/buffers
-    // when teardown begins.
-    std::lock_guard<std::mutex> render_lk(render_busy_mtx_);
+    // See render_busy_mtx_ comment in the header. This callback is signaled
+    // synchronously by gpu_rays_->PostRender(), so it runs nested on the render
+    // thread inside OnRender() which already holds this lock — hence the lock
+    // is recursive. Re-taking it here keeps the dtor's shutdown barrier honest
+    // for the (defensive) case of an out-of-band signal, and is a no-op cost
+    // in the normal nested path.
+    std::lock_guard<std::recursive_mutex> render_lk(render_busy_mtx_);
     if (shutdown_.load(std::memory_order_acquire)) return;
-
-    // TEMP DEBUG: prove the GpuRays frame callback fires at all, and with
-    // what dimensions, before any guard below can silently drop it.
-    const uint64_t cb = frame_cb_count_.fetch_add(1) + 1;
-    if ((cb <= 3 || cb % 50 == 0) && ros_node_) {
-        RCLCPP_INFO(kLogger,
-            "TEMP DEBUG: onNewFrame #%lu w=%u h=%u c=%u data=%p (expect w=%d h>=%d)",
-            static_cast<unsigned long>(cb), width, height, channels,
-            static_cast<const void *>(data), W_, H_);
-    }
 
     // Fast path: just memcpy the raw GpuRays buffer into a staging area.
     // Bilinear resampling is done later on the GPU (CUDA) or CPU (fallback)
@@ -1067,6 +1083,15 @@ void GzGpuOusterLidarSystem::onNewFrame(
         }
         return;
     }
+
+    // One-shot: report the actual raw GpuRays frame geometry. The resample
+    // assumes width == W_ and treats `height` as the oversampled vertical count;
+    // if OGRE2 hands back a height other than the requested SetVerticalRayCount,
+    // the vertical mapping silently scales. Logged once to aid diagnosis.
+    RCLCPP_INFO_ONCE(kLogger,
+        "%s: raw GpuRays frame %ux%ux%u (requested vertical_rays=%d, beams H=%d, W=%d)",
+        sensor_name_.c_str(), width, height, channels,
+        std::max(H_ * 4, 256), H_, W_);
 
     const size_t n = static_cast<size_t>(width) * height * channels;
 

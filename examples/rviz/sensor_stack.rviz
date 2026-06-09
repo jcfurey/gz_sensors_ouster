@@ -35,6 +35,28 @@ Visualization Manager:
         Value: /sensor/lidar/rear/range_image
         Depth: 5
         Reliability Policy: Reliable
+    - Class: rviz_default_plugins/PointCloud2
+      Name: FrontCloud
+      Enabled: true
+      Topic:
+        Value: /sensor/lidar/front/points
+        Depth: 5
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: Intensity
+      Channel Name: intensity
+    - Class: rviz_default_plugins/PointCloud2
+      Name: RearCloud
+      Enabled: true
+      Topic:
+        Value: /sensor/lidar/rear/points
+        Depth: 5
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: Intensity
+      Channel Name: intensity
   Tools:
     - Class: rviz_default_plugins/MoveCamera
   Views:
