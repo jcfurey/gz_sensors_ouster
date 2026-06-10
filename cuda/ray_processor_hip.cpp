@@ -59,6 +59,9 @@ __global__ void resampleKernelHip(
     const float * __restrict__ beam_alt,
     const float * __restrict__ beam_az,
     float * __restrict__       depth_out,
+    // cppcheck-suppress passedByValueCallback ; GPU kernel arguments must be
+    // passed by value — the device cannot dereference a host reference. (~0.8
+    // KB, well inside the 4 KB kernel-parameter limit.)
     ResampleParams rp)
 {
     const int n = rp.H * rp.W;
