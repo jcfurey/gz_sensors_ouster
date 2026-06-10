@@ -113,17 +113,25 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
         const double cx = static_cast<double>(W) / 2.0;
 
         // Vertical: use actual beam altitude angles for correct VFOV.
-        double fy, cy;
+        // Generic defaults first; overridden when the metadata carries a
+        // usable beam span. Degenerate metadata (all beams at a single
+        // altitude) would otherwise divide by zero and emit inf/NaN in K.
+        double fy = static_cast<double>(H) / (2.0 * M_PI);
+        double cy = static_cast<double>(H) / 2.0;
         if (cfg_.beam_alt_angles && cfg_.beam_alt_angles->size() >= 2) {
             auto [min_it, max_it] = std::minmax_element(
                 cfg_.beam_alt_angles->begin(), cfg_.beam_alt_angles->end());
             const double vfov_rad = (*max_it - *min_it) * M_PI / 180.0;
-            fy = static_cast<double>(H) / vfov_rad;
-            const double mean_alt_rad = 0.5 * (*max_it + *min_it) * M_PI / 180.0;
-            cy = static_cast<double>(H) / 2.0 - mean_alt_rad * fy;
-        } else {
-            fy = static_cast<double>(H) / (2.0 * M_PI);
-            cy = static_cast<double>(H) / 2.0;
+            if (vfov_rad > 1.0e-6) {
+                fy = static_cast<double>(H) / vfov_rad;
+                const double mean_alt_rad =
+                    0.5 * (*max_it + *min_it) * M_PI / 180.0;
+                cy = static_cast<double>(H) / 2.0 - mean_alt_rad * fy;
+            } else {
+                RCLCPP_WARN(kLogger,
+                    "beam altitude span is ~0 deg; CameraInfo fy falls back "
+                    "to the generic default");
+            }
         }
 
         camera_info_msg_.header.frame_id = cfg_.image_frame_id;
