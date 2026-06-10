@@ -95,6 +95,10 @@ driven by that system's `events::Render` event. Therefore the world must:
      <render_engine>ogre2</render_engine>
    </plugin>
    ```
+> **Exception:** with `<ray_mode>raycast</ray_mode>` neither requirement
+> applies — the raycast mode never touches the renderer. The two points
+> below concern the default `panels` mode only.
+
 2. Contain **at least one rendering sensor** (`camera`, `gpu_lidar`,
    `depth_camera`, …). On Gazebo Harmonic the Sensors system only initialises
    rendering — building the scene and emitting `events::Render` — once such a
@@ -382,7 +386,8 @@ All noise model parameters can be changed at runtime via
 | `lidar_hz` | 10.0 | > 0 | Scan rate in Hz. |
 | `max_range` | *auto* | >= 1 | Max sensing range in metres. Auto-derived from metadata `prod_line` if not set (OS0: 50, OS1: 120, OS2: 240). Also sets the GPU far clip plane. |
 | `visibility_mask` | 4294967295 | 0 to 4294967295 | Gazebo render visibility mask applied to the panel cameras. Use to include or exclude visuals from raycasting. |
-| `panel_oversample` | 2.0 | 1 to 4 | Panel angular resolution as a multiple of the sensor's finest angular resolution. Higher = sharper edges, more VRAM and render time. |
+| `ray_mode` | `panels` | `panels` \| `raycast` | `panels` renders a perspective depth-panel rig on the GPU and resamples each beam from it. `raycast` casts every beam exactly (calibrated direction, true beam-origin parallax) against an ECM scene mirror — zero interpolation error, `laser_retro` drives reflectivity, no rendering involved (no anchor-sensor requirement). CPU/OpenMP; mirrors box/sphere/cylinder/plane/mesh visuals. |
+| `panel_oversample` | 2.0 | 1 to 4 | Panels mode only. Panel angular resolution as a multiple of the sensor's finest angular resolution. Higher = sharper edges, more VRAM and render time. |
 | `panel_sampling` | `bilinear` | `bilinear` \| `nearest` | `bilinear` interpolates the 4 neighbouring rendered rays (smooth surfaces, but silhouettes blend fore/background range). `nearest` takes the single closest rendered ray — a true raycast with direction quantised to the pixel grid (≤ 1/(2·oversample) of the beam spacing) and no range blending at depth edges. |
 
 ### QoS overrides
@@ -557,6 +562,7 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
 | `test_imu_noise` | IMU white-noise variance vs. density²/dt, bias drift growth, RNG-draw gating, determinism under fixed seed |
 | `test_dispatch` | Backend selection: `GZ_OUSTER_BACKEND` override, auto fallback to CPU, `backendName()`/`usesCpuFallback()`, and `processRaw()` end-to-end through the `RayProcessor` wrapper |
+| `test_raycast` | Full raycast mode: sphere/box/cylinder/plane/mesh intersectors, BVH vs brute-force equivalence on a random triangle soup, beam-origin parallax (XYZ-LUT invariant), retro of nearest hit, near-clip behaviour, zero-error uniform shell, `processDepth` through the dispatcher |
 | `test_lifecycle` | Plugin construct + destruct without ever calling `Configure` (catches member-init regressions; build-time vtable check against the vendored gz-sim) |
 
 These tests run on the **CPU backend** — they exercise the shared math
@@ -667,6 +673,17 @@ noise params to 0 falls back to the ouster_ros default literals
    one device stream per sensor; the CPU backend uses OpenMP for
    resample and runs noise sequentially.
 6. **drainThreadFunc()** publishes packets with rolling-shutter inter-packet timing
+
+With `<ray_mode>raycast</ray_mode>` steps 2-3 are replaced by an ECM scene
+mirror (visual geometries extracted once, world poses refreshed per scan,
+spawn/despawn triggers a rebuild) and a worker thread that casts every
+beam exactly against it (`cuda/raycast_scene.{hpp,cpp}`: analytic
+primitives + per-mesh triangle BVH, OpenMP). The worker output is exact
+per-beam ranges plus `laser_retro` per hit, which skips the resample
+kernel and enters the pipeline at the noise stage
+(`RayProcessor::processDepth`). The ray origins sit on the beam-origin
+circle and the reported range follows the Ouster XYZ-LUT convention, so
+consumers reconstruct the true hit points exactly.
 
 ## License
 

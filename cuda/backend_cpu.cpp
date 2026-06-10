@@ -34,6 +34,20 @@ public:
                       pp, seed_);
     }
 
+    void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) override
+    {
+        processCpu(depth_host, retro_host,
+                   range_out, signal_out, reflectivity_out, nearir_out,
+                   pp, seed_);
+    }
+
     const char * name() const override { return "cpu"; }
 
 private:

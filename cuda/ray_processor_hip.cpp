@@ -192,6 +192,7 @@ public:
     {
         auto maybeFree = [](void * p) { if (p) hipFree(p); };
         maybeFree(d_depth_);
+        maybeFree(d_retro_);
         maybeFree(d_range_);
         maybeFree(d_signal_);
         maybeFree(d_refl_);
@@ -241,6 +242,49 @@ public:
         hipLaunchKernelGGL(rayProcessKernelHip, dim3(grid_r), dim3(kBlock), 0, stream_,
             static_cast<const float *>(d_depth_),
             static_cast<const float *>(nullptr),
+            static_cast<uint32_t *>(d_range_),
+            static_cast<uint16_t *>(d_signal_),
+            static_cast<uint8_t *>(d_refl_),
+            static_cast<uint16_t *>(d_nearir_),
+            pp.H, pp.W,
+            pp.base_signal, pp.base_reflectivity,
+            pp.range_noise_min_std, pp.range_noise_max_std, pp.max_range,
+            pp.signal_noise_scale, pp.nearir_noise_scale,
+            pp.dropout_rate_close, pp.dropout_rate_far,
+            pp.edge_discon_threshold,
+            need_rand ? static_cast<hiprandState *>(d_rand_states_) : nullptr);
+        HIP_CHECK(hipGetLastError());
+
+        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, out_n);
+        HIP_CHECK(hipStreamSynchronize(stream_));
+    }
+
+    void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) override
+    {
+        const int out_n = pp.H * pp.W;
+        ensureBuffers(out_n);
+
+        const bool need_rand = noiseEnabled(pp);
+        if (need_rand) ensureRandStates(out_n);
+
+        h2d(d_depth_, depth_host, static_cast<size_t>(out_n) * sizeof(float));
+        if (retro_host) {
+            ensureRetroBuffer(out_n);
+            h2d(d_retro_, retro_host,
+                static_cast<size_t>(out_n) * sizeof(float));
+        }
+
+        const int grid = (out_n + kBlock - 1) / kBlock;
+        hipLaunchKernelGGL(rayProcessKernelHip, dim3(grid), dim3(kBlock), 0, stream_,
+            static_cast<const float *>(d_depth_),
+            static_cast<const float *>(retro_host ? d_retro_ : nullptr),
             static_cast<uint32_t *>(d_range_),
             static_cast<uint16_t *>(d_signal_),
             static_cast<uint8_t *>(d_refl_),
@@ -325,6 +369,15 @@ private:
         }
     }
 
+    // Retro device buffer is only used by processDepth (raycast mode);
+    // allocated lazily so the panels path pays nothing for it.
+    void ensureRetroBuffer(int n)
+    {
+        if (n <= retro_n_) return;
+        allocDev(d_retro_, static_cast<size_t>(n) * sizeof(float));
+        retro_n_ = n;
+    }
+
     void ensureRandStates(int n)
     {
         if (n <= rand_n_) return;
@@ -360,6 +413,7 @@ private:
     bool integrated_ = false;
 
     void * d_depth_ = nullptr;
+    void * d_retro_ = nullptr;   // processDepth only (lazy)
     void * d_range_ = nullptr;
     void * d_signal_ = nullptr;
     void * d_refl_ = nullptr;
@@ -369,6 +423,7 @@ private:
     void * d_beam_alt_ = nullptr;
     void * d_beam_az_ = nullptr;
     int buf_n_ = 0;
+    int retro_n_ = 0;
     int rand_n_ = 0;
     int raw_buf_n_ = 0;
     int beam_buf_n_ = 0;

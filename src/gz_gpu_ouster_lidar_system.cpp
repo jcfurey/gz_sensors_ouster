@@ -30,6 +30,13 @@
 #include <gz/sim/components/World.hh>
 #include <gz/sim/components/AngularVelocity.hh>
 #include <gz/sim/components/LinearAcceleration.hh>
+#include <gz/sim/components/Geometry.hh>
+#include <gz/sim/components/LaserRetro.hh>
+#include <gz/sim/components/Visual.hh>
+#include <gz/common/Mesh.hh>
+#include <gz/common/MeshManager.hh>
+#include <gz/common/SubMesh.hh>
+#include <gz/math/Matrix3.hh>
 #include <gz/math/Pose3.hh>
 #include <gz/rendering/DepthCamera.hh>
 #include <gz/rendering/RenderEngine.hh>
@@ -99,6 +106,10 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     if (drain_thread_.joinable()) {
         drain_thread_.join();
     }
+    rc_cv_.notify_all();
+    if (rc_thread_.joinable()) {
+        rc_thread_.join();
+    }
     if (ros_executor_) {
         ros_executor_->cancel();
     }
@@ -150,6 +161,9 @@ void GzGpuOusterLidarSystem::Configure(
     }
     if (sdf->HasElement("panel_sampling")) {
         panel_sampling_ = sdf->Get<std::string>("panel_sampling");
+    }
+    if (sdf->HasElement("ray_mode")) {
+        ray_mode_ = sdf->Get<std::string>("ray_mode");
     }
     if (sdf->HasElement("image_qos")) {
         image_qos_ = sdf->Get<std::string>("image_qos");
@@ -233,6 +247,12 @@ void GzGpuOusterLidarSystem::Configure(
     gyro_bias_walk_        = std::max(0.0, gyro_bias_walk_);
     accel_bias_walk_       = std::max(0.0, accel_bias_walk_);
     panel_oversample_      = std::clamp(panel_oversample_, 1.0, 4.0);
+    if (ray_mode_ != "panels" && ray_mode_ != "raycast") {
+        RCLCPP_WARN(kLogger,
+            "Unknown ray_mode='%s'; expected panels|raycast. "
+            "Defaulting to panels.", ray_mode_.c_str());
+        ray_mode_ = "panels";
+    }
     if (panel_sampling_ != "bilinear" && panel_sampling_ != "nearest") {
         RCLCPP_WARN(kLogger,
             "Unknown panel_sampling='%s'; expected bilinear|nearest. "
@@ -316,9 +336,11 @@ void GzGpuOusterLidarSystem::Configure(
     // Pad beam_az_f_ to H if shorter (some metadata omits azimuth offsets).
     beam_az_f_.resize(static_cast<size_t>(H_), 0.0f);
 
-    // ── Build the panel rig from the beam geometry ───────────────────────────
+    // ── Build the panel rig from the beam geometry (panels mode only) ───────
     // Cylindrical sectors for OS0/1/2; pitched sectors + zenith cap for the
     // hemispherical OSDome. min_alt_/max_alt_ already carry kBeamMarginDeg.
+    // The raycast mode needs no rig: beams are cast exactly, any altitude.
+    if (ray_mode_ == "panels") {
     layout_ = buildOusterPanelLayout(
         min_alt_, max_alt_, H_, W_, panel_oversample_);
     if (layout_.n_panels == 0) {
@@ -359,6 +381,7 @@ void GzGpuOusterLidarSystem::Configure(
             panel_sampling_.c_str(),
             layout_.rp.raw_n * sizeof(float) / 1048576.0, dims.c_str());
     }
+    }  // ray_mode_ == "panels"
 
     // Derive the Gazebo sensor entity name for pose tracking.
     // sensor_name_ is e.g. "/sensor/lidar/lidar0" → extract "lidar0".
@@ -396,10 +419,14 @@ void GzGpuOusterLidarSystem::Configure(
 
     // Connect to the rendering-thread Render event (fires after scene->PreRender()
     // at Sensors.cc:496) so that panel-rig initialisation and Render() happen on
-    // the correct (EGL) thread with the scene already set up.
+    // the correct (EGL) thread with the scene already set up. The raycast
+    // mode never touches the renderer, so it skips the event entirely (and
+    // with it the world's rendering-sensor requirement).
     event_mgr_ = &event_mgr;
-    render_conn_ = event_mgr.Connect<::gz::sim::events::Render>(
-        std::bind(&GzGpuOusterLidarSystem::OnRender, this));
+    if (ray_mode_ == "panels") {
+        render_conn_ = event_mgr.Connect<::gz::sim::events::Render>(
+            std::bind(&GzGpuOusterLidarSystem::OnRender, this));
+    }
 
     RCLCPP_INFO(kLogger,
         "Configured: H=%d W=%d cpp=%d sensor_name=%s gz_sensor=%s hz=%.1f"
@@ -411,6 +438,16 @@ void GzGpuOusterLidarSystem::Configure(
     if (imu_enabled_) {
         RCLCPP_INFO(kLogger, "  IMU: sensor=%s hz=%.1f publish_imu_msg=%s",
             imu_name_.c_str(), imu_hz_, publish_imu_msg_ ? "true" : "false");
+    }
+
+    if (ray_mode_ == "raycast") {
+        RCLCPP_INFO(kLogger,
+            "Full raycast mode: exact per-beam casting against the ECM scene "
+            "mirror (no rendering; laser_retro drives reflectivity).");
+        rc_thread_ = std::thread(
+            &GzGpuOusterLidarSystem::raycastThreadFunc, this);
+        // Nothing render-side to initialise — unblock PostUpdate immediately.
+        sensor_initialized_.store(true, std::memory_order_release);
     }
 
     // Start drain thread last — all state is fully initialised above.
@@ -987,7 +1024,7 @@ void GzGpuOusterLidarSystem::PostUpdate(
     // (camera / gpu_lidar / depth_camera ...). With only non-rendering sensors
     // (altimeter, imu) present, OnRender() never fires and no point cloud is
     // ever produced. Detect that and tell the user exactly what to fix, once.
-    if (!no_render_warned_ &&
+    if (ray_mode_ == "panels" && !no_render_warned_ &&
         !sensor_initialized_.load(std::memory_order_acquire) &&
         onrender_entries_.load(std::memory_order_relaxed) == 0)
     {
@@ -1106,6 +1143,11 @@ void GzGpuOusterLidarSystem::PostUpdate(
         cached_pose_ = worldPose;
     }
 
+    // ── Full raycast mode: mirror the scene and post a scan job ─────────────
+    if (ray_mode_ == "raycast" && lidar_frame_found_) {
+        raycastPostUpdate(info, ecm);
+    }
+
     // ── Process any pending frame ────────────────────────────────────────────
     // Sim-side of the triple buffer: under the lock just swap the
     // raw_frame_buf_ slot into our sim-only process_buf_. encodeAndPublish
@@ -1204,11 +1246,13 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     if (!pw_ || pkt_buf_.empty()) return;
     if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0 || cpp_ <= 0) return;
     if (!ray_processor_) return;
-    if (raw_n != layout_.rp.raw_n) {
+    const bool raycast = (ray_mode_ == "raycast");
+    const int expected_n = raycast ? 2 * H_ * W_ : layout_.rp.raw_n;
+    if (raw_n != expected_n) {
         if (ros_node_) {
             RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
-                "%s: raw frame size %d != rig size %d; dropping",
-                sensor_name_.c_str(), raw_n, layout_.rp.raw_n);
+                "%s: raw frame size %d != expected %d; dropping",
+                sensor_name_.c_str(), raw_n, expected_n);
         }
         return;
     }
@@ -1259,7 +1303,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
         // dispatched backend has settled on actual buffer sizes. Helps
         // diagnose multi-sensor OOMs — a dense sensor (4096×512) plus
         // curand state can easily exceed 100 MB of VRAM on its own.
-        const size_t raw_bytes  = static_cast<size_t>(rp.raw_n) * sizeof(float);
+        const size_t raw_bytes  = static_cast<size_t>(raw_n) * sizeof(float);
         const size_t channel_bytes =
             static_cast<size_t>(H_) * W_ *
             (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint16_t));
@@ -1280,16 +1324,30 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
             rand_bytes / 1048576.0);
         memory_logged_ = true;
     }
-    ray_processor_->processRaw(
-        raw_data,
-        beam_alt_f_.data(),
-        beam_az_f_.data(),
-        rp,
-        range_buf_.data(),
-        signal_buf_.data(),
-        reflectivity_buf_.data(),
-        nearir_buf_.data(),
-        pp);
+    if (raycast) {
+        // The worker already produced exact per-beam ranges (and laser_retro
+        // for the reflectivity/signal model) — only the noise/channel stage
+        // runs on the backend.
+        ray_processor_->processDepth(
+            raw_data,
+            raw_data + static_cast<size_t>(H_) * W_,
+            range_buf_.data(),
+            signal_buf_.data(),
+            reflectivity_buf_.data(),
+            nearir_buf_.data(),
+            pp);
+    } else {
+        ray_processor_->processRaw(
+            raw_data,
+            beam_alt_f_.data(),
+            beam_az_f_.data(),
+            rp,
+            range_buf_.data(),
+            signal_buf_.data(),
+            reflectivity_buf_.data(),
+            nearir_buf_.data(),
+            pp);
+    }
 
     // ── Build packets ────────────────────────────────────────────────────────
     const int n_packets = W_ / cpp_;
@@ -1655,6 +1713,286 @@ void GzGpuOusterLidarSystem::DestroyPanels()
     panel_cams_.clear();
     panel_quats_.clear();
     panel_filled_.clear();
+}
+
+// ── Full raycast mode ────────────────────────────────────────────────────────
+
+namespace {
+
+/// Row-major rotation + translation from a gz pose.
+void poseToRT(const ::gz::math::Pose3d & pose, float r[9], float t[3])
+{
+    const ::gz::math::Matrix3d m(pose.Rot());
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            r[3 * i + j] = static_cast<float>(m(i, j));
+        }
+    }
+    t[0] = static_cast<float>(pose.Pos().X());
+    t[1] = static_cast<float>(pose.Pos().Y());
+    t[2] = static_cast<float>(pose.Pos().Z());
+}
+
+/// Append a gz mesh (all TRIANGLES submeshes, scale baked in) to `md`.
+bool appendGzMesh(const ::gz::common::Mesh & mesh,
+                  const ::gz::math::Vector3d & scale, rc::MeshData & md)
+{
+    for (unsigned int si = 0; si < mesh.SubMeshCount(); ++si) {
+        auto sm = mesh.SubMeshByIndex(si).lock();
+        if (!sm) continue;
+        if (sm->SubMeshPrimitiveType() != ::gz::common::SubMesh::TRIANGLES) {
+            continue;
+        }
+        const int base = static_cast<int>(md.verts.size()) / 3;
+        for (unsigned int v = 0; v < sm->VertexCount(); ++v) {
+            const auto & p = sm->Vertex(v);
+            md.verts.push_back(static_cast<float>(p.X() * scale.X()));
+            md.verts.push_back(static_cast<float>(p.Y() * scale.Y()));
+            md.verts.push_back(static_cast<float>(p.Z() * scale.Z()));
+        }
+        for (unsigned int k = 0; k + 2 < sm->IndexCount(); k += 3) {
+            md.tris.push_back(base + static_cast<int>(sm->Index(k)));
+            md.tris.push_back(base + static_cast<int>(sm->Index(k + 1)));
+            md.tris.push_back(base + static_cast<int>(sm->Index(k + 2)));
+        }
+    }
+    return !md.tris.empty();
+}
+
+}  // namespace
+
+void GzGpuOusterLidarSystem::rebuildRaycastScene(
+    const ::gz::sim::EntityComponentManager & ecm, size_t visual_count)
+{
+    auto scene = std::make_shared<rc::Scene>();
+    std::vector<RaycastRef> refs;
+    std::unordered_map<std::string, int> mesh_cache;
+    int skipped = 0;
+
+    ecm.Each<::gz::sim::components::Visual,
+             ::gz::sim::components::Geometry>(
+        [&](const ::gz::sim::Entity & ent,
+            const ::gz::sim::components::Visual *,
+            const ::gz::sim::components::Geometry * geom) -> bool {
+            const sdf::Geometry & g = geom->Data();
+            rc::Instance inst;
+            RaycastRef ref;
+            ref.entity = ent;
+
+            switch (g.Type()) {
+                case sdf::GeometryType::BOX: {
+                    const auto size = g.BoxShape()->Size();
+                    inst.type = rc::GeomType::kBox;
+                    inst.size[0] = static_cast<float>(size.X() / 2.0);
+                    inst.size[1] = static_cast<float>(size.Y() / 2.0);
+                    inst.size[2] = static_cast<float>(size.Z() / 2.0);
+                    break;
+                }
+                case sdf::GeometryType::SPHERE:
+                    inst.type = rc::GeomType::kSphere;
+                    inst.size[0] =
+                        static_cast<float>(g.SphereShape()->Radius());
+                    break;
+                case sdf::GeometryType::CYLINDER:
+                    inst.type = rc::GeomType::kCylinder;
+                    inst.size[0] =
+                        static_cast<float>(g.CylinderShape()->Radius());
+                    inst.size[1] =
+                        static_cast<float>(g.CylinderShape()->Length() / 2.0);
+                    break;
+                case sdf::GeometryType::PLANE: {
+                    const auto * plane = g.PlaneShape();
+                    inst.type = rc::GeomType::kPlane;
+                    inst.size[0] =
+                        static_cast<float>(plane->Size().X() / 2.0);
+                    inst.size[1] =
+                        static_cast<float>(plane->Size().Y() / 2.0);
+                    // Local frame has the plane at z = 0; fold the SDF
+                    // normal into the entity pose as an extra rotation.
+                    ::gz::math::Quaterniond q;
+                    q.SetFrom2Axes(::gz::math::Vector3d::UnitZ,
+                                   plane->Normal().Normalized());
+                    ref.offset = q;
+                    break;
+                }
+                case sdf::GeometryType::MESH: {
+                    const auto * shape = g.MeshShape();
+                    const std::string resolved = ::gz::sim::asFullPath(
+                        shape->Uri(), shape->FilePath());
+                    const auto & scale = shape->Scale();
+                    const std::string key = resolved + "|" +
+                        std::to_string(scale.X()) + "," +
+                        std::to_string(scale.Y()) + "," +
+                        std::to_string(scale.Z());
+                    auto it = mesh_cache.find(key);
+                    if (it == mesh_cache.end()) {
+                        const ::gz::common::Mesh * gz_mesh =
+                            ::gz::common::MeshManager::Instance()->Load(
+                                resolved);
+                        if (!gz_mesh) {
+                            RCLCPP_WARN(kLogger,
+                                "raycast: cannot load mesh '%s'; visual "
+                                "skipped", resolved.c_str());
+                            ++skipped;
+                            return true;
+                        }
+                        rc::MeshData md;
+                        if (!appendGzMesh(*gz_mesh, scale, md) ||
+                            !rc::buildMeshBvh(md)) {
+                            ++skipped;
+                            return true;
+                        }
+                        it = mesh_cache.emplace(
+                            key, static_cast<int>(scene->meshes.size())).first;
+                        scene->meshes.push_back(std::move(md));
+                    }
+                    inst.type = rc::GeomType::kMesh;
+                    inst.mesh = it->second;
+                    break;
+                }
+                default:
+                    // capsule / ellipsoid / heightmap / polyline: not mirrored.
+                    ++skipped;
+                    return true;
+            }
+
+            const auto * lr =
+                ecm.Component<::gz::sim::components::LaserRetro>(ent);
+            inst.retro = lr ? static_cast<float>(lr->Data()) : 0.0f;
+
+            rc::finalizeInstance(*scene, inst);
+            scene->instances.push_back(inst);
+            refs.push_back(ref);
+            return true;
+        });
+
+    rc_refs_ = std::move(refs);
+    rc_visual_count_ = visual_count;
+    {
+        // Publish the new immutable scene; an in-flight cast keeps its own
+        // shared_ptr to the previous one.
+        std::lock_guard<std::mutex> lk(rc_mtx_);
+        rc_scene_ = std::move(scene);
+    }
+
+    RCLCPP_INFO(kLogger,
+        "raycast scene mirror: %zu instances (%zu meshes, %d visuals "
+        "skipped) from %zu visuals",
+        rc_scene_->instances.size(), rc_scene_->meshes.size(), skipped,
+        visual_count);
+}
+
+void GzGpuOusterLidarSystem::raycastPostUpdate(
+    const ::gz::sim::UpdateInfo & info,
+    const ::gz::sim::EntityComponentManager & ecm)
+{
+    // Rebuild the geometry mirror when the visual population changes
+    // (spawn/despawn). Pure pose changes are handled per scan below.
+    size_t visual_count = 0;
+    ecm.Each<::gz::sim::components::Visual,
+             ::gz::sim::components::Geometry>(
+        [&visual_count](const ::gz::sim::Entity &,
+                        const ::gz::sim::components::Visual *,
+                        const ::gz::sim::components::Geometry *) -> bool {
+            ++visual_count;
+            return true;
+        });
+    if (!rc_scene_ || visual_count != rc_visual_count_) {
+        rebuildRaycastScene(ecm, visual_count);
+    }
+
+    // ── Throttle to lidar_hz_ on sim time ───────────────────────────────────
+    const auto sim_now =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(1.0 / lidar_hz_));
+    if (rc_last_scan_time_.count() >= 0 &&
+        sim_now - rc_last_scan_time_ < period) {
+        return;
+    }
+    rc_last_scan_time_ = sim_now;
+
+    // ── Per-scan transforms + sensor pose ────────────────────────────────────
+    std::vector<rc::InstanceXform> xforms(rc_refs_.size());
+    for (size_t i = 0; i < rc_refs_.size(); ++i) {
+        const auto pose =
+            ::gz::sim::worldPose(rc_refs_[i].entity, ecm) *
+            ::gz::math::Pose3d(::gz::math::Vector3d::Zero,
+                               rc_refs_[i].offset);
+        float r[9], t[3];
+        poseToRT(pose, r, t);
+        rc::computeXform(rc_scene_->instances[i], r, t, xforms[i]);
+    }
+
+    ::gz::math::Pose3d sensor_pose;
+    {
+        std::lock_guard<std::mutex> lk(pose_mtx_);
+        sensor_pose = cached_pose_;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(rc_mtx_);
+        rc_job_scene_ = rc_scene_;
+        rc_job_xforms_ = std::move(xforms);
+        poseToRT(sensor_pose, rc_job_sensor_r_, rc_job_sensor_t_);
+        rc_job_ready_ = true;
+    }
+    rc_cv_.notify_one();
+}
+
+void GzGpuOusterLidarSystem::raycastThreadFunc()
+{
+    while (!shutdown_.load(std::memory_order_acquire)) {
+        std::shared_ptr<const rc::Scene> scene;
+        std::vector<rc::InstanceXform> xforms;
+        float sr[9], st[3];
+        {
+            std::unique_lock<std::mutex> lk(rc_mtx_);
+            rc_cv_.wait(lk, [this] {
+                return rc_job_ready_ ||
+                       shutdown_.load(std::memory_order_acquire);
+            });
+            if (shutdown_.load(std::memory_order_acquire)) break;
+            rc_job_ready_ = false;
+            scene = rc_job_scene_;
+            xforms = std::move(rc_job_xforms_);
+            std::memcpy(sr, rc_job_sensor_r_, sizeof(sr));
+            std::memcpy(st, rc_job_sensor_t_, sizeof(st));
+        }
+        if (!scene) continue;
+
+        const int n = H_ * W_;
+        rc_out_.resize(static_cast<size_t>(2 * n));
+
+        rc::ScanParams sp;
+        sp.H = H_;
+        sp.W = W_;
+        sp.max_range = static_cast<float>(max_range_);
+        sp.near_clip = static_cast<float>(kNearClip);
+        sp.beam_origin_m = static_cast<float>(beam_origin_mm_ / 1000.0);
+
+        rc::castScan(*scene, xforms.data(),
+                     beam_alt_f_.data(), beam_az_f_.data(),
+                     sr, st, sp,
+                     rc_out_.data(), rc_out_.data() + n);
+
+        {
+            std::lock_guard<std::mutex> lk(frame_mtx_);
+            if (frame_ready_.load(std::memory_order_acquire)) {
+                const uint64_t dropped = dropped_frames_.fetch_add(1) + 1;
+                if (ros_node_) {
+                    RCLCPP_WARN_THROTTLE(kLogger,
+                        *ros_node_->get_clock(), 5000,
+                        "%s: dropped raycast frame (PostUpdate didn't "
+                        "drain); total dropped=%lu", sensor_name_.c_str(),
+                        static_cast<unsigned long>(dropped));
+                }
+            }
+            rc_out_.swap(raw_frame_buf_);
+            raw_frame_n_ = 2 * n;
+            frame_ready_ = true;
+        }
+    }
 }
 
 }  // namespace gz_gpu_ouster_lidar

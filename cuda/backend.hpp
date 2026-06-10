@@ -39,6 +39,19 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & pp) = 0;
 
+    /// Noise/channel stage only, for callers that already hold exact
+    /// per-beam ranges (the full-raycast mode): depth_host is H×W metres
+    /// (+inf miss), retro_host is an optional H×W laser_retro array
+    /// (nullptr → base_reflectivity / unit intensity).
+    virtual void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) = 0;
+
     /// Short identifier: "cuda", "hip", "sycl", or "cpu".
     virtual const char * name() const = 0;
 };

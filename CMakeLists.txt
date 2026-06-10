@@ -217,6 +217,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_dispatch test/test_dispatch.cpp)
   target_link_libraries(test_dispatch gz_gpu_ouster_lidar_cuda)
 
+  # Test: full per-beam raycast mode (intersectors, BVH vs brute force,
+  # beam-origin parallax, retro, near clip, processDepth)
+  ament_add_gtest(test_raycast test/test_raycast.cpp)
+  target_link_libraries(test_raycast gz_gpu_ouster_lidar_cuda)
+
   # Test: IMU noise model (CPU-only, no Gazebo dep)
   ament_add_gtest(test_imu_noise test/test_imu_noise.cpp)
   target_link_libraries(test_imu_noise gz_gpu_ouster_lidar_cuda)

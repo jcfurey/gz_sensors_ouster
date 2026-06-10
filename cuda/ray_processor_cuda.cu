@@ -269,6 +269,7 @@ public:
     ~CudaBackend() override
     {
         if (d_depth_)       cudaFree(d_depth_);
+        if (d_retro_)       cudaFree(d_retro_);
         if (d_range_)       cudaFree(d_range_);
         if (d_signal_)      cudaFree(d_signal_);
         if (d_refl_)        cudaFree(d_refl_);
@@ -334,6 +335,46 @@ public:
         CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 
+    void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) override
+    {
+        const int out_n = pp.H * pp.W;
+        ensureBuffers(out_n);
+
+        const bool need_rand = noiseEnabled(pp);
+        if (need_rand) ensureRandStates(out_n);
+
+        CUDA_CHECK(cudaMemcpyAsync(d_depth_, depth_host,
+            static_cast<size_t>(out_n) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        if (retro_host) {
+            ensureRetroBuffer(out_n);
+            CUDA_CHECK(cudaMemcpyAsync(d_retro_, retro_host,
+                static_cast<size_t>(out_n) * sizeof(float),
+                cudaMemcpyHostToDevice, stream_));
+        }
+
+        launchRayProcessKernel(
+            static_cast<const float *>(d_depth_),
+            retro_host ? static_cast<const float *>(d_retro_) : nullptr,
+            static_cast<uint32_t *>(d_range_),
+            static_cast<uint16_t *>(d_signal_),
+            static_cast<uint8_t *>(d_refl_),
+            static_cast<uint16_t *>(d_nearir_),
+            pp,
+            need_rand ? d_rand_states_ : nullptr,
+            stream_);
+
+        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, out_n);
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
+
     const char * name() const override { return "cuda"; }
 
 private:
@@ -365,6 +406,16 @@ private:
             realloc_(d_beam_az_,  static_cast<size_t>(H) * sizeof(float));
             beam_buf_n_ = H;
         }
+    }
+
+    // Retro device buffer is only used by processDepth (the raycast mode
+    // restores laser_retro); allocated lazily so the panels path pays
+    // nothing for it.
+    void ensureRetroBuffer(int n)
+    {
+        if (n <= retro_n_) return;
+        realloc_(d_retro_, static_cast<size_t>(n) * sizeof(float));
+        retro_n_ = n;
     }
 
     void ensureRandStates(int n)
@@ -411,6 +462,7 @@ private:
 
     // Device buffers — noise processing
     void * d_depth_   = nullptr;
+    void * d_retro_   = nullptr;   // processDepth only (lazy)
     void * d_range_   = nullptr;
     void * d_signal_  = nullptr;
     void * d_refl_    = nullptr;
@@ -423,6 +475,7 @@ private:
     void * d_beam_az_   = nullptr;
 
     int buf_n_      = 0;
+    int retro_n_    = 0;
     int rand_n_     = 0;
     int raw_buf_n_  = 0;
     int beam_buf_n_ = 0;

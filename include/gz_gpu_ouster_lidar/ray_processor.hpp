@@ -122,6 +122,19 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & pp);
 
+    /// Noise/channel stage only, for callers that already hold exact
+    /// per-beam ranges (the full-raycast mode). depth_host is H×W metres
+    /// (+inf for a miss); retro_host is an optional H×W laser_retro array
+    /// (nullptr → base_reflectivity / unit intensity).
+    void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp);
+
     /// Returns true when the active backend is the CPU fallback (no GPU
     /// path is compiled in, or all GPU probes failed at construction).
     bool usesCpuFallback() const;

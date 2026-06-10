@@ -89,6 +89,7 @@ public:
     {
         auto maybeFree = [&](void * p) { if (p) sycl::free(p, q_); };
         maybeFree(u_depth_);
+        maybeFree(u_retro_);
         maybeFree(u_range_);
         maybeFree(u_signal_);
         maybeFree(u_refl_);
@@ -124,6 +125,37 @@ public:
         // base_reflectivity / unit intensity in the process kernel.
         launchRayKernel(
             u_depth_, nullptr,
+            u_range_, u_signal_, u_refl_, u_nearir_, pp, out_n);
+        q_.wait();
+
+        std::memcpy(range_out,        u_range_,  static_cast<size_t>(out_n) * sizeof(uint32_t));
+        std::memcpy(signal_out,       u_signal_, static_cast<size_t>(out_n) * sizeof(uint16_t));
+        std::memcpy(reflectivity_out, u_refl_,   static_cast<size_t>(out_n) * sizeof(uint8_t));
+        std::memcpy(nearir_out,       u_nearir_, static_cast<size_t>(out_n) * sizeof(uint16_t));
+    }
+
+    void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) override
+    {
+        const int out_n = pp.H * pp.W;
+        ensureBuffers(out_n);
+
+        std::memcpy(u_depth_, depth_host,
+                    static_cast<size_t>(out_n) * sizeof(float));
+        if (retro_host) {
+            ensureRetroBuffer(out_n);
+            std::memcpy(u_retro_, retro_host,
+                        static_cast<size_t>(out_n) * sizeof(float));
+        }
+
+        launchRayKernel(
+            u_depth_, retro_host ? u_retro_ : nullptr,
             u_range_, u_signal_, u_refl_, u_nearir_, pp, out_n);
         q_.wait();
 
@@ -286,6 +318,14 @@ private:
         buf_n_ = n;
     }
 
+    // Retro buffer is only used by processDepth (raycast mode); lazy.
+    void ensureRetroBuffer(int n)
+    {
+        if (n <= retro_n_) return;
+        allocShared(u_retro_, static_cast<size_t>(n));
+        retro_n_ = n;
+    }
+
     void ensureResampleBuffers(int raw_n, int H)
     {
         if (raw_n > raw_buf_n_) {
@@ -305,6 +345,7 @@ private:
     bool integrated_ = false;
 
     float *    u_depth_     = nullptr;
+    float *    u_retro_     = nullptr;   // processDepth only (lazy)
     uint32_t * u_range_     = nullptr;
     uint16_t * u_signal_    = nullptr;
     uint8_t *  u_refl_      = nullptr;
@@ -313,6 +354,7 @@ private:
     float *    u_beam_alt_  = nullptr;
     float *    u_beam_az_   = nullptr;
     int buf_n_ = 0;
+    int retro_n_ = 0;
     int raw_buf_n_ = 0;
     int beam_buf_n_ = 0;
 };
