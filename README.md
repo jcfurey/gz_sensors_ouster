@@ -333,9 +333,13 @@ ouster driver.
 A self-contained [`Dockerfile`](Dockerfile) builds the plugin in isolation —
 ROS 2 + the new Gazebo + the pinned `ouster-ros` fork + this package — and
 exercises it on a **drivable TurtleBot3 waffle** ("a vehicle for the lidar to
-ride on"). No CUDA/GPU toolchain is installed, so the plugin builds its CPU
-(OpenMP) backend and the default smoke runs in **raycast** mode, which needs no
-render engine and so runs anywhere — even with no GPU.
+ride on"). By **default it builds the CUDA backend** so it can use the host's
+GPU, and **falls back to the CPU (OpenMP) backend** automatically — both at build
+time (if the CUDA toolkit can't be installed) and at run time (if no GPU is
+visible). So the same image runs anywhere: `docker run --rm gzouster` works with
+no GPU, and adding `--gpus all` switches the plugin to CUDA. The default smoke
+uses **raycast** mode, which needs no render engine. Pass
+`--build-arg ENABLE_CUDA=false` for a smaller CPU-only image.
 
 `ROS_DISTRO` selects the distro (matching this package's CI matrix); **Humble is
 not supported** (no `gz_*_vendor`; it ships Gazebo Fortress, not Harmonic+):
@@ -347,9 +351,11 @@ cd <this package>
 docker build -t gzouster .
 docker build -t gzouster --build-arg ROS_DISTRO=kilted .
 
-# 1) Headless point-cloud smoke (no GPU): waits for a PointCloud2 on
-#    /sensor/lidar/lidar0/points and exits PASS/FAIL.
+# 1) Headless point-cloud smoke: waits for a PointCloud2 on
+#    /sensor/lidar/lidar0/points and exits PASS/FAIL. Add --gpus all to exercise
+#    the CUDA backend; without it the plugin falls back to CPU.
 docker run --rm gzouster
+docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster   # CUDA
 
 # 2) Re-run the gtest suite.
 docker run --rm gzouster test
@@ -373,21 +379,28 @@ name are passed to the entrypoint as arguments, not env vars.
 
 ### Using the host GPU (CUDA backend)
 
-By default the image installs no CUDA toolchain, so the plugin runs its CPU
-(OpenMP) backend. To build the **CUDA backend** and run it on the **host's** GPU
-— without pulling in the full `rovermax_ws` image — build with `ENABLE_CUDA=true`
-and run with `--gpus all`. Only the CUDA *toolkit* (nvcc/cudart/curand) is baked
-into the image; the driver/`libcuda` comes from the host at run time (needs
-`nvidia-container-toolkit` on the host — no host CUDA install required):
+The image **builds the CUDA backend by default** and runs it on the **host's**
+GPU — without pulling in the full `rovermax_ws` image. Only the CUDA *toolkit*
+(nvcc/cudart/curand) is baked in; the driver/`libcuda` comes from the host at run
+time (needs `nvidia-container-toolkit` on the host — no host CUDA install
+required). Tune the target GPU with `CUDA_ARCH`, or opt out entirely with
+`ENABLE_CUDA=false`:
 
 ```bash
-# CUDA_ARCH: 86 = Ampere (RTX 30xx), 89 = Ada (40xx), or "75;80;86;89" for portability.
-docker build -t gzouster-cuda --build-arg ENABLE_CUDA=true --build-arg CUDA_ARCH=86 .
+# Default build already includes CUDA. CUDA_ARCH: 86 = Ampere (RTX 30xx),
+# 89 = Ada (40xx); default "80;86;89", or "75;80;86;89" for wider portability.
+docker build -t gzouster --build-arg CUDA_ARCH=86 .
 
-docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster-cuda
-# the plugin logs "Using cuda backend." instead of the CPU-fallback warning.
+docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster
+# the plugin logs "Using cuda backend."; without --gpus all it logs the
+# "No CUDA-capable device detected ... CPU fallback" warning and still works.
+
+docker build -t gzouster-cpu --build-arg ENABLE_CUDA=false .   # smaller CPU-only image
 ```
 
+The toolkit install is **best-effort**: on a base where it can't be set up (e.g.
+lyrical/26.04, a non-amd64 host, or a repo/network error) the build prints a
+warning and falls back to a CPU-only build instead of failing.
 `CUDA_DISTRO`/`CUDA_PKG_VERSION`/`CUDA_HOME_VERSION` override the NVIDIA apt repo
 and toolkit version (defaults: Ubuntu 24.04 `noble`, CUDA 12.6 — valid for the
 jazzy/kilted bases). The selected backend accelerates **both** ray modes — the

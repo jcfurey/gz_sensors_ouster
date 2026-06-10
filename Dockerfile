@@ -1,43 +1,47 @@
 # Standalone test image for gz_sensors_ouster.
 #
 # Builds the plugin in isolation against a selectable ROS 2 distro and exercises
-# it on a drivable TurtleBot3 waffle in the new Gazebo. By default no CUDA
-# toolchain is installed, so the plugin compiles its CPU (OpenMP) backend and the
-# default headless smoke runs in *raycast* mode (no render engine / GPU needed).
+# it on a drivable TurtleBot3 waffle in the new Gazebo. By DEFAULT it builds the
+# CUDA (NVIDIA) backend so it can use the host's GPU; the toolkit install is
+# best-effort and falls back to the CPU (OpenMP) backend if CUDA can't be set up
+# (non-amd64 host, unsupported base like lyrical/26.04, or a network hiccup). At
+# RUN time the plugin uses CUDA only when a device is visible (--gpus all) and
+# otherwise falls back to CPU automatically, so the same image runs with or
+# without a GPU. The default headless smoke uses *raycast* mode.
 #
-#   docker build -t gzouster .                          # ROS 2 Jazzy (default)
+#   docker build -t gzouster .                          # ROS 2 Jazzy, CUDA backend
+#   docker build -t gzouster --build-arg CUDA_ARCH=86 . # 86 = Ampere (RTX 30xx)
+#   docker build -t gzouster --build-arg ENABLE_CUDA=false .   # force CPU-only build
 #   docker build -t gzouster --build-arg ROS_DISTRO=kilted .
-#   docker build -t gzouster --build-arg ROS_DISTRO=lyrical .   # advisory (brand new)
+#   docker build -t gzouster --build-arg ROS_DISTRO=lyrical .  # advisory; CPU fallback
 #
-#   docker run --rm gzouster                            # headless point-cloud smoke
+#   docker run --rm gzouster                            # headless smoke (CPU fallback)
+#   docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster
+#       # with a GPU + nvidia-container-toolkit: plugin logs "Using cuda backend."
 #   docker run --rm gzouster test                       # gtest suite
 #   docker run --rm -it -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix \
 #       --gpus all gzouster drive                       # interactive GUI + teleop
 #
-# CUDA (NVIDIA) — leverage the HOST's GPU without the rovermax_ws image. This
-# installs only the CUDA *toolkit* (nvcc + cudart + curand) into the image and
-# builds the plugin's CUDA backend; the GPU driver itself comes from the host at
-# run time via --gpus all (needs nvidia-container-toolkit on the host). No CUDA
-# install on the host is required beyond the driver.
-#
-#   docker build -t gzouster-cuda --build-arg ENABLE_CUDA=true \
-#       --build-arg CUDA_ARCH=86 .                      # 86 = Ampere (RTX 30xx)
-#   docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster-cuda
-#       # plugin logs "Using cuda backend." instead of the CPU fallback.
+# Only the CUDA *toolkit* (nvcc/cudart/curand) is baked in; the GPU driver comes
+# from the host at run time (nvidia-container-toolkit) — no host CUDA install
+# beyond the driver, and no dependency on the rovermax_ws image.
 #
 # Distros: jazzy (Harmonic), kilted (Ionic), lyrical (Jetty). Humble is NOT
 # supported (no gz_*_vendor; it ships Gazebo Fortress, not Harmonic+). CUDA is
-# wired for the noble-based distros (jazzy/kilted); see CUDA_DISTRO to override.
+# wired for the noble-based distros (jazzy/kilted); on others the toolkit install
+# is skipped and the build falls back to CPU (see CUDA_DISTRO to point elsewhere).
 
 ARG ROS_DISTRO=jazzy
 FROM osrf/ros:${ROS_DISTRO}-desktop
 ARG ROS_DISTRO
 
-# CUDA backend (optional). ENABLE_CUDA=true installs the toolkit + builds it.
-# CUDA_ARCH is a ';'-separated SM list (e.g. "86" for RTX 30xx, "89" for 40xx,
-# "75;80;86;89" for a portable image). CUDA_DISTRO/CUDA_PKG_VERSION pick the
-# NVIDIA apt repo + toolkit version (default: Ubuntu 24.04 'noble', CUDA 12.6).
-ARG ENABLE_CUDA=false
+# CUDA backend. ENABLE_CUDA=true (DEFAULT) installs the toolkit + builds it,
+# falling back to a CPU-only build if the toolkit can't be installed. Set
+# ENABLE_CUDA=false to skip CUDA entirely. CUDA_ARCH is a ';'-separated SM list
+# (e.g. "86" for RTX 30xx, "89" for 40xx, "75;80;86;89" for a portable image).
+# CUDA_DISTRO/CUDA_PKG_VERSION pick the NVIDIA apt repo + toolkit version
+# (default: Ubuntu 24.04 'noble', CUDA 12.6).
+ARG ENABLE_CUDA=true
 ARG CUDA_ARCH=80;86;89
 ARG CUDA_DISTRO=ubuntu2404
 ARG CUDA_PKG_VERSION=12-6
@@ -80,27 +84,36 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       ros-${ROS_DISTRO}-teleop-twist-keyboard \
  && rm -rf /var/lib/apt/lists/*
 
-# ── CUDA toolkit (optional; ENABLE_CUDA=true) ─────────────────────────────────
+# ── CUDA toolkit (default; ENABLE_CUDA=true) ──────────────────────────────────
 # Only the toolkit (nvcc + cudart + curand) goes in the image; the driver/libcuda
 # comes from the host at run time via --gpus all. We install the versioned
 # packages and symlink /usr/local/cuda so CMake's CUDAToolkit lookup + the
-# package's check_language(CUDA) both resolve. ENV is set unconditionally (a
-# missing /usr/local/cuda/bin on a CPU image is simply absent from PATH).
+# package's check_language(CUDA) both resolve.
+#
+# Best-effort: the whole install runs in a subshell under `set -e`, and on ANY
+# failure (unsupported base such as lyrical/26.04, non-amd64 host, repo/network
+# error) we drop the /usr/local/cuda symlink and continue. With no nvcc on PATH
+# the package's check_language(CUDA) then auto-selects the CPU backend, so the
+# build still succeeds — just CPU-only. ENV below is set unconditionally; a
+# missing /usr/local/cuda/bin is simply an absent PATH entry.
 RUN if [ "${ENABLE_CUDA}" = "true" ]; then \
-      set -e; \
-      apt-get update -qq; \
-      apt-get install -y -qq --no-install-recommends wget ca-certificates gnupg; \
-      wget -qO /tmp/cuda-keyring.deb \
-        "https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_DISTRO}/x86_64/cuda-keyring_1.1-1_all.deb"; \
-      dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb; \
-      apt-get update -qq; \
-      apt-get install -y -qq --no-install-recommends \
-        cuda-nvcc-${CUDA_PKG_VERSION} \
-        cuda-cudart-dev-${CUDA_PKG_VERSION} \
-        libcurand-dev-${CUDA_PKG_VERSION}; \
-      ln -sfn /usr/local/cuda-${CUDA_HOME_VERSION} /usr/local/cuda; \
+      ( set -e; \
+        apt-get update -qq; \
+        apt-get install -y -qq --no-install-recommends wget ca-certificates gnupg; \
+        wget -qO /tmp/cuda-keyring.deb \
+          "https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_DISTRO}/x86_64/cuda-keyring_1.1-1_all.deb"; \
+        dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb; \
+        apt-get update -qq; \
+        apt-get install -y -qq --no-install-recommends \
+          cuda-nvcc-${CUDA_PKG_VERSION} \
+          cuda-cudart-dev-${CUDA_PKG_VERSION} \
+          libcurand-dev-${CUDA_PKG_VERSION}; \
+        ln -sfn /usr/local/cuda-${CUDA_HOME_VERSION} /usr/local/cuda; \
+        /usr/local/cuda/bin/nvcc --version; ) \
+      && echo "CUDA toolkit ready; building the CUDA backend." \
+      || { echo "WARNING: CUDA toolkit unavailable; falling back to a CPU-only build."; \
+           rm -f /usr/local/cuda; }; \
       rm -rf /var/lib/apt/lists/*; \
-      /usr/local/cuda/bin/nvcc --version; \
     else \
       echo "ENABLE_CUDA=${ENABLE_CUDA}: skipping CUDA toolkit (CPU backend only)"; \
     fi
