@@ -232,6 +232,21 @@ if(BUILD_TESTING)
   target_link_libraries(test_lifecycle ${PROJECT_NAME})
 endif()
 
+# The public headers quote-include a few backend headers that live in cuda/
+# (imu_noise.hpp, panel_layout.hpp, raycast_scene.hpp + their deps). At build
+# time those resolve via the backend library's include dirs; in the install
+# tree they must sit NEXT to the public headers so the quoted includes
+# (same-directory lookup) keep resolving for downstream consumers of the
+# installed gz_gpu_ouster_lidar_system.hpp.
+install(FILES
+  cuda/imu_noise.hpp
+  cuda/panel_layout.hpp
+  cuda/raycast_scene.hpp
+  cuda/raycast_math.hpp
+  cuda/ray_processor_math.hpp
+  DESTINATION include/${PROJECT_NAME}/gz_gpu_ouster_lidar
+)
+
 # Installs the plugin library + include/ headers, exports the ament package,
 # and installs the runtime config (metadata JSONs + example SDF) to
 # share/${PROJECT_NAME}/config plus the example URDFs / world / launch files to

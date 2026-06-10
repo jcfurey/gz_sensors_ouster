@@ -48,6 +48,23 @@ public:
                    pp, seed_);
     }
 
+    void castScan(
+        const rc::SceneView & scene,
+        uint64_t /*scene_version*/,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        float * range_out,
+        float * retro_out) override
+    {
+        // OpenMP-parallel reference implementation; no upload, no cache.
+        rc::castScan(scene, xforms, beam_alt_deg, beam_az_deg,
+                     sensor_r, sensor_t, sp, range_out, retro_out);
+    }
+
     const char * name() const override { return "cpu"; }
 
 private:

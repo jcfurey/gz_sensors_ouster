@@ -187,7 +187,9 @@ private:
 
     // Immutable scene geometry, shared with the worker via shared_ptr so a
     // rebuild (entity spawned/removed) never races an in-flight cast.
+    // rc_scene_version_ lets the GPU backends cache the uploaded geometry.
     std::shared_ptr<const rc::Scene> rc_scene_;
+    uint64_t rc_scene_version_ = 0;
     struct RaycastRef {
         ::gz::sim::Entity entity{::gz::sim::kNullEntity};
         // Extra local rotation folded into the entity pose (plane normal).
@@ -205,6 +207,7 @@ private:
     std::condition_variable rc_cv_;
     bool rc_job_ready_ = false;
     std::shared_ptr<const rc::Scene> rc_job_scene_;
+    uint64_t rc_job_scene_version_ = 0;
     std::vector<rc::InstanceXform> rc_job_xforms_;
     float rc_job_sensor_r_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     float rc_job_sensor_t_[3] = {0, 0, 0};
@@ -238,6 +241,11 @@ private:
     void DestroyPanels();
 
     // ── Ray processor (vendor-neutral; CUDA/HIP/SYCL/CPU at runtime) ────────
+    // processor_mtx_ serialises backend calls: in raycast mode the worker
+    // thread (castScan) and the sim thread (processDepth in
+    // encodeAndPublish) would otherwise race on the backend's shared
+    // device buffers and stream.
+    std::mutex processor_mtx_;
     std::unique_ptr<RayProcessor> ray_processor_;
 
     // ── Channel buffers ──────────────────────────────────────────────────────

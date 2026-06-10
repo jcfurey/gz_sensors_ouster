@@ -79,6 +79,14 @@ struct RayProcessParams {
 // Forward declaration for pimpl.
 class Backend;
 
+// Raycast types (full definitions in raycast_scene.hpp / raycast_math.hpp;
+// only references/pointers appear in this interface).
+namespace rc {
+struct SceneView;
+struct InstanceXform;
+struct ScanParams;
+}  // namespace rc
+
 /// Vendor-neutral ray post-processor: resamples the panel-rig depth buffer
 /// → Ouster beam geometry, then synthesises channel arrays (range_mm,
 /// signal, reflectivity, near_ir). Internally dispatches to whichever backend was
@@ -134,6 +142,24 @@ public:
         uint8_t *     reflectivity_out,
         uint16_t *    nearir_out,
         const RayProcessParams & pp);
+
+    /// Full per-beam raycast on the active backend (CUDA/HIP/SYCL kernel,
+    /// or the OpenMP CPU fallback — identical shared math either way).
+    /// GPU backends cache the uploaded scene geometry by `scene_version`
+    /// and re-upload only when it changes; the per-scan transforms upload
+    /// every call. Outputs: reported Ouster range in metres (+inf miss)
+    /// and the nearest hit's laser_retro (0 on miss/unset), both H×W.
+    void castScan(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        float * range_out,
+        float * retro_out);
 
     /// Returns true when the active backend is the CPU fallback (no GPU
     /// path is compiled in, or all GPU probes failed at construction).

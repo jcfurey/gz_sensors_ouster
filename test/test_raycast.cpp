@@ -3,14 +3,18 @@
 //
 // Full per-beam raycast mode: intersector correctness (sphere / box /
 // cylinder / plane / mesh), BVH-vs-brute-force equivalence, beam-origin
-// parallax, retro of the nearest hit, near-clip behaviour, and the
-// processDepth noise-stage entry through RayProcessor.
+// parallax, retro of the nearest hit, near-clip behaviour, axis-parallel
+// slab robustness, and the castScan / processDepth entries through
+// RayProcessor (CPU backend — the GPU kernels run the identical shared
+// rcCastOneRay and are compile-checked by the smoke CI jobs).
 
 #include <gtest/gtest.h>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
@@ -24,13 +28,13 @@ constexpr float kInf = std::numeric_limits<float>::infinity();
 const float kIdentityR[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 const float kZeroT[3] = {0, 0, 0};
 
-rc::InstanceXform xformAt(const rc::Instance & inst,
+rc::InstanceXform xformAt(const rc::Scene & scene, int instance_idx,
                           float x, float y, float z,
                           const float * r = kIdentityR)
 {
     const float t[3] = {x, y, z};
     rc::InstanceXform out;
-    rc::computeXform(inst, r, t, out);
+    scene.computeXform(instance_idx, r, t, out);
     return out;
 }
 
@@ -45,8 +49,8 @@ rc::ScanParams scanParams(int H, int W, float beam_origin = 0.0f)
     return sp;
 }
 
-/// Cast with an identity sensor pose. Columns: m = 0 → azimuth 0 (+x),
-/// m = W/4 → -90° (-y), etc.
+/// Cast with an identity sensor pose via the CPU reference entry.
+/// Columns: m = 0 → azimuth 0 (+x), m = W/4 → -90° (-y), etc.
 std::vector<float> cast(const rc::Scene & scene,
                         const std::vector<rc::InstanceXform> & xf,
                         const std::vector<float> & alt,
@@ -56,21 +60,21 @@ std::vector<float> cast(const rc::Scene & scene,
 {
     std::vector<float> range(static_cast<size_t>(sp.H) * sp.W);
     if (retro_out) retro_out->resize(range.size());
-    rc::castScan(scene, xf.data(), alt.data(), az.data(),
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
                  kIdentityR, kZeroT, sp, range.data(),
                  retro_out ? retro_out->data() : nullptr);
     return range;
 }
 
-/// Axis-aligned unit-cube-style mesh with the given half extents.
-rc::MeshData makeBoxMesh(float hx, float hy, float hz)
+/// Axis-aligned box mesh (12 triangles) with the given half extents.
+void makeBoxMesh(float hx, float hy, float hz,
+                 std::vector<float> & verts, std::vector<int> & tris)
 {
-    rc::MeshData md;
     const float v[8][3] = {
         {-hx, -hy, -hz}, {hx, -hy, -hz}, {hx, hy, -hz}, {-hx, hy, -hz},
         {-hx, -hy, hz},  {hx, -hy, hz},  {hx, hy, hz},  {-hx, hy, hz}};
     for (auto & p : v) {
-        md.verts.insert(md.verts.end(), {p[0], p[1], p[2]});
+        verts.insert(verts.end(), {p[0], p[1], p[2]});
     }
     const int f[12][3] = {
         {0, 2, 1}, {0, 3, 2},  // -z
@@ -80,9 +84,8 @@ rc::MeshData makeBoxMesh(float hx, float hy, float hz)
         {1, 2, 6}, {1, 6, 5},  // +x
         {3, 0, 4}, {3, 4, 7}};  // -x
     for (auto & tri : f) {
-        md.tris.insert(md.tris.end(), {tri[0], tri[1], tri[2]});
+        tris.insert(tris.end(), {tri[0], tri[1], tri[2]});
     }
-    return md;
 }
 
 /// Reference Möller–Trumbore for the brute-force comparison.
@@ -108,18 +111,16 @@ float refTriangle(const float o[3], const float d[3],
     return (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv;
 }
 
+const float kSphereSize[3] = {1.0f, 0.0f, 0.0f};
+
 }  // namespace
 
 TEST(Raycast, SphereOnAxis)
 {
     rc::Scene scene;
-    rc::Instance sphere;
-    sphere.type = rc::GeomType::kSphere;
-    sphere.size[0] = 1.0f;
-    rc::finalizeInstance(scene, sphere);
-    scene.instances.push_back(sphere);
+    const int si = scene.addInstance(rc::GeomType::kSphere, kSphereSize, 0.0f);
 
-    std::vector<rc::InstanceXform> xf = {xformAt(sphere, 5.0f, 0.0f, 0.0f)};
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 5.0f, 0.0f, 0.0f)};
     const std::vector<float> alt = {0.0f}, az = {0.0f};
     const auto range = cast(scene, xf, alt, az, scanParams(1, 4));
 
@@ -135,12 +136,8 @@ TEST(Raycast, BeamOriginParallaxMatchesXyzLut)
     // xyz = (r−n)·d̂ + n·[cosθ,sinθ,0]. For an on-axis target the hit point
     // is at x = 4 regardless of n, so r must equal 4 for any n.
     rc::Scene scene;
-    rc::Instance sphere;
-    sphere.type = rc::GeomType::kSphere;
-    sphere.size[0] = 1.0f;
-    rc::finalizeInstance(scene, sphere);
-    scene.instances.push_back(sphere);
-    std::vector<rc::InstanceXform> xf = {xformAt(sphere, 5.0f, 0.0f, 0.0f)};
+    const int si = scene.addInstance(rc::GeomType::kSphere, kSphereSize, 0.0f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 5.0f, 0.0f, 0.0f)};
     const std::vector<float> alt = {0.0f}, az = {0.0f};
 
     for (const float n : {0.0f, 0.015806f, 0.0277f}) {
@@ -152,31 +149,19 @@ TEST(Raycast, BeamOriginParallaxMatchesXyzLut)
 TEST(Raycast, BoxCylinderPlane)
 {
     rc::Scene scene;
-    rc::Instance box;
-    box.type = rc::GeomType::kBox;
-    box.size[0] = box.size[1] = box.size[2] = 1.0f;
-    rc::finalizeInstance(scene, box);
-    scene.instances.push_back(box);
-
-    rc::Instance cyl;
-    cyl.type = rc::GeomType::kCylinder;
-    cyl.size[0] = 0.5f;   // radius
-    cyl.size[1] = 1.0f;   // half length
-    rc::finalizeInstance(scene, cyl);
-    scene.instances.push_back(cyl);
-
-    rc::Instance plane;
-    plane.type = rc::GeomType::kPlane;
-    plane.size[0] = plane.size[1] = 10.0f;
-    rc::finalizeInstance(scene, plane);
-    scene.instances.push_back(plane);
+    const float box_size[3] = {1.0f, 1.0f, 1.0f};
+    const float cyl_size[3] = {0.5f, 1.0f, 0.0f};   // radius, half length
+    const float plane_size[3] = {10.0f, 10.0f, 0.0f};
+    const int bi = scene.addInstance(rc::GeomType::kBox, box_size, 0.0f);
+    const int ci = scene.addInstance(rc::GeomType::kCylinder, cyl_size, 0.0f);
+    const int pi = scene.addInstance(rc::GeomType::kPlane, plane_size, 0.0f);
 
     // Box face at y = -4 (hit via the m = W/4 → -y column), cylinder side
     // at x = 2.5, plane z = -2 (hit via a -45° beam).
     std::vector<rc::InstanceXform> xf = {
-        xformAt(box, 0.0f, -5.0f, 0.0f),
-        xformAt(cyl, 3.0f, 0.0f, 0.0f),
-        xformAt(plane, 0.0f, 0.0f, -2.0f)};
+        xformAt(scene, bi, 0.0f, -5.0f, 0.0f),
+        xformAt(scene, ci, 3.0f, 0.0f, 0.0f),
+        xformAt(scene, pi, 0.0f, 0.0f, -2.0f)};
 
     const std::vector<float> alt = {0.0f, -45.0f};
     const std::vector<float> az = {0.0f, 0.0f};
@@ -190,15 +175,11 @@ TEST(Raycast, BoxCylinderPlane)
 TEST(Raycast, CylinderEndCap)
 {
     rc::Scene scene;
-    rc::Instance cyl;
-    cyl.type = rc::GeomType::kCylinder;
-    cyl.size[0] = 0.5f;
-    cyl.size[1] = 1.0f;
-    rc::finalizeInstance(scene, cyl);
-    scene.instances.push_back(cyl);
+    const float cyl_size[3] = {0.5f, 1.0f, 0.0f};
+    const int ci = scene.addInstance(rc::GeomType::kCylinder, cyl_size, 0.0f);
 
     // Cylinder below the sensor; a straight-down beam hits the +z cap.
-    std::vector<rc::InstanceXform> xf = {xformAt(cyl, 0.0f, 0.0f, -4.0f)};
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, ci, 0.0f, 0.0f, -4.0f)};
     const std::vector<float> alt = {-90.0f}, az = {0.0f};
     const auto range = cast(scene, xf, alt, az, scanParams(1, 4));
     EXPECT_NEAR(range[0], 3.0f, 1e-4f);  // cap at z = -3
@@ -207,46 +188,56 @@ TEST(Raycast, CylinderEndCap)
 TEST(Raycast, FinitePlaneExtentsMiss)
 {
     rc::Scene scene;
-    rc::Instance plane;
-    plane.type = rc::GeomType::kPlane;
-    plane.size[0] = plane.size[1] = 1.0f;  // small patch
-    rc::finalizeInstance(scene, plane);
-    scene.instances.push_back(plane);
+    const float plane_size[3] = {1.0f, 1.0f, 0.0f};  // small patch
+    const int pi = scene.addInstance(rc::GeomType::kPlane, plane_size, 0.0f);
 
     // A -45° beam crosses z = -2 at x = 2, outside the ±1 patch.
-    std::vector<rc::InstanceXform> xf = {xformAt(plane, 0.0f, 0.0f, -2.0f)};
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, pi, 0.0f, 0.0f, -2.0f)};
     const std::vector<float> alt = {-45.0f}, az = {0.0f};
     const auto range = cast(scene, xf, alt, az, scanParams(1, 4));
     EXPECT_EQ(range[0], kInf);
 }
 
+TEST(Raycast, AxisParallelGrazingRayIsNanFree)
+{
+    // Regression for the 0·inf = NaN slab-test hazard: a ray travelling
+    // exactly parallel to a box face, with its origin exactly at the slab
+    // boundary (z == +h). Must hit the face cleanly, not NaN-miss.
+    rc::Scene scene;
+    const float box_size[3] = {1.0f, 1.0f, 1.0f};
+    const int bi = scene.addInstance(rc::GeomType::kBox, box_size, 0.0f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, bi, 5.0f, 0.0f, -1.0f)};
+
+    // el = 0, az = 0 → d = (1, 0, 0) exactly; sensor z == box top (z = 0).
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    const auto range = cast(scene, xf, alt, az, scanParams(1, 4));
+    ASSERT_TRUE(std::isfinite(range[0]));
+    EXPECT_NEAR(range[0], 4.0f, 1e-4f);  // front face at x = 4
+}
+
 TEST(Raycast, MeshBoxMatchesAnalyticBox)
 {
     rc::Scene mesh_scene;
-    rc::MeshData md = makeBoxMesh(1.0f, 1.0f, 1.0f);
-    ASSERT_TRUE(rc::buildMeshBvh(md));
-    mesh_scene.meshes.push_back(std::move(md));
-    rc::Instance mesh_box;
-    mesh_box.type = rc::GeomType::kMesh;
-    mesh_box.mesh = 0;
-    rc::finalizeInstance(mesh_scene, mesh_box);
-    mesh_scene.instances.push_back(mesh_box);
+    std::vector<float> verts;
+    std::vector<int> tris;
+    makeBoxMesh(1.0f, 1.0f, 1.0f, verts, tris);
+    const int root = mesh_scene.addMesh(verts, tris);
+    ASSERT_GE(root, 0);
+    const float msize[3] = {0.0f, 0.0f, 0.0f};
+    const int mi = mesh_scene.addInstance(rc::GeomType::kMesh, msize, 0.0f, root);
 
     rc::Scene box_scene;
-    rc::Instance box;
-    box.type = rc::GeomType::kBox;
-    box.size[0] = box.size[1] = box.size[2] = 1.0f;
-    rc::finalizeInstance(box_scene, box);
-    box_scene.instances.push_back(box);
+    const float box_size[3] = {1.0f, 1.0f, 1.0f};
+    const int bi = box_scene.addInstance(rc::GeomType::kBox, box_size, 0.0f);
 
     constexpr int H = 8, W = 32;
     std::vector<float> alt(H), az(H, 1.3f);
     for (int i = 0; i < H; ++i) alt[i] = -20.0f + 5.0f * i;
 
     std::vector<rc::InstanceXform> mesh_xf = {
-        xformAt(mesh_box, 6.0f, 0.5f, 0.0f)};
+        xformAt(mesh_scene, mi, 6.0f, 0.5f, 0.0f)};
     std::vector<rc::InstanceXform> box_xf = {
-        xformAt(box, 6.0f, 0.5f, 0.0f)};
+        xformAt(box_scene, bi, 6.0f, 0.5f, 0.0f)};
     const auto r_mesh = cast(mesh_scene, mesh_xf, alt, az, scanParams(H, W));
     const auto r_box = cast(box_scene, box_xf, alt, az, scanParams(H, W));
 
@@ -270,30 +261,26 @@ TEST(Raycast, BvhMatchesBruteForce)
     std::uniform_real_distribution<float> pos(-5.0f, 5.0f);
     std::uniform_real_distribution<float> jit(-0.8f, 0.8f);
 
-    rc::MeshData md;
+    std::vector<float> verts;
+    std::vector<int> tris;
     constexpr int kTris = 300;
     for (int i = 0; i < kTris; ++i) {
         const float cx = pos(rng), cy = pos(rng), cz = pos(rng);
         for (int k = 0; k < 3; ++k) {
-            md.verts.insert(md.verts.end(),
+            verts.insert(verts.end(),
                 {cx + jit(rng), cy + jit(rng), cz + jit(rng)});
         }
-        md.tris.insert(md.tris.end(), {3 * i, 3 * i + 1, 3 * i + 2});
+        tris.insert(tris.end(), {3 * i, 3 * i + 1, 3 * i + 2});
     }
-    const std::vector<float> verts_copy = md.verts;
-    const std::vector<int> tris_copy = md.tris;
-    ASSERT_TRUE(rc::buildMeshBvh(md));
 
     rc::Scene scene;
-    scene.meshes.push_back(std::move(md));
-    rc::Instance inst;
-    inst.type = rc::GeomType::kMesh;
-    inst.mesh = 0;
-    rc::finalizeInstance(scene, inst);
-    scene.instances.push_back(inst);
+    const int root = scene.addMesh(verts, tris);
+    ASSERT_GE(root, 0);
+    const float msize[3] = {0.0f, 0.0f, 0.0f};
+    const int mi = scene.addInstance(rc::GeomType::kMesh, msize, 0.0f, root);
 
     // The instance sits 12 m up so rays start outside the near clip.
-    std::vector<rc::InstanceXform> xf = {xformAt(inst, 12.0f, 0.0f, 0.0f)};
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, mi, 12.0f, 0.0f, 0.0f)};
 
     constexpr int H = 16, W = 64;
     std::vector<float> alt(H), az(H, 0.0f);
@@ -316,9 +303,9 @@ TEST(Raycast, BvhMatchesBruteForce)
         for (int tri = 0; tri < kTris; ++tri) {
             const float t = refTriangle(
                 o, d,
-                &verts_copy[3 * tris_copy[3 * tri]],
-                &verts_copy[3 * tris_copy[3 * tri + 1]],
-                &verts_copy[3 * tris_copy[3 * tri + 2]]);
+                &verts[static_cast<size_t>(3 * tris[3 * tri])],
+                &verts[static_cast<size_t>(3 * tris[3 * tri + 1])],
+                &verts[static_cast<size_t>(3 * tris[3 * tri + 2])]);
             if (t > sp.near_clip && t < best) {
                 best = t;
                 hit = true;
@@ -338,19 +325,12 @@ TEST(Raycast, BvhMatchesBruteForce)
 TEST(Raycast, RetroOfNearestHit)
 {
     rc::Scene scene;
-    for (const auto & [dist, retro] : {std::pair{3.0f, 1.5f},
-                                       std::pair{6.0f, 0.3f}}) {
-        (void)dist;
-        rc::Instance s;
-        s.type = rc::GeomType::kSphere;
-        s.size[0] = 0.5f;
-        s.retro = retro;
-        rc::finalizeInstance(scene, s);
-        scene.instances.push_back(s);
-    }
+    const float ssize[3] = {0.5f, 0.0f, 0.0f};
+    const int near_i = scene.addInstance(rc::GeomType::kSphere, ssize, 1.5f);
+    const int far_i = scene.addInstance(rc::GeomType::kSphere, ssize, 0.3f);
     std::vector<rc::InstanceXform> xf = {
-        xformAt(scene.instances[0], 3.0f, 0.0f, 0.0f),
-        xformAt(scene.instances[1], 6.0f, 0.0f, 0.0f)};
+        xformAt(scene, near_i, 3.0f, 0.0f, 0.0f),
+        xformAt(scene, far_i, 6.0f, 0.0f, 0.0f)};
 
     const std::vector<float> alt = {0.0f}, az = {0.0f};
     std::vector<float> retro;
@@ -363,20 +343,16 @@ TEST(Raycast, RetroOfNearestHit)
 TEST(Raycast, NearClipSeesThroughCloseHit)
 {
     rc::Scene scene;
-    rc::Instance close_s, far_s;
-    close_s.type = far_s.type = rc::GeomType::kSphere;
-    close_s.size[0] = 0.05f;
-    far_s.size[0] = 1.0f;
-    rc::finalizeInstance(scene, close_s);
-    rc::finalizeInstance(scene, far_s);
-    scene.instances.push_back(close_s);
-    scene.instances.push_back(far_s);
+    const float close_size[3] = {0.05f, 0.0f, 0.0f};
+    const float far_size[3] = {1.0f, 0.0f, 0.0f};
+    const int ci = scene.addInstance(rc::GeomType::kSphere, close_size, 0.0f);
+    const int fi = scene.addInstance(rc::GeomType::kSphere, far_size, 0.0f);
 
     // Close sphere inside the 0.3 m near clip (the sensor housing case);
     // the beam must report the far target instead.
     std::vector<rc::InstanceXform> xf = {
-        xformAt(scene.instances[0], 0.2f, 0.0f, 0.0f),
-        xformAt(scene.instances[1], 10.0f, 0.0f, 0.0f)};
+        xformAt(scene, ci, 0.2f, 0.0f, 0.0f),
+        xformAt(scene, fi, 10.0f, 0.0f, 0.0f)};
     const std::vector<float> alt = {0.0f}, az = {0.0f};
     const auto range = cast(scene, xf, alt, az, scanParams(1, 4));
     EXPECT_NEAR(range[0], 9.0f, 1e-4f);
@@ -391,12 +367,9 @@ TEST(Raycast, UniformShellExactRange)
     constexpr float kR = 50.0f;
 
     rc::Scene scene;
-    rc::Instance shell;
-    shell.type = rc::GeomType::kSphere;
-    shell.size[0] = kR;
-    rc::finalizeInstance(scene, shell);
-    scene.instances.push_back(shell);
-    std::vector<rc::InstanceXform> xf = {xformAt(shell, 0.0f, 0.0f, 0.0f)};
+    const float shell_size[3] = {kR, 0.0f, 0.0f};
+    const int si = scene.addInstance(rc::GeomType::kSphere, shell_size, 0.0f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 0.0f, 0.0f, 0.0f)};
 
     std::vector<float> alt(H), az(H);
     for (int i = 0; i < H; ++i) {
@@ -406,6 +379,39 @@ TEST(Raycast, UniformShellExactRange)
     const auto range = cast(scene, xf, alt, az, scanParams(H, W));
     for (int i = 0; i < H * W; ++i) {
         EXPECT_NEAR(range[i], kR, 5e-3f) << "ray " << i;
+    }
+}
+
+TEST(Raycast, CastScanThroughRayProcessor)
+{
+    // The backend entry: dispatch → castScan must agree with the CPU
+    // reference (on the CPU backend they are the same shared math; on a
+    // GPU build this same test exercises the device kernel).
+    ::setenv("GZ_OUSTER_BACKEND", "cpu", 1);
+
+    constexpr int H = 8, W = 32;
+    rc::Scene scene;
+    const float shell_size[3] = {20.0f, 0.0f, 0.0f};
+    const int si = scene.addInstance(rc::GeomType::kSphere, shell_size, 0.7f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 0.0f, 0.0f, 0.0f)};
+
+    std::vector<float> alt(H), az(H, 0.5f);
+    for (int i = 0; i < H; ++i) alt[i] = -20.0f + 5.0f * i;
+    const auto sp = scanParams(H, W);
+
+    const int n = H * W;
+    std::vector<float> range(n), retro(n);
+    const float sr[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const float st[3] = {0, 0, 0};
+
+    RayProcessor proc;
+    ASSERT_TRUE(proc.usesCpuFallback());
+    proc.castScan(scene.view(), 1u, xf.data(), alt.data(), az.data(),
+                  sr, st, sp, range.data(), retro.data());
+
+    for (int i = 0; i < n; ++i) {
+        EXPECT_NEAR(range[i], 20.0f, 5e-3f) << "ray " << i;
+        EXPECT_NEAR(retro[i], 0.7f, 1e-6f) << "ray " << i;
     }
 }
 

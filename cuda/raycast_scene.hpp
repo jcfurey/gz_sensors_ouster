@@ -1,7 +1,7 @@
 // Copyright 2026 John C. Furey
 // SPDX-License-Identifier: Apache-2.0
 //
-// Self-contained CPU raycaster for the full per-beam raycast mode
+// Host-side scene builder for the full per-beam raycast mode
 // (<ray_mode>raycast</ray_mode>): every Ouster beam is cast as an exact ray
 // — calibrated elevation, per-beam azimuth offset, encoder column, and the
 // true beam-origin parallax (ray origins offset on the beam-origin circle,
@@ -9,15 +9,19 @@
 // — against a mirror of the scene geometry. No rendering, no pixel grid, no
 // interpolation of any kind.
 //
-// The scene is split into immutable geometry (Scene: primitive parameters
-// and triangle meshes with a per-mesh BVH, built once) and per-scan rigid
-// transforms (InstanceXform, recomputed from entity world poses every scan).
-// castScan() is OpenMP-parallel over the H×W output rays.
+// The scene is built once into flat arrays (instances + concatenated,
+// globally rebased mesh/BVH data — see raycast_math.hpp) so the SAME data
+// runs on every backend: the CUDA/HIP/SYCL kernels upload the arrays and
+// device-execute the shared rcCastOneRay; the CPU fallback (castScan below)
+// OpenMP-parallelises the identical function. Per-scan rigid transforms
+// (InstanceXform) are recomputed from entity world poses every scan.
 //
 // Pure math, no Gazebo / rendering dependencies — unit-testable as-is. The
 // plugin owns the ECM→Scene mirroring.
 
 #pragma once
+
+#include "raycast_math.hpp"
 
 #include <cstdint>
 #include <vector>
@@ -25,88 +29,79 @@
 namespace gz_gpu_ouster_lidar {
 namespace rc {
 
-enum class GeomType : int {
-    kPlane = 0,    ///< z = 0 plane, finite half-extents size[0..1] (0 → infinite)
-    kBox,          ///< axis-aligned box, half-extents size[0..2]
-    kSphere,       ///< radius size[0]
-    kCylinder,     ///< z axis, radius size[0], half-length size[1]
-    kMesh,         ///< triangle mesh, index `mesh` into Scene::meshes
+/// Non-owning view of a flat scene: exactly what a backend uploads.
+struct SceneView {
+    const RcInstance * instances = nullptr;
+    int n_instances = 0;
+    const float * verts = nullptr;
+    int n_vert_floats = 0;
+    const int * tris = nullptr;
+    int n_tri_ints = 0;
+    const int * order = nullptr;
+    int n_order = 0;
+    const MeshBvhNode * nodes = nullptr;
+    int n_nodes = 0;
 };
 
-struct MeshBvhNode {
-    float bmin[3];
-    float bmax[3];
-    int left = -1;    ///< child node index, -1 for leaf
-    int right = -1;
-    int first = 0;    ///< leaf: first index into MeshData::order
-    int count = 0;    ///< leaf: triangle count
+/// Flat scene storage. Build with addMesh()/addInstance(); immutable
+/// afterwards (the plugin shares it with the cast worker via
+/// shared_ptr<const Scene> and rebuilds a fresh one on entity changes).
+class Scene {
+public:
+    /// Append a triangle mesh (instance-local coordinates, scale already
+    /// baked in) and build its BVH into the global arrays. Returns the
+    /// global root-node index, or -1 for an empty/degenerate mesh.
+    int addMesh(const std::vector<float> & verts,
+                const std::vector<int> & tris);
+
+    /// Append an instance. For kMesh pass the root node from addMesh().
+    /// Returns the instance index.
+    int addInstance(GeomType type, const float size[3], float retro,
+                    int root_node = -1);
+
+    SceneView view() const;
+
+    int instanceCount() const { return static_cast<int>(instances_.size()); }
+    int meshCount() const { return mesh_count_; }
+    const RcInstance & instance(int i) const
+    {
+        return instances_[static_cast<size_t>(i)];
+    }
+
+    /// Fill an InstanceXform from the instance's local→world pose
+    /// (row-major rotation r_lw, translation t_lw); recomputes the world
+    /// AABB from the instance's cached local bounds.
+    void computeXform(int instance_idx,
+                      const float r_lw[9], const float t_lw[3],
+                      InstanceXform & out) const;
+
+private:
+    struct LocalBounds {
+        float bmin[3];
+        float bmax[3];
+    };
+
+    std::vector<RcInstance> instances_;
+    std::vector<LocalBounds> bounds_;     // parallel to instances_
+    std::vector<float> verts_;
+    std::vector<int> tris_;
+    std::vector<int> order_;
+    std::vector<MeshBvhNode> nodes_;
+    // Per-root local AABB of each added mesh, keyed by root node index.
+    int mesh_count_ = 0;
 };
 
-/// Immutable triangle mesh in instance-local coordinates (scale baked in).
-struct MeshData {
-    std::vector<float> verts;       ///< xyz triples
-    std::vector<int> tris;          ///< vertex-index triples
-    std::vector<int> order;         ///< BVH leaf → triangle index permutation
-    std::vector<MeshBvhNode> nodes; ///< nodes[0] is the root
-    float bmin[3] = {0, 0, 0};      ///< local AABB (set by buildMeshBvh)
-    float bmax[3] = {0, 0, 0};
-};
-
-/// Immutable per-instance geometry. Transforms live in InstanceXform.
-struct Instance {
-    GeomType type = GeomType::kBox;
-    float size[3] = {0, 0, 0};
-    int mesh = -1;
-    float retro = 0.0f;            ///< laser_retro of the visual (0 = unset)
-    float local_bmin[3] = {0, 0, 0};  ///< local AABB (set by finalizeInstance)
-    float local_bmax[3] = {0, 0, 0};
-};
-
-struct Scene {
-    std::vector<Instance> instances;
-    std::vector<MeshData> meshes;
-};
-
-/// Per-scan rigid transform of one instance.
-struct InstanceXform {
-    float r[9];     ///< world→local rotation (row-major)
-    float t[3];     ///< world→local translation: p_l = r·p_w + t
-    float bmin[3];  ///< world-space AABB for the broad-phase reject
-    float bmax[3];
-};
-
-struct ScanParams {
-    int H = 0;                 ///< beam count (output rows)
-    int W = 0;                 ///< columns per frame (output cols)
-    float max_range = 120.0f;  ///< metres; hits beyond this are misses
-    float near_clip = 0.3f;    ///< metres; hits closer than this are ignored
-    float beam_origin_m = 0.0f;  ///< lidar-origin→beam-origin offset (metres)
-};
-
-/// Build the BVH (and local AABB) for a mesh whose verts/tris are filled in.
-/// Returns false for an empty/degenerate mesh.
-bool buildMeshBvh(MeshData & mesh);
-
-/// Compute the instance's local AABB from its geometry (meshes resolved
-/// through `scene`). Call once after the instance geometry is set.
-void finalizeInstance(const Scene & scene, Instance & inst);
-
-/// Fill an InstanceXform from the instance's local→world pose
-/// (row-major rotation r_lw, translation t_lw).
-void computeXform(const Instance & inst,
-                  const float r_lw[9], const float t_lw[3],
-                  InstanceXform & out);
-
-/// Cast the full scan. Output layout matches the rest of the pipeline:
-/// row = beam, column = Ouster measurement id (m = 0 forward, azimuth
-/// decreasing with m). `sensor_r`/`sensor_t` is the sensor→world pose
-/// (row-major rotation + translation).
+/// CPU reference cast (the always-available fallback; OpenMP-parallel).
+/// Output layout matches the rest of the pipeline: row = beam, column =
+/// Ouster measurement id (m = 0 forward, azimuth decreasing with m).
+/// `sensor_r`/`sensor_t` is the sensor→world pose (row-major rotation +
+/// translation).
 ///
 /// range_out[H×W]: reported Ouster range in metres (+inf for a miss) — the
 /// value r such that the standard XYZ LUT xyz = (r−n)·d̂ + n·[cosθ,sinθ,0]
 /// reconstructs the true hit point. retro_out[H×W] (optional, may be null):
 /// laser_retro of the nearest hit instance, 0 when unset or on a miss.
-void castScan(const Scene & scene,
+void castScan(const SceneView & scene,
               const InstanceXform * xforms,
               const float * beam_alt_deg,
               const float * beam_az_deg,
