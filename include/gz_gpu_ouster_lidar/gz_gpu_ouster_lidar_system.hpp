@@ -314,14 +314,19 @@ private:
     std::string image_frame_id_;
     std::string imu_frame_id_;
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
-    // Touched only on the render thread today (OnRender is serialized by the
-    // Gazebo rendering system), but kept atomic so the metadata-republish
-    // state stays well-defined if a future render path ever runs concurrently.
+    // Metadata republish state. Driven from PostUpdate (sim thread) via
+    // publishMetadataIfNeeded() so it works in both ray modes; kept atomic
+    // for cheap cross-thread observability in logs/diagnostics.
     std::atomic<bool> metadata_published_{false};  // true once a subscriber has acked
-    std::atomic<int> metadata_pub_count_{0};       // render ticks since sensor init
+    std::atomic<int> metadata_pub_count_{0};       // copies sent since (re-)arm
+    std::chrono::nanoseconds last_meta_pub_time_{-1};  // sim time of last copy
     bool memory_logged_ = false;       // true after first GPU-buffer report
 
     // ── Drain thread ─────────────────────────────────────────────────────────
+    // encode_pkts_ is the sim-thread staging vector; swapping with
+    // drain_pkts_ circulates buffer capacity between the encode and drain
+    // sides so steady state allocates nothing per scan.
+    std::vector<ouster_sensor_msgs::msg::PacketMsg> encode_pkts_;
     std::vector<ouster_sensor_msgs::msg::PacketMsg> drain_pkts_;
     std::thread drain_thread_;
     std::mutex drain_mtx_;
@@ -361,6 +366,7 @@ private:
     // ── Private methods ──────────────────────────────────────────────────────
     bool loadMetadata();
     void initRosInterface();
+    void publishMetadataIfNeeded(std::chrono::nanoseconds sim_now);
     void onPanelFrame(size_t panel, const float * data,
                       unsigned int width, unsigned int height,
                       unsigned int channels);

@@ -36,7 +36,7 @@ For example, with `<sensor_name>/sensor/lidar/lidar0</sensor_name>`:
 | `.../signal_image` | `sensor_msgs/Image` | lidar_hz | Signal photon counts (mono16) |
 | `.../reflec_image` | `sensor_msgs/Image` | lidar_hz | Reflectivity (mono16) |
 | `.../nearir_image` | `sensor_msgs/Image` | lidar_hz | Near-IR (mono16) |
-| `.../camera_info` | `sensor_msgs/CameraInfo` | lidar_hz | Range-image camera metadata (H×W, frame_id) |
+| `.../camera_info` | `sensor_msgs/CameraInfo` | lidar_hz | Range-image camera metadata (H×W, frame_id). `distortion_model` is the non-standard string `equirectangular`: u is linear in azimuth, v linear in elevation; fx/fy in K are pixels-per-radian. Standard pinhole/fisheye consumers must not reproject with it. |
 | `.../imu_packets` | `ouster_sensor_msgs/PacketMsg` | imu_hz | Native Ouster IMU packets (if IMU enabled) |
 | `.../imu` | `sensor_msgs/Imu` | imu_hz | Standard ROS IMU message (if IMU enabled) |
 
@@ -672,7 +672,14 @@ noise params to 0 falls back to the ouster_ros default literals
    effects), then PacketWriter encodes the result. The GPU backends use
    one device stream per sensor; the CPU backend uses OpenMP for
    resample and runs noise sequentially.
-6. **drainThreadFunc()** publishes packets with rolling-shutter inter-packet timing
+6. **drainThreadFunc()** publishes packets with rolling-shutter inter-packet
+   timing. Pacing follows the *observed* wall-clock scan cadence (capped at
+   the nominal 1/lidar_hz) so running the sim faster than real time doesn't
+   back the drain up. Note the timing semantics: packet/column **timestamps
+   are sim time** and describe an idealised rotation across the scan period;
+   the underlying data is a single instantaneous snapshot per scan (no
+   rolling-shutter geometry), and wall-clock spacing exists only to avoid
+   bursting consumers.
 
 With `<ray_mode>raycast</ray_mode>` steps 2-3 are replaced by an ECM scene
 mirror (visual geometries extracted once, world poses refreshed per scan,
