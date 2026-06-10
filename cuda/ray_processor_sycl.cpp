@@ -23,6 +23,7 @@
 
 #include <sycl/sycl.hpp>
 #include "ray_processor_math.hpp"
+#include "raycast_math.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -31,6 +32,7 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
 
 namespace gz_gpu_ouster_lidar {
 
@@ -89,6 +91,7 @@ public:
     {
         auto maybeFree = [&](void * p) { if (p) sycl::free(p, q_); };
         maybeFree(u_depth_);
+        maybeFree(u_retro_);
         maybeFree(u_range_);
         maybeFree(u_signal_);
         maybeFree(u_refl_);
@@ -96,6 +99,12 @@ public:
         maybeFree(u_raw_frame_);
         maybeFree(u_beam_alt_);
         maybeFree(u_beam_az_);
+        maybeFree(u_rc_insts_);
+        maybeFree(u_rc_verts_);
+        maybeFree(u_rc_tris_);
+        maybeFree(u_rc_order_);
+        maybeFree(u_rc_nodes_);
+        maybeFree(u_rc_xforms_);
     }
 
     void processRaw(
@@ -133,9 +142,138 @@ public:
         std::memcpy(nearir_out,       u_nearir_, static_cast<size_t>(out_n) * sizeof(uint16_t));
     }
 
+    void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) override
+    {
+        const int out_n = pp.H * pp.W;
+        ensureBuffers(out_n);
+
+        std::memcpy(u_depth_, depth_host,
+                    static_cast<size_t>(out_n) * sizeof(float));
+        if (retro_host) {
+            ensureRetroBuffer(out_n);
+            std::memcpy(u_retro_, retro_host,
+                        static_cast<size_t>(out_n) * sizeof(float));
+        }
+
+        launchRayKernel(
+            u_depth_, retro_host ? u_retro_ : nullptr,
+            u_range_, u_signal_, u_refl_, u_nearir_, pp, out_n);
+        q_.wait();
+
+        std::memcpy(range_out,        u_range_,  static_cast<size_t>(out_n) * sizeof(uint32_t));
+        std::memcpy(signal_out,       u_signal_, static_cast<size_t>(out_n) * sizeof(uint16_t));
+        std::memcpy(reflectivity_out, u_refl_,   static_cast<size_t>(out_n) * sizeof(uint8_t));
+        std::memcpy(nearir_out,       u_nearir_, static_cast<size_t>(out_n) * sizeof(uint16_t));
+    }
+
+    void castScan(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        float * range_out,
+        float * retro_out) override
+    {
+        const int out_n = sp.H * sp.W;
+        ensureBuffers(out_n);
+        ensureRetroBuffer(out_n);
+        ensureSceneBuffers(scene, scene_version);
+        ensureResampleBuffers(0, sp.H);  // beam-angle buffers only
+
+        if (scene.n_instances > 0) {
+            std::memcpy(u_rc_xforms_, xforms,
+                static_cast<size_t>(scene.n_instances) *
+                    sizeof(rc::InstanceXform));
+        }
+        std::memcpy(u_beam_alt_, beam_alt_deg,
+                    static_cast<size_t>(sp.H) * sizeof(float));
+        std::memcpy(u_beam_az_, beam_az_deg,
+                    static_cast<size_t>(sp.H) * sizeof(float));
+
+        float sr[9], st[3];
+        for (int i = 0; i < 9; ++i) sr[i] = sensor_r[i];
+        for (int i = 0; i < 3; ++i) st[i] = sensor_t[i];
+
+        const rc::RcInstance * insts = u_rc_insts_;
+        const float * verts = u_rc_verts_;
+        const int * tris = u_rc_tris_;
+        const int * order = u_rc_order_;
+        const rc::MeshBvhNode * nodes = u_rc_nodes_;
+        const rc::InstanceXform * xf = u_rc_xforms_;
+        const float * alt = u_beam_alt_;
+        const float * az = u_beam_az_;
+        float * d_range = u_depth_;
+        float * d_retro = u_retro_;
+        const rc::ScanParams sp_copy = sp;
+        const int n_inst = scene.n_instances;
+        const float kInf = std::numeric_limits<float>::infinity();
+
+        struct SrSt { float sr[9]; float st[3]; };
+        SrSt pose{};
+        std::memcpy(pose.sr, sr, sizeof(sr));
+        std::memcpy(pose.st, st, sizeof(st));
+
+        q_.parallel_for(sycl::range<1>{static_cast<size_t>(out_n)},
+            [=](sycl::id<1> it) {
+                const int idx = static_cast<int>(it[0]);
+                float range, retro;
+                rc::rcCastOneRay(insts, n_inst, verts, tris, order, nodes,
+                                 xf, alt, az, pose.sr, pose.st, sp_copy,
+                                 idx, kInf, range, retro);
+                d_range[idx] = range;
+                d_retro[idx] = retro;
+            });
+        q_.wait();
+
+        std::memcpy(range_out, u_depth_,
+                    static_cast<size_t>(out_n) * sizeof(float));
+        std::memcpy(retro_out, u_retro_,
+                    static_cast<size_t>(out_n) * sizeof(float));
+    }
+
     const char * name() const override { return integrated_ ? "sycl-igpu" : "sycl"; }
 
 private:
+    /// Copy the flat scene arrays into shared USM, cached by version id.
+    void ensureSceneBuffers(const rc::SceneView & sv, uint64_t version)
+    {
+        if (version == rc_scene_version_ && rc_scene_version_valid_) return;
+
+        auto upload = [this](auto * & ptr, int & cap, const auto * src,
+                             int count) {
+            using T = std::remove_reference_t<decltype(*ptr)>;
+            if (count == 0) return;
+            if (cap < count) {
+                allocShared(ptr, static_cast<size_t>(count));
+                cap = count;
+            }
+            std::memcpy(ptr, src, static_cast<size_t>(count) * sizeof(T));
+        };
+        upload(u_rc_insts_, rc_insts_cap_, sv.instances, sv.n_instances);
+        upload(u_rc_verts_, rc_verts_cap_, sv.verts, sv.n_vert_floats);
+        upload(u_rc_tris_, rc_tris_cap_, sv.tris, sv.n_tri_ints);
+        upload(u_rc_order_, rc_order_cap_, sv.order, sv.n_order);
+        upload(u_rc_nodes_, rc_nodes_cap_, sv.nodes, sv.n_nodes);
+        if (rc_xforms_cap_ < sv.n_instances) {
+            allocShared(u_rc_xforms_,
+                        static_cast<size_t>(sv.n_instances));
+            rc_xforms_cap_ = sv.n_instances;
+        }
+        rc_scene_version_ = version;
+        rc_scene_version_valid_ = true;
+    }
+
     void launchRayKernel(
         const float * depth, const float * retro,
         uint32_t * range_out, uint16_t * signal_out,
@@ -286,6 +424,14 @@ private:
         buf_n_ = n;
     }
 
+    // Retro buffer is only used by processDepth (raycast mode); lazy.
+    void ensureRetroBuffer(int n)
+    {
+        if (n <= retro_n_) return;
+        allocShared(u_retro_, static_cast<size_t>(n));
+        retro_n_ = n;
+    }
+
     void ensureResampleBuffers(int raw_n, int H)
     {
         if (raw_n > raw_buf_n_) {
@@ -305,6 +451,7 @@ private:
     bool integrated_ = false;
 
     float *    u_depth_     = nullptr;
+    float *    u_retro_     = nullptr;   // processDepth only (lazy)
     uint32_t * u_range_     = nullptr;
     uint16_t * u_signal_    = nullptr;
     uint8_t *  u_refl_      = nullptr;
@@ -312,7 +459,22 @@ private:
     float *    u_raw_frame_ = nullptr;
     float *    u_beam_alt_  = nullptr;
     float *    u_beam_az_   = nullptr;
+    rc::RcInstance *    u_rc_insts_  = nullptr;
+    float *             u_rc_verts_  = nullptr;
+    int *               u_rc_tris_   = nullptr;
+    int *               u_rc_order_  = nullptr;
+    rc::MeshBvhNode *   u_rc_nodes_  = nullptr;
+    rc::InstanceXform * u_rc_xforms_ = nullptr;
+    int rc_insts_cap_ = 0;
+    int rc_verts_cap_ = 0;
+    int rc_tris_cap_ = 0;
+    int rc_order_cap_ = 0;
+    int rc_nodes_cap_ = 0;
+    int rc_xforms_cap_ = 0;
+    uint64_t rc_scene_version_ = 0;
+    bool rc_scene_version_valid_ = false;
     int buf_n_ = 0;
+    int retro_n_ = 0;
     int raw_buf_n_ = 0;
     int beam_buf_n_ = 0;
 };

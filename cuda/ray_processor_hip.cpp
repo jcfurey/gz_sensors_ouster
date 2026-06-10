@@ -15,6 +15,7 @@
 
 #include "backend.hpp"
 #include "ray_processor_math.hpp"
+#include "raycast_math.hpp"
 
 #include <hip/hip_runtime.h>
 #include <hiprand/hiprand_kernel.h>
@@ -81,6 +82,41 @@ __global__ void resampleKernelHip(
         raw, rp, el, az, __int_as_float(0x7f800000));  // miss → +inf
     depth = rpmath::applyBeamOrigin(depth, el, rp.beam_origin_m);
     depth_out[tid] = depth;
+}
+
+/// Per-thread arguments for the raycast kernel (mirror of CUDA).
+struct RcCastArgsHip {
+    float sr[9];
+    float st[3];
+    rc::ScanParams sp;
+    int n_instances;
+};
+
+__global__ void castScanKernelHip(
+    const rc::RcInstance * __restrict__ instances,
+    const float * __restrict__ verts,
+    const int * __restrict__ tris,
+    const int * __restrict__ order,
+    const rc::MeshBvhNode * __restrict__ nodes,
+    const rc::InstanceXform * __restrict__ xforms,
+    const float * __restrict__ beam_alt,
+    const float * __restrict__ beam_az,
+    // cppcheck-suppress passedByValueCallback ; GPU kernel arguments must be
+    // passed by value — the device cannot dereference a host reference.
+    RcCastArgsHip args,
+    float * __restrict__ range_out,
+    float * __restrict__ retro_out)
+{
+    const int n = args.sp.H * args.sp.W;
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    float range, retro;
+    rc::rcCastOneRay(instances, args.n_instances, verts, tris, order, nodes,
+                     xforms, beam_alt, beam_az, args.sr, args.st, args.sp,
+                     idx, __int_as_float(0x7f800000), range, retro);
+    range_out[idx] = range;
+    retro_out[idx] = retro;
 }
 
 __global__ void rayProcessKernelHip(
@@ -192,6 +228,7 @@ public:
     {
         auto maybeFree = [](void * p) { if (p) hipFree(p); };
         maybeFree(d_depth_);
+        maybeFree(d_retro_);
         maybeFree(d_range_);
         maybeFree(d_signal_);
         maybeFree(d_refl_);
@@ -199,6 +236,12 @@ public:
         maybeFree(d_raw_frame_);
         maybeFree(d_beam_alt_);
         maybeFree(d_beam_az_);
+        maybeFree(d_rc_insts_);
+        maybeFree(d_rc_verts_);
+        maybeFree(d_rc_tris_);
+        maybeFree(d_rc_order_);
+        maybeFree(d_rc_nodes_);
+        maybeFree(d_rc_xforms_);
         maybeFree(d_rand_states_);
         if (stream_) hipStreamDestroy(stream_);
     }
@@ -258,9 +301,140 @@ public:
         HIP_CHECK(hipStreamSynchronize(stream_));
     }
 
+    void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) override
+    {
+        const int out_n = pp.H * pp.W;
+        ensureBuffers(out_n);
+
+        const bool need_rand = noiseEnabled(pp);
+        if (need_rand) ensureRandStates(out_n);
+
+        h2d(d_depth_, depth_host, static_cast<size_t>(out_n) * sizeof(float));
+        if (retro_host) {
+            ensureRetroBuffer(out_n);
+            h2d(d_retro_, retro_host,
+                static_cast<size_t>(out_n) * sizeof(float));
+        }
+
+        const int grid = (out_n + kBlock - 1) / kBlock;
+        hipLaunchKernelGGL(rayProcessKernelHip, dim3(grid), dim3(kBlock), 0, stream_,
+            static_cast<const float *>(d_depth_),
+            static_cast<const float *>(retro_host ? d_retro_ : nullptr),
+            static_cast<uint32_t *>(d_range_),
+            static_cast<uint16_t *>(d_signal_),
+            static_cast<uint8_t *>(d_refl_),
+            static_cast<uint16_t *>(d_nearir_),
+            pp.H, pp.W,
+            pp.base_signal, pp.base_reflectivity,
+            pp.range_noise_min_std, pp.range_noise_max_std, pp.max_range,
+            pp.signal_noise_scale, pp.nearir_noise_scale,
+            pp.dropout_rate_close, pp.dropout_rate_far,
+            pp.edge_discon_threshold,
+            need_rand ? static_cast<hiprandState *>(d_rand_states_) : nullptr);
+        HIP_CHECK(hipGetLastError());
+
+        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, out_n);
+        HIP_CHECK(hipStreamSynchronize(stream_));
+    }
+
+    void castScan(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        float * range_out,
+        float * retro_out) override
+    {
+        const int out_n = sp.H * sp.W;
+        ensureBuffers(out_n);
+        ensureRetroBuffer(out_n);
+        ensureSceneBuffers(scene, scene_version);
+        ensureResampleBuffers(0, sp.H);  // beam-angle buffers only
+
+        if (scene.n_instances > 0) {
+            h2d(d_rc_xforms_, xforms,
+                static_cast<size_t>(scene.n_instances) *
+                    sizeof(rc::InstanceXform));
+        }
+        h2d(d_beam_alt_, beam_alt_deg,
+            static_cast<size_t>(sp.H) * sizeof(float));
+        h2d(d_beam_az_, beam_az_deg,
+            static_cast<size_t>(sp.H) * sizeof(float));
+
+        RcCastArgsHip args;
+        for (int i = 0; i < 9; ++i) args.sr[i] = sensor_r[i];
+        for (int i = 0; i < 3; ++i) args.st[i] = sensor_t[i];
+        args.sp = sp;
+        args.n_instances = scene.n_instances;
+
+        const int grid = (out_n + kBlock - 1) / kBlock;
+        hipLaunchKernelGGL(castScanKernelHip, dim3(grid), dim3(kBlock), 0, stream_,
+            static_cast<const rc::RcInstance *>(d_rc_insts_),
+            static_cast<const float *>(d_rc_verts_),
+            static_cast<const int *>(d_rc_tris_),
+            static_cast<const int *>(d_rc_order_),
+            static_cast<const rc::MeshBvhNode *>(d_rc_nodes_),
+            static_cast<const rc::InstanceXform *>(d_rc_xforms_),
+            static_cast<const float *>(d_beam_alt_),
+            static_cast<const float *>(d_beam_az_),
+            args,
+            static_cast<float *>(d_depth_),
+            static_cast<float *>(d_retro_));
+        HIP_CHECK(hipGetLastError());
+
+        d2h(range_out, d_depth_, static_cast<size_t>(out_n) * sizeof(float));
+        d2h(retro_out, d_retro_, static_cast<size_t>(out_n) * sizeof(float));
+        HIP_CHECK(hipStreamSynchronize(stream_));
+    }
+
     const char * name() const override { return integrated_ ? "hip-apu" : "hip"; }
 
 private:
+    /// Upload the flat scene arrays, cached by the caller's version id.
+    void ensureSceneBuffers(const rc::SceneView & sv, uint64_t version)
+    {
+        if (version == rc_scene_version_ && rc_scene_version_valid_) return;
+
+        auto upload = [this](void * & ptr, int & cap, const void * src,
+                             size_t bytes) {
+            if (bytes == 0) return;
+            if (static_cast<size_t>(cap) < bytes) {
+                allocDev(ptr, bytes);
+                cap = static_cast<int>(bytes);
+            }
+            h2d(ptr, src, bytes);
+        };
+        upload(d_rc_insts_, rc_insts_cap_, sv.instances,
+               static_cast<size_t>(sv.n_instances) * sizeof(rc::RcInstance));
+        upload(d_rc_verts_, rc_verts_cap_, sv.verts,
+               static_cast<size_t>(sv.n_vert_floats) * sizeof(float));
+        upload(d_rc_tris_, rc_tris_cap_, sv.tris,
+               static_cast<size_t>(sv.n_tri_ints) * sizeof(int));
+        upload(d_rc_order_, rc_order_cap_, sv.order,
+               static_cast<size_t>(sv.n_order) * sizeof(int));
+        upload(d_rc_nodes_, rc_nodes_cap_, sv.nodes,
+               static_cast<size_t>(sv.n_nodes) * sizeof(rc::MeshBvhNode));
+        if (rc_xforms_cap_ < sv.n_instances) {
+            allocDev(d_rc_xforms_,
+                static_cast<size_t>(sv.n_instances) *
+                    sizeof(rc::InstanceXform));
+            rc_xforms_cap_ = sv.n_instances;
+        }
+        rc_scene_version_ = version;
+        rc_scene_version_valid_ = true;
+    }
+
     // APU (integrated GPU) shares DRAM with the CPU. hipMallocManaged lets
     // the runtime map the allocation into both address spaces without an
     // explicit copy. On discrete AMD GPUs we use hipMalloc + async memcpy
@@ -325,6 +499,15 @@ private:
         }
     }
 
+    // Retro device buffer is only used by processDepth (raycast mode);
+    // allocated lazily so the panels path pays nothing for it.
+    void ensureRetroBuffer(int n)
+    {
+        if (n <= retro_n_) return;
+        allocDev(d_retro_, static_cast<size_t>(n) * sizeof(float));
+        retro_n_ = n;
+    }
+
     void ensureRandStates(int n)
     {
         if (n <= rand_n_) return;
@@ -360,6 +543,7 @@ private:
     bool integrated_ = false;
 
     void * d_depth_ = nullptr;
+    void * d_retro_ = nullptr;   // processDepth only (lazy)
     void * d_range_ = nullptr;
     void * d_signal_ = nullptr;
     void * d_refl_ = nullptr;
@@ -368,7 +552,22 @@ private:
     void * d_raw_frame_ = nullptr;
     void * d_beam_alt_ = nullptr;
     void * d_beam_az_ = nullptr;
+    void * d_rc_insts_  = nullptr;
+    void * d_rc_verts_  = nullptr;
+    void * d_rc_tris_   = nullptr;
+    void * d_rc_order_  = nullptr;
+    void * d_rc_nodes_  = nullptr;
+    void * d_rc_xforms_ = nullptr;
+    int rc_insts_cap_ = 0;
+    int rc_verts_cap_ = 0;
+    int rc_tris_cap_ = 0;
+    int rc_order_cap_ = 0;
+    int rc_nodes_cap_ = 0;
+    int rc_xforms_cap_ = 0;
+    uint64_t rc_scene_version_ = 0;
+    bool rc_scene_version_valid_ = false;
     int buf_n_ = 0;
+    int retro_n_ = 0;
     int rand_n_ = 0;
     int raw_buf_n_ = 0;
     int beam_buf_n_ = 0;

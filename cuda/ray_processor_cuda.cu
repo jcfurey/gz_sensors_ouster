@@ -9,6 +9,7 @@
 #include "ray_processor_cuda.cuh"
 #include "backend.hpp"
 #include "ray_processor_math.hpp"
+#include "raycast_math.hpp"
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -91,6 +92,44 @@ void launchResampleKernel(
     resampleKernel<<<grid, kBlock, 0, static_cast<cudaStream_t>(stream)>>>(
         d_raw_frame, d_beam_alt, d_beam_az, d_depth_out, rp);
     CUDA_CHECK(cudaGetLastError());
+}
+
+/// Per-thread arguments for the raycast kernel that don't vary per ray.
+/// Passed by value (~70 B) like ResampleParams.
+struct RcCastArgs {
+    float sr[9];
+    float st[3];
+    rc::ScanParams sp;
+    int n_instances;
+};
+
+/// Full per-beam raycast: one thread per output pixel, executing the SAME
+/// rcCastOneRay the CPU fallback runs (shared raycast_math.hpp).
+__global__ void castScanKernel(
+    const rc::RcInstance * __restrict__ instances,
+    const float * __restrict__ verts,
+    const int * __restrict__ tris,
+    const int * __restrict__ order,
+    const rc::MeshBvhNode * __restrict__ nodes,
+    const rc::InstanceXform * __restrict__ xforms,
+    const float * __restrict__ beam_alt,
+    const float * __restrict__ beam_az,
+    // cppcheck-suppress passedByValueCallback ; GPU kernel arguments must be
+    // passed by value — the device cannot dereference a host reference.
+    RcCastArgs args,
+    float * __restrict__ range_out,
+    float * __restrict__ retro_out)
+{
+    const int n = args.sp.H * args.sp.W;
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    float range, retro;
+    rc::rcCastOneRay(instances, args.n_instances, verts, tris, order, nodes,
+                     xforms, beam_alt, beam_az, args.sr, args.st, args.sp,
+                     idx, CUDART_INF_F, range, retro);
+    range_out[idx] = range;
+    retro_out[idx] = retro;
 }
 
 /// Process depth + retro → range_mm, signal, reflectivity.
@@ -269,6 +308,7 @@ public:
     ~CudaBackend() override
     {
         if (d_depth_)       cudaFree(d_depth_);
+        if (d_retro_)       cudaFree(d_retro_);
         if (d_range_)       cudaFree(d_range_);
         if (d_signal_)      cudaFree(d_signal_);
         if (d_refl_)        cudaFree(d_refl_);
@@ -276,6 +316,12 @@ public:
         if (d_raw_frame_)   cudaFree(d_raw_frame_);
         if (d_beam_alt_)    cudaFree(d_beam_alt_);
         if (d_beam_az_)     cudaFree(d_beam_az_);
+        if (d_rc_insts_)    cudaFree(d_rc_insts_);
+        if (d_rc_verts_)    cudaFree(d_rc_verts_);
+        if (d_rc_tris_)     cudaFree(d_rc_tris_);
+        if (d_rc_order_)    cudaFree(d_rc_order_);
+        if (d_rc_nodes_)    cudaFree(d_rc_nodes_);
+        if (d_rc_xforms_)   cudaFree(d_rc_xforms_);
         if (d_rand_states_) cudaFree(d_rand_states_);
         if (stream_)        cudaStreamDestroy(stream_);
     }
@@ -334,9 +380,147 @@ public:
         CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 
+    void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) override
+    {
+        const int out_n = pp.H * pp.W;
+        ensureBuffers(out_n);
+
+        const bool need_rand = noiseEnabled(pp);
+        if (need_rand) ensureRandStates(out_n);
+
+        CUDA_CHECK(cudaMemcpyAsync(d_depth_, depth_host,
+            static_cast<size_t>(out_n) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        if (retro_host) {
+            ensureRetroBuffer(out_n);
+            CUDA_CHECK(cudaMemcpyAsync(d_retro_, retro_host,
+                static_cast<size_t>(out_n) * sizeof(float),
+                cudaMemcpyHostToDevice, stream_));
+        }
+
+        launchRayProcessKernel(
+            static_cast<const float *>(d_depth_),
+            retro_host ? static_cast<const float *>(d_retro_) : nullptr,
+            static_cast<uint32_t *>(d_range_),
+            static_cast<uint16_t *>(d_signal_),
+            static_cast<uint8_t *>(d_refl_),
+            static_cast<uint16_t *>(d_nearir_),
+            pp,
+            need_rand ? d_rand_states_ : nullptr,
+            stream_);
+
+        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, out_n);
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
+
+    void castScan(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        float * range_out,
+        float * retro_out) override
+    {
+        const int out_n = sp.H * sp.W;
+        ensureBuffers(out_n);
+        ensureRetroBuffer(out_n);
+        ensureSceneBuffers(scene, scene_version);
+        ensureResampleBuffers(0, sp.H);  // beam-angle buffers only
+
+        if (scene.n_instances > 0) {
+            CUDA_CHECK(cudaMemcpyAsync(d_rc_xforms_, xforms,
+                static_cast<size_t>(scene.n_instances) *
+                    sizeof(rc::InstanceXform),
+                cudaMemcpyHostToDevice, stream_));
+        }
+        CUDA_CHECK(cudaMemcpyAsync(d_beam_alt_, beam_alt_deg,
+            static_cast<size_t>(sp.H) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(d_beam_az_, beam_az_deg,
+            static_cast<size_t>(sp.H) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+
+        RcCastArgs args;
+        for (int i = 0; i < 9; ++i) args.sr[i] = sensor_r[i];
+        for (int i = 0; i < 3; ++i) args.st[i] = sensor_t[i];
+        args.sp = sp;
+        args.n_instances = scene.n_instances;
+
+        const int grid = (out_n + kBlock - 1) / kBlock;
+        castScanKernel<<<grid, kBlock, 0, stream_>>>(
+            static_cast<const rc::RcInstance *>(d_rc_insts_),
+            static_cast<const float *>(d_rc_verts_),
+            static_cast<const int *>(d_rc_tris_),
+            static_cast<const int *>(d_rc_order_),
+            static_cast<const rc::MeshBvhNode *>(d_rc_nodes_),
+            static_cast<const rc::InstanceXform *>(d_rc_xforms_),
+            static_cast<const float *>(d_beam_alt_),
+            static_cast<const float *>(d_beam_az_),
+            args,
+            static_cast<float *>(d_depth_),
+            static_cast<float *>(d_retro_));
+        CUDA_CHECK(cudaGetLastError());
+
+        CUDA_CHECK(cudaMemcpyAsync(range_out, d_depth_,
+            static_cast<size_t>(out_n) * sizeof(float),
+            cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(retro_out, d_retro_,
+            static_cast<size_t>(out_n) * sizeof(float),
+            cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
+
     const char * name() const override { return "cuda"; }
 
 private:
+    /// Upload the flat scene arrays, cached by the caller's version id —
+    /// geometry is immutable between rebuilds, so steady state uploads
+    /// only the per-scan transforms.
+    void ensureSceneBuffers(const rc::SceneView & sv, uint64_t version)
+    {
+        if (version == rc_scene_version_ && rc_scene_version_valid_) return;
+
+        auto upload = [this](void * & ptr, int & cap, const void * src,
+                             size_t bytes) {
+            if (bytes == 0) return;
+            if (static_cast<size_t>(cap) < bytes) {
+                realloc_(ptr, bytes);
+                cap = static_cast<int>(bytes);
+            }
+            CUDA_CHECK(cudaMemcpyAsync(ptr, src, bytes,
+                cudaMemcpyHostToDevice, stream_));
+        };
+        upload(d_rc_insts_, rc_insts_cap_, sv.instances,
+               static_cast<size_t>(sv.n_instances) * sizeof(rc::RcInstance));
+        upload(d_rc_verts_, rc_verts_cap_, sv.verts,
+               static_cast<size_t>(sv.n_vert_floats) * sizeof(float));
+        upload(d_rc_tris_, rc_tris_cap_, sv.tris,
+               static_cast<size_t>(sv.n_tri_ints) * sizeof(int));
+        upload(d_rc_order_, rc_order_cap_, sv.order,
+               static_cast<size_t>(sv.n_order) * sizeof(int));
+        upload(d_rc_nodes_, rc_nodes_cap_, sv.nodes,
+               static_cast<size_t>(sv.n_nodes) * sizeof(rc::MeshBvhNode));
+        if (rc_xforms_cap_ < sv.n_instances) {
+            realloc_(d_rc_xforms_,
+                static_cast<size_t>(sv.n_instances) *
+                    sizeof(rc::InstanceXform));
+            rc_xforms_cap_ = sv.n_instances;
+        }
+        rc_scene_version_ = version;
+        rc_scene_version_valid_ = true;
+    }
+
     static void realloc_(void * & ptr, size_t bytes)
     {
         if (ptr) { CUDA_CHECK(cudaFree(ptr)); ptr = nullptr; }
@@ -365,6 +549,16 @@ private:
             realloc_(d_beam_az_,  static_cast<size_t>(H) * sizeof(float));
             beam_buf_n_ = H;
         }
+    }
+
+    // Retro device buffer is only used by processDepth (the raycast mode
+    // restores laser_retro); allocated lazily so the panels path pays
+    // nothing for it.
+    void ensureRetroBuffer(int n)
+    {
+        if (n <= retro_n_) return;
+        realloc_(d_retro_, static_cast<size_t>(n) * sizeof(float));
+        retro_n_ = n;
     }
 
     void ensureRandStates(int n)
@@ -411,6 +605,7 @@ private:
 
     // Device buffers — noise processing
     void * d_depth_   = nullptr;
+    void * d_retro_   = nullptr;   // processDepth only (lazy)
     void * d_range_   = nullptr;
     void * d_signal_  = nullptr;
     void * d_refl_    = nullptr;
@@ -422,7 +617,24 @@ private:
     void * d_beam_alt_  = nullptr;
     void * d_beam_az_   = nullptr;
 
+    // Device buffers — raycast scene (cached by scene_version)
+    void * d_rc_insts_  = nullptr;
+    void * d_rc_verts_  = nullptr;
+    void * d_rc_tris_   = nullptr;
+    void * d_rc_order_  = nullptr;
+    void * d_rc_nodes_  = nullptr;
+    void * d_rc_xforms_ = nullptr;
+    int rc_insts_cap_ = 0;
+    int rc_verts_cap_ = 0;
+    int rc_tris_cap_ = 0;
+    int rc_order_cap_ = 0;
+    int rc_nodes_cap_ = 0;
+    int rc_xforms_cap_ = 0;
+    uint64_t rc_scene_version_ = 0;
+    bool rc_scene_version_valid_ = false;
+
     int buf_n_      = 0;
+    int retro_n_    = 0;
     int rand_n_     = 0;
     int raw_buf_n_  = 0;
     int beam_buf_n_ = 0;

@@ -6,6 +6,7 @@
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "imu_noise.hpp"     // Vec3 (used for IMU bias state members)
 #include "panel_layout.hpp"  // PanelLayout (cylindrical/hemispherical rig)
+#include "raycast_scene.hpp"  // rc::Scene (full per-beam raycast mode)
 
 #include <gz/sim/System.hh>
 #include <gz/common/Event.hh>
@@ -26,6 +27,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <atomic>
 #include <condition_variable>
@@ -175,6 +177,48 @@ private:
     // Render-thread-only: which panels delivered a frame this tick.
     std::vector<bool> panel_filled_;
 
+    // ── Full raycast mode (SDF <ray_mode>raycast</ray_mode>) ────────────────
+    // Casts every beam exactly (calibrated direction, true beam-origin
+    // parallax) against a scene mirrored from the ECM. No rendering is
+    // involved: no panel cameras, no anchor-sensor requirement, and the
+    // scan is throttled on sim time. laser_retro is restored as the
+    // reflectivity source (visuals carry components::LaserRetro).
+    std::string ray_mode_ = "panels";   // "panels" | "raycast"
+
+    // Immutable scene geometry, shared with the worker via shared_ptr so a
+    // rebuild (entity spawned/removed) never races an in-flight cast.
+    // rc_scene_version_ lets the GPU backends cache the uploaded geometry.
+    std::shared_ptr<const rc::Scene> rc_scene_;
+    uint64_t rc_scene_version_ = 0;
+    struct RaycastRef {
+        ::gz::sim::Entity entity{::gz::sim::kNullEntity};
+        // Extra local rotation folded into the entity pose (plane normal).
+        ::gz::math::Quaterniond offset{1, 0, 0, 0};
+    };
+    std::vector<RaycastRef> rc_refs_;       // parallel to rc_scene_->instances
+    size_t rc_visual_count_ = 0;            // rebuild trigger
+    std::chrono::nanoseconds rc_last_scan_time_{-1};
+
+    // Worker thread: PostUpdate posts a job (scene snapshot + per-instance
+    // transforms + sensor pose); the worker casts the scan and hands the
+    // H×W depth + H×W retro buffer through the frame triple-buffer.
+    std::thread rc_thread_;
+    std::mutex rc_mtx_;
+    std::condition_variable rc_cv_;
+    bool rc_job_ready_ = false;
+    std::shared_ptr<const rc::Scene> rc_job_scene_;
+    uint64_t rc_job_scene_version_ = 0;
+    std::vector<rc::InstanceXform> rc_job_xforms_;
+    float rc_job_sensor_r_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    float rc_job_sensor_t_[3] = {0, 0, 0};
+    std::vector<float> rc_out_;             // worker-local depth+retro
+
+    void raycastThreadFunc();
+    void rebuildRaycastScene(const ::gz::sim::EntityComponentManager & ecm,
+                             size_t visual_count);
+    void raycastPostUpdate(const ::gz::sim::UpdateInfo & info,
+                           const ::gz::sim::EntityComponentManager & ecm);
+
     // ── Lidar-frame pose tracking ────────────────────────────────────────────
     std::string lidar_frame_name_;          // URDF link name, e.g. "lidar0/lidar_frame"
     ::gz::sim::Entity lidar_frame_entity_{::gz::sim::kNullEntity};
@@ -197,6 +241,11 @@ private:
     void DestroyPanels();
 
     // ── Ray processor (vendor-neutral; CUDA/HIP/SYCL/CPU at runtime) ────────
+    // processor_mtx_ serialises backend calls: in raycast mode the worker
+    // thread (castScan) and the sim thread (processDepth in
+    // encodeAndPublish) would otherwise race on the backend's shared
+    // device buffers and stream.
+    std::mutex processor_mtx_;
     std::unique_ptr<RayProcessor> ray_processor_;
 
     // ── Channel buffers ──────────────────────────────────────────────────────

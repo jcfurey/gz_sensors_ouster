@@ -16,6 +16,7 @@
 #pragma once
 
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
+#include "raycast_scene.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -38,6 +39,39 @@ public:
         uint8_t *     reflectivity_out,
         uint16_t *    nearir_out,
         const RayProcessParams & pp) = 0;
+
+    /// Noise/channel stage only, for callers that already hold exact
+    /// per-beam ranges (the full-raycast mode): depth_host is H×W metres
+    /// (+inf miss), retro_host is an optional H×W laser_retro array
+    /// (nullptr → base_reflectivity / unit intensity).
+    virtual void processDepth(
+        const float * depth_host,
+        const float * retro_host,
+        uint32_t *    range_out,
+        uint16_t *    signal_out,
+        uint8_t *     reflectivity_out,
+        uint16_t *    nearir_out,
+        const RayProcessParams & pp) = 0;
+
+    /// Full per-beam raycast: cast every Ouster beam exactly against the
+    /// flat scene (shared rcCastOneRay — identical math on every backend).
+    /// `scene_version` is the caller's monotonically increasing scene id:
+    /// GPU backends cache the uploaded geometry arrays and re-upload only
+    /// when it changes; per-scan transforms upload every call.
+    ///
+    /// range_out[H×W]: reported Ouster range in metres (+inf miss);
+    /// retro_out[H×W]: laser_retro of the nearest hit (0 on miss/unset).
+    virtual void castScan(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        float * range_out,
+        float * retro_out) = 0;
 
     /// Short identifier: "cuda", "hip", "sycl", or "cpu".
     virtual const char * name() const = 0;

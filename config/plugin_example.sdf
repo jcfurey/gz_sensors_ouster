@@ -31,6 +31,20 @@
 
   <!-- ─── Lidar (optional) ────────────────────────────────────────── -->
 
+  <!-- Ray generation mode:
+         panels (default) — render a rig of perspective depth panels and
+             resample each calibrated beam from the covering panel (see
+             panel_oversample / panel_sampling below). Uses the GPU
+             renderer; requires a rendering sensor in the world.
+         raycast — cast every beam exactly (calibrated direction, true
+             beam-origin parallax) against a scene mirrored from the ECM.
+             Zero interpolation error; laser_retro drives reflectivity;
+             no rendering involved (no anchor-sensor requirement). CPU
+             (OpenMP); supports box/sphere/cylinder/plane/mesh visuals.
+             Capsule, ellipsoid, heightmap and actor visuals are not
+             mirrored (logged at startup). -->
+  <!-- <ray_mode>panels</ray_mode> -->
+
   <!-- Max sensing range in metres. Sets GPU far clip and noise scaling.
        Auto-derived from metadata prod_line if omitted (OS0→50, OS1→120, OS2→240).
        Only set this if you need to override the auto-detected value. -->
