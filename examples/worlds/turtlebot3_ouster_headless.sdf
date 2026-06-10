@@ -1,0 +1,138 @@
+<?xml version="1.0"?>
+<!--
+  GPU-free world for the TurtleBot3 + Ouster example in *raycast* mode.
+
+  Unlike ouster_demo.sdf this world deliberately does NOT load
+  gz-sim-sensors-system: that system is what spins up the ogre2 render engine
+  (needed for camera/gpu_lidar sensors and for the plugin's `panels` mode). In
+  raycast mode the plugin casts beams on the CPU against a scene it mirrors from
+  the ECM, so no render engine is required and the whole thing runs headless on a
+  machine with no GPU.
+
+  Systems loaded:
+    * Physics          - steps the sim.
+    * SceneBroadcaster - GUI / state (lets `gz sim -g` attach for the interactive
+                         "drive" mode; harmless when running server-only).
+    * UserCommands     - lets `ros_gz_sim create` spawn the URDF at runtime.
+    * Imu              - populates AngularVelocity/LinearAcceleration so the
+                         plugin's /imu output works.
+    * Altimeter        - updates the non-rendering `altimeter` pose-anchor sensor
+                         the raycast plugin looks up for its ray origin.
+
+  A walled arena with a few interior obstacles gives the LiDAR non-empty returns
+  to scan as the waffle drives around.
+-->
+<sdf version="1.9">
+  <world name="turtlebot3_ouster">
+
+    <physics name="default" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-altimeter-system"
+            name="gz::sim::systems::Altimeter"/>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.8 0.9 1</background>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.5 0.3 -1</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 10 x 10 m walled arena (4 walls, 0.2 m thick, 1 m tall). -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>10.2 0.2 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>10.2 0.2 1</size></box></geometry>
+          <material><diffuse>0.6 0.6 0.65 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>10.2 0.2 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>10.2 0.2 1</size></box></geometry>
+          <material><diffuse>0.6 0.6 0.65 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_east">
+      <static>true</static>
+      <pose>5 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 10.2 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 10.2 1</size></box></geometry>
+          <material><diffuse>0.6 0.6 0.65 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-5 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 10.2 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 10.2 1</size></box></geometry>
+          <material><diffuse>0.6 0.6 0.65 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Interior obstacles at varied ranges to exercise the depth channels. -->
+    <model name="box_near">
+      <static>true</static>
+      <pose>2 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.6 0.6 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.6 0.6 1</size></box></geometry>
+          <material><diffuse>0.8 0.2 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="cyl_mid">
+      <static>true</static>
+      <pose>-1.5 2.5 0.6 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.4</radius><length>1.2</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.4</radius><length>1.2</length></cylinder></geometry>
+          <material><diffuse>0.2 0.8 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="box_corner">
+      <static>true</static>
+      <pose>-3 -3 0.5 0 0 0.5</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1 1 1</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1 1 1</size></box></geometry>
+          <material><diffuse>0.8 0.7 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

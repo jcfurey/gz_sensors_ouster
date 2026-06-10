@@ -241,9 +241,12 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `urdf/ouster_macro.xacro` | Reusable `ouster_sensor` xacro macro (the building block) |
 | `urdf/ouster_standalone.urdf.xacro` | Single OS1-64 + IMU on a pedestal |
 | `urdf/sensor_stack.urdf.xacro` | Platform with front OS1-64+IMU and rear OS0-128 |
+| `urdf/turtlebot3_ouster.urdf.xacro` | A drivable TurtleBot3 waffle carrying the Ouster (used by the Docker test) |
 | `worlds/ouster_demo.sdf` | Demo world (physics + sensors + IMU systems, ground + obstacles) |
+| `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
+| `launch/turtlebot3_ouster.launch.py` | Bring up the TurtleBot3 waffle + Ouster (drivable, raycast by default) |
 
 Run (after `colcon build` + `source install/setup.bash`):
 
@@ -271,22 +274,23 @@ RViz config includes a `PointCloud` display for that topic.
 
 ### How the URDF wires to the plugin
 
-The plugin is a Gazebo **system** plugin on the model; it renders with
-its own depth-panel rig rather than a gz `<sensor type="gpu_lidar">`. The macro
-therefore emits, per sensor:
+The plugin is a Gazebo **system** plugin on the model; it casts its own rays
+rather than using a gz `<sensor type="gpu_lidar">`. The macro takes a
+**`ray_mode`** (default **`raycast`**) and emits, per sensor:
 
 - A **pose-anchor `<sensor>`** named exactly like the last segment of
-  `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up to read
-  its world pose (the ray-cast origin). It must be a *rendering* sensor so
-  `gz-sim-sensors-system` starts rendering and emits the `events::Render` event
-  the plugin needs (see [World
-  requirements](#world-requirements-read-this-if-no-point-cloud-is-published)).
-  It defaults to a minimal **`camera`** — the cheapest renderer, and **not** a
-  lidar, so it does not add a second raycast source. Pass
-  `anchor_type:=gpu_lidar` if you also want a native gz scan on
-  `<sensor_name>/gz_native_scan` (a second lidar source), or
-  `anchor_type:=altimeter` only if the world already contains another rendering
-  sensor.
+  `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up to read its
+  world pose (the ray-cast origin). What it must be depends on `ray_mode`:
+  - **`raycast`** (default) — beams are cast on the CPU against an ECM scene
+    mirror, with no render engine, so a non-rendering **`altimeter`** anchor is
+    enough and the world needs no GPU. Pass `anchor_type:=altimeter`.
+  - **`panels`** — the plugin drives a GpuRays rig off `events::Render`, so the
+    anchor must be a *rendering* sensor and the world must load
+    `gz-sim-sensors-system` (see [World
+    requirements](#world-requirements-read-this-if-no-point-cloud-is-published)).
+    It defaults to a minimal **`camera`** (cheapest renderer, not a lidar, so no
+    second scan); `anchor_type:=gpu_lidar` also emits a native gz scan on
+    `<sensor_name>/gz_native_scan`.
 - An optional real **`<sensor type="imu">`** (name contains `imu`) when
   `enable_imu` is set. This requires `gz-sim-imu-system` in the world
   (the demo world loads it) — the plugin reads the IMU components that
@@ -323,6 +327,45 @@ is explicit:
 Net TF chain: `points (<name>/lidar_frame) → base_link → base_footprint`, via
 both the launch stack (RSP / the mount `static_transform_publisher`) and the
 ouster driver.
+
+## Docker (standalone test)
+
+A self-contained [`Dockerfile`](Dockerfile) builds the plugin in isolation —
+ROS 2 + the new Gazebo + the pinned `ouster-ros` fork + this package — and
+exercises it on a **drivable TurtleBot3 waffle** ("a vehicle for the lidar to
+ride on"). No CUDA/GPU toolchain is installed, so the plugin builds its CPU
+(OpenMP) backend and the default smoke runs in **raycast** mode, which needs no
+render engine and so runs anywhere — even with no GPU.
+
+`ROS_DISTRO` selects the distro (matching this package's CI matrix); **Humble is
+not supported** (no `gz_*_vendor`; it ships Gazebo Fortress, not Harmonic+):
+
+```bash
+cd <this package>
+
+# Build (default jazzy → Harmonic; kilted → Ionic; lyrical → Jetty, advisory)
+docker build -t gzouster .
+docker build -t gzouster --build-arg ROS_DISTRO=kilted .
+
+# 1) Headless point-cloud smoke (no GPU): waits for a PointCloud2 on
+#    /sensor/lidar/lidar0/points and exits PASS/FAIL.
+docker run --rm gzouster
+
+# 2) Re-run the gtest suite.
+docker run --rm gzouster test
+
+# 3) Interactive: gz GUI + teleop_twist_keyboard on /cmd_vel (needs a display;
+#    --gpus all only if you want the GUI to render on the NVIDIA card).
+docker run --rm -it --gpus all \
+  -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix gzouster drive
+```
+
+The vehicle (`examples/urdf/turtlebot3_ouster.urdf.xacro`) reuses the genuine
+ROBOTIS `turtlebot3_description` waffle geometry, adds a new-Gazebo
+`gz-sim-diff-drive-system` (so it drives off `/cmd_vel`), and mounts the Ouster
+via the `ouster_sensor` macro in `ray_mode:=raycast`. The build clones
+`turtlebot3` only for its `turtlebot3_description` subpackage; both it and
+`ouster-ros` are pinned to exact commits for reproducibility.
 
 ## Included Metadata Files
 

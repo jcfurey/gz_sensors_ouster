@@ -39,6 +39,7 @@
             xyz:='0 0 0' rpy:='0 0 0'
             lidar_hz:=10.0
             enable_imu:=false imu_hz:=100.0
+            ray_mode:=raycast
             anchor_type:=camera">
 
     <!-- ROS topic prefix == <sensor_name>. Its last segment must equal `name`
@@ -69,15 +70,20 @@
       <origin xyz="${xyz}" rpy="${rpy}"/>
     </joint>
 
-    <!-- Pose-anchor sensor. NAME must equal `name` (plugin lookup). It must be a
-         *rendering* sensor so gz-sim-sensors-system builds the ogre2 scene and
-         emits events::Render, which is what drives this plugin's own GpuRays.
-         Default `camera` is the cheapest renderer and is NOT a lidar, so it
-         bootstraps rendering + supplies the pose without adding a second lidar
-         source. `gpu_lidar` also works but additionally emits a native gz scan
-         on <ns>/gz_native_scan (a second lidar raycast). `altimeter` is
-         non-rendering — only valid if the world already has another
-         camera/gpu_lidar. -->
+    <!-- Pose-anchor sensor. NAME must equal `name` (plugin lookup). What it
+         must be depends on ray_mode:
+           panels  — the plugin drives its own GpuRays off events::Render, so the
+                     anchor MUST be a *rendering* sensor (camera/gpu_lidar) to make
+                     gz-sim-sensors-system build the ogre2 scene + emit Render.
+                     Default `camera` is the cheapest renderer and is NOT a lidar,
+                     so it bootstraps rendering + supplies the pose without adding a
+                     second lidar source. `gpu_lidar` also works but additionally
+                     emits a native gz scan on <ns>/gz_native_scan.
+           raycast — no rendering involved, so a non-rendering `altimeter` anchor
+                     (handled by gz-sim-altimeter-system) is enough to supply the
+                     pose, and the world needs no render engine / GPU at all.
+         `altimeter` with panels is only valid if the world already has another
+         camera/gpu_lidar to bootstrap rendering. -->
     <gazebo reference="${name}/lidar_frame">
       <sensor name="${name}" type="${anchor_type}">
         <pose>0 0 0 0 0 0</pose>
@@ -143,6 +149,8 @@
         <metadata_path>${metadata_path}</metadata_path>
         <sensor_name>${ns}</sensor_name>
         <lidar_hz>${lidar_hz}</lidar_hz>
+        <!-- panels (GPU render rig) | raycast (CPU per-beam, no rendering). -->
+        <ray_mode>${ray_mode}</ray_mode>
         <xacro:if value="${enable_imu}">
           <imu_name>auto</imu_name>
           <imu_hz>${imu_hz}</imu_hz>

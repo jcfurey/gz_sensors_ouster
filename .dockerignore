@@ -1,0 +1,9 @@
+# Keep the build context clean: colcon artefacts and VCS metadata never belong
+# in the image (the Dockerfile rebuilds from the COPY'd source).
+build/
+install/
+log/
+.git/
+.github/
+**/__pycache__/
+*.pyc
