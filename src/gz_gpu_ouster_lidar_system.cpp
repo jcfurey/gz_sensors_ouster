@@ -245,6 +245,14 @@ void GzGpuOusterLidarSystem::Configure(
     // Out-of-range values are clamped AND reported — a silently rewritten
     // parameter (e.g. a typo'd negative noise std) is a debugging trap.
     auto clamp_warn = [](double & v, double lo, double hi, const char * name) {
+        // NaN compares false against everything, so it needs an explicit
+        // branch — and std::clamp would pass it through. Sanitise to the
+        // lower bound (what the old std::max(lo, v) form effectively did).
+        if (std::isnan(v)) {
+            RCLCPP_WARN(kLogger, "%s is NaN; using %g", name, lo);
+            v = lo;
+            return;
+        }
         if (v < lo || v > hi) {
             const double c = std::clamp(v, lo, hi);
             RCLCPP_WARN(kLogger, "%s=%g outside [%g, %g]; clamped to %g",
@@ -807,6 +815,13 @@ void GzGpuOusterLidarSystem::initRosInterface()
                     // Out-of-range values are clamped AND reported.
                     auto clamped = [&p](double lo, double hi) {
                         const double v = p.as_double();
+                        // NaN: std::clamp would return NaN — sanitise to
+                        // the lower bound instead (and say so).
+                        if (std::isnan(v)) {
+                            RCLCPP_WARN(kLogger, "%s is NaN; using %g",
+                                p.get_name().c_str(), lo);
+                            return lo;
+                        }
                         const double c = std::clamp(v, lo, hi);
                         if (c != v) {
                             RCLCPP_WARN(kLogger,
