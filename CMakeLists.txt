@@ -153,6 +153,11 @@ add_subdirectory(cuda)
 # include/ to the target's public include path.
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/gz_gpu_ouster_lidar_system.cpp
+  src/ouster_metadata.cpp
+  src/packet_encoder.cpp
+  src/panel_rig.cpp
+  src/raycast_mirror.cpp
+  src/ros_interface.cpp
 )
 
 # Link the non-ament targets. ament_auto_add_library already linked the ROS
@@ -221,6 +226,11 @@ if(BUILD_TESTING)
   # beam-origin parallax, retro, near clip, processDepth)
   ament_add_gtest(test_raycast test/test_raycast.cpp)
   target_link_libraries(test_raycast gz_gpu_ouster_lidar_cuda)
+
+  # Test: scan-frame triple buffer (header-only, no deps beyond the STL)
+  ament_add_gtest(test_frame_exchange test/test_frame_exchange.cpp)
+  target_include_directories(test_frame_exchange PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
   # Test: IMU noise model (CPU-only, no Gazebo dep)
   ament_add_gtest(test_imu_noise test/test_imu_noise.cpp)
