@@ -4,12 +4,14 @@
 #pragma once
 
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
-#include "imu_noise.hpp"  // Vec3 (used for IMU bias state members)
+#include "imu_noise.hpp"     // Vec3 (used for IMU bias state members)
+#include "panel_layout.hpp"  // PanelLayout (cylindrical/hemispherical rig)
 
 #include <gz/sim/System.hh>
 #include <gz/common/Event.hh>
 #include <gz/math/Pose3.hh>
-#include <gz/rendering/GpuRays.hh>
+#include <gz/math/Quaternion.hh>
+#include <gz/rendering/DepthCamera.hh>
 
 #include <rclcpp/rclcpp.hpp>
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
@@ -38,9 +40,11 @@ namespace gz_gpu_ouster_lidar {
 
 class RayProcessor;
 
-/// Gazebo Harmonic system plugin that creates a GpuRays sensor with
-/// per-beam non-uniform elevation angles matching Ouster calibration metadata,
-/// then encodes the raw depth buffer into Ouster PacketMsg via CUDA.
+/// Gazebo Harmonic system plugin that models the Ouster beam geometry
+/// directly: a rig of perspective depth panels (cylindrical sectors for
+/// OS0/1/2, plus a zenith cap for OSDome) is rendered each scan and every
+/// calibrated beam is resampled from the covering panel — no GpuRays
+/// cubemap. The resampled scan is encoded into Ouster PacketMsg on the GPU.
 class GzGpuOusterLidarSystem
         : public ::gz::sim::System,
             public ::gz::sim::ISystemConfigure,
@@ -150,14 +154,26 @@ private:
     std::vector<uint8_t> pkt_buf_;
     uint32_t frame_id_ = 0;
 
-    // ── GpuRays sensor ───────────────────────────────────────────────────────
+    // ── Panel rig (cylindrical / hemispherical depth cameras) ───────────────
     ::gz::sim::Entity sensor_entity_{::gz::sim::kNullEntity};
     std::atomic<bool> sensor_initialized_{false};
 
-    // Rendering scene / sensor pointers (set after rendering init)
-    ::gz::rendering::GpuRaysPtr gpu_rays_;
-    bool frame_connected_ = false;
-    gz::common::ConnectionPtr frame_conn_;
+    // Layout computed from beam metadata in Configure (panel orientations,
+    // intrinsics, packed-buffer offsets). layout_.rp is the ResampleParams
+    // handed to the backends each frame.
+    PanelLayout layout_;
+    double panel_oversample_ = 2.0;  // SDF <panel_oversample>, clamped 1..4
+    // SDF <panel_sampling>: "bilinear" (smooth surfaces, default) or
+    // "nearest" (raycast-like: one exact rendered ray per beam, direction
+    // quantised to the pixel grid, no range blending at depth edges).
+    std::string panel_sampling_ = "bilinear";
+
+    // Rendering objects (created lazily on the render thread in OnRender).
+    std::vector<::gz::rendering::DepthCameraPtr> panel_cams_;
+    std::vector<gz::common::ConnectionPtr> panel_conns_;
+    std::vector<::gz::math::Quaterniond> panel_quats_;  // sensor→panel rotation
+    // Render-thread-only: which panels delivered a frame this tick.
+    std::vector<bool> panel_filled_;
 
     // ── Lidar-frame pose tracking ────────────────────────────────────────────
     std::string lidar_frame_name_;          // URDF link name, e.g. "lidar0/lidar_frame"
@@ -178,7 +194,7 @@ private:
     gz::common::ConnectionPtr render_conn_;
     std::chrono::steady_clock::time_point last_render_time_{};
     void OnRender();
-    void DestroyGpuRays();
+    void DestroyPanels();
 
     // ── Ray processor (vendor-neutral; CUDA/HIP/SYCL/CPU at runtime) ────────
     std::unique_ptr<RayProcessor> ray_processor_;
@@ -190,29 +206,27 @@ private:
     std::vector<uint8_t>  reflectivity_buf_;
     std::vector<uint16_t> nearir_buf_;          // NEAR_IR channel for packet encoding
 
-    // Raw GpuRays frame triple-buffer:
-    //   pending_buf_  — render-thread scratch; memcpy from GpuRays lands here
-    //                   OUTSIDE the lock.
+    // Raw panel-rig frame triple-buffer:
+    //   pending_buf_  — render-thread scratch; each panel's depth callback
+    //                   memcpys into its packed-offset slot OUTSIDE the lock.
     //   raw_frame_buf_ — handoff slot; under frame_mtx_, render swaps
     //                    pending_buf_ in, sim swaps it out.
     //   process_buf_  — sim-thread scratch; encodeAndPublish reads from here
     //                   AFTER releasing the lock.
-    // After warmup, all three vectors hold capacity matching the largest seen
-    // frame so the per-frame memcpy doesn't reallocate. The render thread no
-    // longer holds frame_mtx_ during the ~1 ms (16-24 MB) memcpy.
+    // After warmup, all three vectors hold capacity matching the packed rig
+    // size so the per-frame memcpy doesn't reallocate. The render thread
+    // never holds frame_mtx_ during the panel memcpys.
     std::vector<float> pending_buf_;
     std::vector<float> raw_frame_buf_;
     std::vector<float> process_buf_;
-    int raw_frame_H_ = 0;
-    int raw_frame_W_ = 0;
-    int raw_frame_chan_ = 0;
+    int raw_frame_n_ = 0;               // floats in raw_frame_buf_ (== rp.raw_n)
     std::vector<float> beam_alt_f_;     // beam_alt_angles_ as float (for GPU upload)
     std::vector<float> beam_az_f_;      // beam_az_offsets_ as float
     std::mutex frame_mtx_;
     std::atomic<bool> frame_ready_{false};
-    // Cumulative count of GpuRays frames that arrived while a previous
-    // frame was still pending in raw_frame_buf_ — i.e. PostUpdate didn't
-    // drain in time and the older frame was overwritten unobserved.
+    // Cumulative count of rig frames that arrived while a previous frame
+    // was still pending in raw_frame_buf_ — i.e. PostUpdate didn't drain
+    // in time and the older frame was overwritten unobserved.
     std::atomic<uint64_t> dropped_frames_{0};
 
     // Counts OnRender() entries, i.e. how many times events::Render has fired.
@@ -274,18 +288,19 @@ private:
     // letter of the standard, racy in practice). Without an explicit
     // barrier, the dtor can race the render thread, freeing drain_cv_ /
     // frame_mtx_ / publish_mtx_ out from under an in-flight OnRender or
-    // onNewFrame. Both render-thread entry points lock this for the
+    // onPanelFrame. Both render-thread entry points lock this for the
     // duration of their work, and the dtor takes it once after disconnect()
     // to flush any in-flight callback before tearing down the rest.
     //
-    // MUST be recursive: gz-rendering signals the NewGpuRaysFrame event
-    // synchronously from inside Ogre2GpuRays::PostRender(), so onNewFrame()
-    // runs nested on the SAME render thread, *inside* OnRender() which already
-    // holds this lock across its gpu_rays_->PostRender() call. A plain
-    // std::mutex self-deadlocks the render thread there (which in turn stalls
-    // the gz-sim Sensors render loop and freezes /clock). The dtor still takes
-    // the lock from a different thread, so it blocks until the render thread
-    // has fully unwound both frames — the barrier guarantee is preserved.
+    // MUST be recursive: gz-rendering signals the NewDepthFrame event
+    // synchronously from inside Ogre2DepthCamera::PostRender(), so
+    // onPanelFrame() runs nested on the SAME render thread, *inside*
+    // OnRender() which already holds this lock across its per-panel
+    // PostRender() calls. A plain std::mutex self-deadlocks the render
+    // thread there (which in turn stalls the gz-sim Sensors render loop and
+    // freezes /clock). The dtor still takes the lock from a different
+    // thread, so it blocks until the render thread has fully unwound both
+    // frames — the barrier guarantee is preserved.
     mutable std::recursive_mutex render_busy_mtx_;
 
     // ── IMU timing ───────────────────────────────────────────────────────────
@@ -297,11 +312,11 @@ private:
     // ── Private methods ──────────────────────────────────────────────────────
     bool loadMetadata();
     void initRosInterface();
-    void onNewFrame(const float * data, unsigned int width,
-                    unsigned int height, unsigned int channels,
-                    const std::string & format);
+    void onPanelFrame(size_t panel, const float * data,
+                      unsigned int width, unsigned int height,
+                      unsigned int channels);
     void encodeAndPublish(int64_t stamp_ns,
-                          const float * raw_data, int gpu_H, int gpu_W, int gpu_chan);
+                          const float * raw_data, int raw_n);
     void publishImages(int64_t stamp_ns);
     void publishImu(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm);

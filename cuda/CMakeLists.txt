@@ -17,6 +17,7 @@ set(_backend_sources
   backend_cpu.cpp
   backend_stubs.cpp
   ray_processor_cpu_impl.cpp
+  panel_layout.cpp
   imu_noise.cpp
 )
 

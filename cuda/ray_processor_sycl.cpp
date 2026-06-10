@@ -89,7 +89,6 @@ public:
     {
         auto maybeFree = [&](void * p) { if (p) sycl::free(p, q_); };
         maybeFree(u_depth_);
-        maybeFree(u_retro_);
         maybeFree(u_range_);
         maybeFree(u_signal_);
         maybeFree(u_refl_);
@@ -110,7 +109,7 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & pp) override
     {
-        const int raw_n = rp.gpu_H * rp.gpu_W * rp.gpu_chan;
+        const int raw_n = rp.raw_n;
         const int out_n = rp.H * rp.W;
 
         ensureBuffers(out_n);
@@ -121,8 +120,10 @@ public:
         std::memcpy(u_beam_az_,   beam_az_host,  static_cast<size_t>(rp.H) * sizeof(float));
 
         launchResampleKernel(rp, out_n);
+        // No laser_retro channel from the panel rig — null retro selects
+        // base_reflectivity / unit intensity in the process kernel.
         launchRayKernel(
-            u_depth_, u_retro_,
+            u_depth_, nullptr,
             u_range_, u_signal_, u_refl_, u_nearir_, pp, out_n);
         q_.wait();
 
@@ -241,67 +242,28 @@ private:
         const float * beam_alt = u_beam_alt_;
         const float * beam_az = u_beam_az_;
         float * depth_out = u_depth_;
-        float * retro_out = u_retro_;
-        const int H = rp.H, W = rp.W;
-        const int gpu_H = rp.gpu_H, gpu_W = rp.gpu_W, gpu_chan = rp.gpu_chan;
-        const float min_alt = rp.min_alt;
-        const float v_range = rp.v_range;
-        const float deg_per_col = rp.deg_per_col;
+        const int W = rp.W;
         const float beam_origin_m = rp.beam_origin_m;
-        const int half_W = rp.half_W;
+        const float deg_per_col = 360.0f / static_cast<float>(W);
         const float kInf = std::numeric_limits<float>::infinity();
+        const ResampleParams rp_copy = rp;  // by-value capture into the kernel
 
         q_.parallel_for(sycl::range<1>{static_cast<size_t>(n)},
             [=](sycl::id<1> it) {
                 const int tid = static_cast<int>(it[0]);
                 const int beam = tid / W;
-                const int col  = tid % W;
+                const int m    = tid % W;
 
-                const float beam_angle = beam_alt[beam];
-                const float v_frac = (beam_angle - min_alt) / v_range;
-                const float row_f = v_frac * (gpu_H - 1);
-                const int row_lo = sycl::max(sycl::min(static_cast<int>(sycl::floor(row_f)), gpu_H - 1), 0);
-                const int row_hi = sycl::min(row_lo + 1, gpu_H - 1);
-                const float v_alpha = row_f - row_lo;
+                // Output column m is the Ouster measurement id: m = 0
+                // forward (+x), azimuth decreasing with m.
+                const float el = beam_alt[beam];
+                const float az = beam_az[beam] -
+                    static_cast<float>(m) * deg_per_col;
 
-                const float az_offset_cols = beam_az[beam] / deg_per_col;
-                float col_wrapped = sycl::fmod(
-                    static_cast<float>(col) + az_offset_cols + gpu_W,
-                    static_cast<float>(gpu_W));
-                if (col_wrapped < 0.f) col_wrapped += gpu_W;
-                const int col_lo = static_cast<int>(sycl::floor(col_wrapped)) % gpu_W;
-                const int col_hi = (col_lo + 1) % gpu_W;
-                const float h_alpha = col_wrapped - sycl::floor(col_wrapped);
-
-                const int idx_00 = (row_lo * gpu_W + col_lo) * gpu_chan;
-                const int idx_01 = (row_lo * gpu_W + col_hi) * gpu_chan;
-                const int idx_10 = (row_hi * gpu_W + col_lo) * gpu_chan;
-                const int idx_11 = (row_hi * gpu_W + col_hi) * gpu_chan;
-
-                const float d00 = raw[idx_00], d01 = raw[idx_01];
-                const float d10 = raw[idx_10], d11 = raw[idx_11];
-                const bool v00 = !sycl::isinf(d00), v01 = !sycl::isinf(d01);
-                const bool v10 = !sycl::isinf(d10), v11 = !sycl::isinf(d11);
-                const int n_valid = v00 + v01 + v10 + v11;
-
-                float depth = rpmath::bilinearOrAverage(
-                    d00, d01, d10, d11, h_alpha, v_alpha, v00, v01, v10, v11,
-                    n_valid, kInf);
-                depth = rpmath::applyBeamOrigin(depth, beam_angle, beam_origin_m);
-
-                const int m_id = (half_W - col + W) % W;
-                const int ouster_idx = beam * W + m_id;
-                depth_out[ouster_idx] = depth;
-
-                if (gpu_chan >= 2) {
-                    const float r00 = raw[idx_00 + 1], r01 = raw[idx_01 + 1];
-                    const float r10 = raw[idx_10 + 1], r11 = raw[idx_11 + 1];
-                    retro_out[ouster_idx] = rpmath::bilinearOrAverage(
-                        r00, r01, r10, r11, h_alpha, v_alpha, v00, v01, v10, v11,
-                        n_valid, 0.f);
-                } else {
-                    retro_out[ouster_idx] = 0.f;
-                }
+                float depth = rpmath::sampleBeamRange(
+                    raw, rp_copy, el, az, kInf);
+                depth = rpmath::applyBeamOrigin(depth, el, beam_origin_m);
+                depth_out[tid] = depth;
             });
     }
 
@@ -317,7 +279,6 @@ private:
     {
         if (n <= buf_n_) return;
         allocShared(u_depth_,  static_cast<size_t>(n));
-        allocShared(u_retro_,  static_cast<size_t>(n));
         allocShared(u_range_,  static_cast<size_t>(n));
         allocShared(u_signal_, static_cast<size_t>(n));
         allocShared(u_refl_,   static_cast<size_t>(n));
@@ -344,7 +305,6 @@ private:
     bool integrated_ = false;
 
     float *    u_depth_     = nullptr;
-    float *    u_retro_     = nullptr;
     uint32_t * u_range_     = nullptr;
     uint16_t * u_signal_    = nullptr;
     uint8_t *  u_refl_      = nullptr;

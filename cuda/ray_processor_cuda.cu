@@ -45,80 +45,35 @@ __global__ void initRandStates(curandState * states, unsigned long seed, int n)
     }
 }
 
-/// Resample GpuRays uniform grid → exact Ouster beam geometry.
-/// One thread per output pixel (beam × col).  Performs 2D bilinear
-/// interpolation with azimuth wrapping and beam-origin correction.
+/// Resample the perspective panel rig → exact Ouster beam geometry.
+/// One thread per output pixel (beam × measurement id). Computes the exact
+/// beam direction (cylindrical/hemispherical model with per-beam azimuth
+/// offsets), projects into the covering panel and bilinearly samples planar
+/// depth (shared rpmath::sampleBeamRange). `rp` is passed by value: ~0.8 KB,
+/// well inside the 4 KB kernel-parameter limit.
 __global__ void resampleKernel(
-    const float * __restrict__ raw,          // gpu_H × gpu_W × gpu_chan
+    const float * __restrict__ raw,          // packed panel depth images
     const float * __restrict__ beam_alt,     // H beam altitude angles (degrees)
     const float * __restrict__ beam_az,      // H beam azimuth offsets (degrees)
     float * __restrict__       depth_out,    // H × W
-    float * __restrict__       retro_out,    // H × W
-    int H, int W,
-    int gpu_H, int gpu_W, int gpu_chan,
-    float min_alt, float v_range,
-    float deg_per_col, float beam_origin_m,
-    int half_W)
+    ResampleParams rp)
 {
-    const int n = H * W;
+    const int n = rp.H * rp.W;
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    const int beam = tid / W;
-    const int col  = tid % W;
+    const int beam = tid / rp.W;
+    const int m    = tid % rp.W;
 
-    const float beam_angle = beam_alt[beam];
+    // Output column m is the Ouster measurement id: m = 0 forward (+x),
+    // azimuth decreasing with m (clockwise encoder).
+    const float el = beam_alt[beam];
+    const float az = beam_az[beam] -
+        static_cast<float>(m) * (360.0f / static_cast<float>(rp.W));
 
-    // Fractional row in GpuRays grid (vertical interpolation).
-    const float v_frac = (beam_angle - min_alt) / v_range;
-    const float row_f  = v_frac * (gpu_H - 1);
-    const int row_lo   = max(min(__float2int_rd(row_f), gpu_H - 1), 0);
-    const int row_hi   = min(row_lo + 1, gpu_H - 1);  // NOLINT(build/include_what_you_use) — CUDA device-side min, not std::min
-    const float v_alpha = row_f - row_lo;
-
-    // Per-beam azimuth offset → fractional column shift.
-    const float az_offset_cols = beam_az[beam] / deg_per_col;
-    float col_wrapped = fmodf(static_cast<float>(col) + az_offset_cols + gpu_W,
-                              static_cast<float>(gpu_W));
-    if (col_wrapped < 0.f) col_wrapped += gpu_W;
-    const int col_lo = __float2int_rd(col_wrapped) % gpu_W;
-    const int col_hi = (col_lo + 1) % gpu_W;
-    const float h_alpha = col_wrapped - floorf(col_wrapped);
-
-    // 2D bilinear: four corner depth samples.
-    const int idx_00 = (row_lo * gpu_W + col_lo) * gpu_chan;
-    const int idx_01 = (row_lo * gpu_W + col_hi) * gpu_chan;
-    const int idx_10 = (row_hi * gpu_W + col_lo) * gpu_chan;
-    const int idx_11 = (row_hi * gpu_W + col_hi) * gpu_chan;
-
-    const float d00 = raw[idx_00], d01 = raw[idx_01];
-    const float d10 = raw[idx_10], d11 = raw[idx_11];
-
-    const bool v00 = !isinf(d00), v01 = !isinf(d01);
-    const bool v10 = !isinf(d10), v11 = !isinf(d11);
-    const int n_valid = v00 + v01 + v10 + v11;
-
-    // Bilinear blend + beam-origin correction (shared with all backends).
-    float depth = rpmath::bilinearOrAverage(
-        d00, d01, d10, d11, h_alpha, v_alpha, v00, v01, v10, v11,
-        n_valid, CUDART_INF_F);
-    depth = rpmath::applyBeamOrigin(depth, beam_angle, beam_origin_m);
-
-    // Azimuth remapping: Gazebo col 0 = −π, Ouster m_id 0 = encoder 0.
-    const int m_id = (half_W - col + W) % W;
-    const int ouster_idx = beam * W + m_id;
-    depth_out[ouster_idx] = depth;
-
-    // Retro channel — same bilinear (empty = 0, not +inf).
-    if (gpu_chan >= 2) {
-        const float r00 = raw[idx_00 + 1], r01 = raw[idx_01 + 1];
-        const float r10 = raw[idx_10 + 1], r11 = raw[idx_11 + 1];
-        retro_out[ouster_idx] = rpmath::bilinearOrAverage(
-            r00, r01, r10, r11, h_alpha, v_alpha, v00, v01, v10, v11,
-            n_valid, 0.f);
-    } else {
-        retro_out[ouster_idx] = 0.f;
-    }
+    float depth = rpmath::sampleBeamRange(raw, rp, el, az, CUDART_INF_F);
+    depth = rpmath::applyBeamOrigin(depth, el, rp.beam_origin_m);
+    depth_out[tid] = depth;
 }
 
 // ── Resample launcher ────────────────────────────────────────────────────────
@@ -128,18 +83,13 @@ void launchResampleKernel(
     const float * d_beam_alt,
     const float * d_beam_az,
     float *       d_depth_out,
-    float *       d_retro_out,
     const ResampleParams & rp,
     void * stream)
 {
     const int n = rp.H * rp.W;
     const int grid = (n + kBlock - 1) / kBlock;
     resampleKernel<<<grid, kBlock, 0, static_cast<cudaStream_t>(stream)>>>(
-        d_raw_frame, d_beam_alt, d_beam_az,
-        d_depth_out, d_retro_out,
-        rp.H, rp.W, rp.gpu_H, rp.gpu_W, rp.gpu_chan,
-        rp.min_alt, rp.v_range,
-        rp.deg_per_col, rp.beam_origin_m, rp.half_W);
+        d_raw_frame, d_beam_alt, d_beam_az, d_depth_out, rp);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -319,7 +269,6 @@ public:
     ~CudaBackend() override
     {
         if (d_depth_)       cudaFree(d_depth_);
-        if (d_retro_)       cudaFree(d_retro_);
         if (d_range_)       cudaFree(d_range_);
         if (d_signal_)      cudaFree(d_signal_);
         if (d_refl_)        cudaFree(d_refl_);
@@ -342,7 +291,7 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & pp) override
     {
-        const int raw_n = rp.gpu_H * rp.gpu_W * rp.gpu_chan;
+        const int raw_n = rp.raw_n;
         const int out_n = rp.H * rp.W;
 
         ensureBuffers(out_n);
@@ -366,12 +315,13 @@ public:
             static_cast<const float *>(d_beam_alt_),
             static_cast<const float *>(d_beam_az_),
             static_cast<float *>(d_depth_),
-            static_cast<float *>(d_retro_),
             rp, stream_);
 
+        // The panel rig carries no laser_retro channel — pass null retro so
+        // the kernel uses base_reflectivity / unit intensity.
         launchRayProcessKernel(
             static_cast<const float *>(d_depth_),
-            static_cast<const float *>(d_retro_),
+            nullptr,
             static_cast<uint32_t *>(d_range_),
             static_cast<uint16_t *>(d_signal_),
             static_cast<uint8_t *>(d_refl_),
@@ -397,7 +347,6 @@ private:
     {
         if (n <= buf_n_) return;
         realloc_(d_depth_,  static_cast<size_t>(n) * sizeof(float));
-        realloc_(d_retro_,  static_cast<size_t>(n) * sizeof(float));
         realloc_(d_range_,  static_cast<size_t>(n) * sizeof(uint32_t));
         realloc_(d_signal_, static_cast<size_t>(n) * sizeof(uint16_t));
         realloc_(d_refl_,   static_cast<size_t>(n) * sizeof(uint8_t));
@@ -462,7 +411,6 @@ private:
 
     // Device buffers — noise processing
     void * d_depth_   = nullptr;
-    void * d_retro_   = nullptr;
     void * d_range_   = nullptr;
     void * d_signal_  = nullptr;
     void * d_refl_    = nullptr;

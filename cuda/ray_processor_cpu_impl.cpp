@@ -149,63 +149,33 @@ void processRawCpu(
     uint64_t      seed)
 {
     const int H = rp.H, W = rp.W;
-    const int gpu_H = rp.gpu_H, gpu_W = rp.gpu_W, gpu_chan = rp.gpu_chan;
     const int out_n = H * W;
+    const float deg_per_col = 360.0f / static_cast<float>(W);
+    const float kInf = std::numeric_limits<float>::infinity();
 
     std::vector<float> depth_buf(static_cast<size_t>(out_n));
-    std::vector<float> retro_buf(static_cast<size_t>(out_n), 0.0f);
 
+    // Output column m IS the Ouster measurement id: m = 0 points forward
+    // (+x) and azimuth decreases with m (clockwise encoder), matching the
+    // hardware column ↔ encoder-angle convention.
     #pragma omp parallel for schedule(static) if(out_n > 65536)  // NOLINT(whitespace/parens)
     for (int idx = 0; idx < out_n; ++idx) {
         const int beam = idx / W;
-        const int col  = idx % W;
+        const int m    = idx % W;
 
-        const float beam_angle = beam_alt_host[beam];
-        const float v_frac = (beam_angle - rp.min_alt) / rp.v_range;
-        const float row_f  = v_frac * (gpu_H - 1);
-        const int row_lo   = std::clamp(static_cast<int>(std::floor(row_f)), 0, gpu_H - 1);
-        const int row_hi   = std::clamp(row_lo + 1, 0, gpu_H - 1);
-        const float v_alpha = static_cast<float>(row_f - row_lo);
+        const float el = beam_alt_host[beam];
+        const float az = beam_az_host[beam] -
+            static_cast<float>(m) * deg_per_col;
 
-        const float az_offset_cols = beam_az_host[beam] / rp.deg_per_col;
-        float col_wrapped = std::fmod(static_cast<float>(col) + az_offset_cols + gpu_W,
-                                      static_cast<float>(gpu_W));
-        if (col_wrapped < 0.f) col_wrapped += gpu_W;
-        const int col_lo = static_cast<int>(std::floor(col_wrapped)) % gpu_W;
-        const int col_hi = (col_lo + 1) % gpu_W;
-        const float h_alpha = col_wrapped - std::floor(col_wrapped);
-
-        const int idx_00 = (row_lo * gpu_W + col_lo) * gpu_chan;
-        const int idx_01 = (row_lo * gpu_W + col_hi) * gpu_chan;
-        const int idx_10 = (row_hi * gpu_W + col_lo) * gpu_chan;
-        const int idx_11 = (row_hi * gpu_W + col_hi) * gpu_chan;
-
-        const float d00 = raw_host[idx_00], d01 = raw_host[idx_01];
-        const float d10 = raw_host[idx_10], d11 = raw_host[idx_11];
-        const bool v00 = !std::isinf(d00), v01 = !std::isinf(d01);
-        const bool v10 = !std::isinf(d10), v11 = !std::isinf(d11);
-        const int n_valid = v00 + v01 + v10 + v11;
-
-        float depth = rpmath::bilinearOrAverage(
-            d00, d01, d10, d11, h_alpha, v_alpha, v00, v01, v10, v11,
-            n_valid, std::numeric_limits<float>::infinity());
-        depth = rpmath::applyBeamOrigin(depth, beam_angle, rp.beam_origin_m);
-
-        const int m_id = (rp.half_W - col + W) % W;
-        const int ouster_idx = beam * W + m_id;
-        depth_buf[static_cast<size_t>(ouster_idx)] = depth;
-
-        if (gpu_chan >= 2) {
-            const float r00 = raw_host[idx_00+1], r01 = raw_host[idx_01+1];
-            const float r10 = raw_host[idx_10+1], r11 = raw_host[idx_11+1];
-            const float retro = rpmath::bilinearOrAverage(
-                r00, r01, r10, r11, h_alpha, v_alpha, v00, v01, v10, v11,
-                n_valid, 0.0f);
-            retro_buf[static_cast<size_t>(ouster_idx)] = retro;
-        }
+        float depth = rpmath::sampleBeamRange(raw_host, rp, el, az, kInf);
+        depth = rpmath::applyBeamOrigin(depth, el, rp.beam_origin_m);
+        depth_buf[static_cast<size_t>(idx)] = depth;
     }
 
-    processCpu(depth_buf.data(), retro_buf.data(),
+    // The depth-panel rig carries no laser_retro channel; passing a null
+    // retro buffer makes the noise model fall back to base_reflectivity
+    // and unit intensity (rpmath::retroForNoise / kDefaultRetro).
+    processCpu(depth_buf.data(), nullptr,
                range_out, signal_out, reflectivity_out, nearir_out, pp, seed);
 }
 

@@ -55,70 +55,32 @@ __global__ void initRandStatesHip(hiprandState * states, unsigned long seed, int
 }
 
 __global__ void resampleKernelHip(
-    const float * __restrict__ raw,
+    const float * __restrict__ raw,          // packed panel depth images
     const float * __restrict__ beam_alt,
     const float * __restrict__ beam_az,
     float * __restrict__       depth_out,
-    float * __restrict__       retro_out,
-    int H, int W,
-    int gpu_H, int gpu_W, int gpu_chan,
-    float min_alt, float v_range,
-    float deg_per_col, float beam_origin_m,
-    int half_W)
+    // cppcheck-suppress passedByValueCallback ; GPU kernel arguments must be
+    // passed by value — the device cannot dereference a host reference. (~0.8
+    // KB, well inside the 4 KB kernel-parameter limit.)
+    ResampleParams rp)
 {
-    const int n = H * W;
+    const int n = rp.H * rp.W;
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    const int beam = tid / W;
-    const int col  = tid % W;
+    const int beam = tid / rp.W;
+    const int m    = tid % rp.W;
 
-    const float beam_angle = beam_alt[beam];
+    // Output column m is the Ouster measurement id: m = 0 forward (+x),
+    // azimuth decreasing with m (clockwise encoder).
+    const float el = beam_alt[beam];
+    const float az = beam_az[beam] -
+        static_cast<float>(m) * (360.0f / static_cast<float>(rp.W));
 
-    const float v_frac = (beam_angle - min_alt) / v_range;
-    const float row_f  = v_frac * (gpu_H - 1);
-    const int row_lo   = max(min(__float2int_rd(row_f), gpu_H - 1), 0);
-    const int row_hi   = min(row_lo + 1, gpu_H - 1);
-    const float v_alpha = row_f - row_lo;
-
-    const float az_offset_cols = beam_az[beam] / deg_per_col;
-    float col_wrapped = fmodf(static_cast<float>(col) + az_offset_cols + gpu_W,
-                              static_cast<float>(gpu_W));
-    if (col_wrapped < 0.f) col_wrapped += gpu_W;
-    const int col_lo = __float2int_rd(col_wrapped) % gpu_W;
-    const int col_hi = (col_lo + 1) % gpu_W;
-    const float h_alpha = col_wrapped - floorf(col_wrapped);
-
-    const int idx_00 = (row_lo * gpu_W + col_lo) * gpu_chan;
-    const int idx_01 = (row_lo * gpu_W + col_hi) * gpu_chan;
-    const int idx_10 = (row_hi * gpu_W + col_lo) * gpu_chan;
-    const int idx_11 = (row_hi * gpu_W + col_hi) * gpu_chan;
-
-    const float d00 = raw[idx_00], d01 = raw[idx_01];
-    const float d10 = raw[idx_10], d11 = raw[idx_11];
-
-    const bool v00 = !isinf(d00), v01 = !isinf(d01);
-    const bool v10 = !isinf(d10), v11 = !isinf(d11);
-    const int n_valid = v00 + v01 + v10 + v11;
-
-    float depth = rpmath::bilinearOrAverage(
-        d00, d01, d10, d11, h_alpha, v_alpha, v00, v01, v10, v11,
-        n_valid, __int_as_float(0x7f800000));  // empty → +inf
-    depth = rpmath::applyBeamOrigin(depth, beam_angle, beam_origin_m);
-
-    const int m_id = (half_W - col + W) % W;
-    const int ouster_idx = beam * W + m_id;
-    depth_out[ouster_idx] = depth;
-
-    if (gpu_chan >= 2) {
-        const float r00 = raw[idx_00 + 1], r01 = raw[idx_01 + 1];
-        const float r10 = raw[idx_10 + 1], r11 = raw[idx_11 + 1];
-        retro_out[ouster_idx] = rpmath::bilinearOrAverage(
-            r00, r01, r10, r11, h_alpha, v_alpha, v00, v01, v10, v11,
-            n_valid, 0.f);
-    } else {
-        retro_out[ouster_idx] = 0.f;
-    }
+    float depth = rpmath::sampleBeamRange(
+        raw, rp, el, az, __int_as_float(0x7f800000));  // miss → +inf
+    depth = rpmath::applyBeamOrigin(depth, el, rp.beam_origin_m);
+    depth_out[tid] = depth;
 }
 
 __global__ void rayProcessKernelHip(
@@ -230,7 +192,6 @@ public:
     {
         auto maybeFree = [](void * p) { if (p) hipFree(p); };
         maybeFree(d_depth_);
-        maybeFree(d_retro_);
         maybeFree(d_range_);
         maybeFree(d_signal_);
         maybeFree(d_refl_);
@@ -253,7 +214,7 @@ public:
         uint16_t *    nearir_out,
         const RayProcessParams & pp) override
     {
-        const int raw_n = rp.gpu_H * rp.gpu_W * rp.gpu_chan;
+        const int raw_n = rp.raw_n;
         const int out_n = rp.H * rp.W;
 
         ensureBuffers(out_n);
@@ -272,15 +233,14 @@ public:
             static_cast<const float *>(d_beam_alt_),
             static_cast<const float *>(d_beam_az_),
             static_cast<float *>(d_depth_),
-            static_cast<float *>(d_retro_),
-            rp.H, rp.W, rp.gpu_H, rp.gpu_W, rp.gpu_chan,
-            rp.min_alt, rp.v_range,
-            rp.deg_per_col, rp.beam_origin_m, rp.half_W);
+            rp);
         HIP_CHECK(hipGetLastError());
 
+        // No laser_retro channel from the panel rig — null retro selects
+        // base_reflectivity / unit intensity in the process kernel.
         hipLaunchKernelGGL(rayProcessKernelHip, dim3(grid_r), dim3(kBlock), 0, stream_,
             static_cast<const float *>(d_depth_),
-            static_cast<const float *>(d_retro_),
+            static_cast<const float *>(nullptr),
             static_cast<uint32_t *>(d_range_),
             static_cast<uint16_t *>(d_signal_),
             static_cast<uint8_t *>(d_refl_),
@@ -345,7 +305,6 @@ private:
     {
         if (n <= buf_n_) return;
         allocDev(d_depth_,  static_cast<size_t>(n) * sizeof(float));
-        allocDev(d_retro_,  static_cast<size_t>(n) * sizeof(float));
         allocDev(d_range_,  static_cast<size_t>(n) * sizeof(uint32_t));
         allocDev(d_signal_, static_cast<size_t>(n) * sizeof(uint16_t));
         allocDev(d_refl_,   static_cast<size_t>(n) * sizeof(uint8_t));
@@ -401,7 +360,6 @@ private:
     bool integrated_ = false;
 
     void * d_depth_ = nullptr;
-    void * d_retro_ = nullptr;
     void * d_range_ = nullptr;
     void * d_signal_ = nullptr;
     void * d_refl_ = nullptr;
