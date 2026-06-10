@@ -59,6 +59,7 @@
 #include <ouster/types.h>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <builtin_interfaces/msg/time.hpp>
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
@@ -241,21 +242,32 @@ void GzGpuOusterLidarSystem::Configure(
     }
 
     // ── Validate parameters ────────────────────────────────────────────────────
-    range_noise_min_std_   = std::max(0.0, range_noise_min_std_);
-    range_noise_max_std_   = std::max(0.0, range_noise_max_std_);
-    signal_noise_scale_    = std::max(0.0, signal_noise_scale_);
-    nearir_noise_scale_    = std::max(0.0, nearir_noise_scale_);
-    dropout_rate_close_    = std::clamp(dropout_rate_close_, 0.0, 1.0);
-    dropout_rate_far_      = std::clamp(dropout_rate_far_,   0.0, 1.0);
-    edge_discon_threshold_ = std::max(0.0, edge_discon_threshold_);
-    base_signal_           = std::max(0.0, base_signal_);
-    base_reflectivity_     = std::clamp(base_reflectivity_, 0.0, 255.0);
-    max_range_             = std::max(1.0, max_range_);
-    gyro_noise_std_        = std::max(0.0, gyro_noise_std_);
-    accel_noise_std_       = std::max(0.0, accel_noise_std_);
-    gyro_bias_walk_        = std::max(0.0, gyro_bias_walk_);
-    accel_bias_walk_       = std::max(0.0, accel_bias_walk_);
-    panel_oversample_      = std::clamp(panel_oversample_, 1.0, 4.0);
+    // Out-of-range values are clamped AND reported — a silently rewritten
+    // parameter (e.g. a typo'd negative noise std) is a debugging trap.
+    auto clamp_warn = [](double & v, double lo, double hi, const char * name) {
+        if (v < lo || v > hi) {
+            const double c = std::clamp(v, lo, hi);
+            RCLCPP_WARN(kLogger, "%s=%g outside [%g, %g]; clamped to %g",
+                        name, v, lo, hi, c);
+            v = c;
+        }
+    };
+    constexpr double kInfD = std::numeric_limits<double>::infinity();
+    clamp_warn(range_noise_min_std_,   0.0, kInfD, "range_noise_min_std");
+    clamp_warn(range_noise_max_std_,   0.0, kInfD, "range_noise_max_std");
+    clamp_warn(signal_noise_scale_,    0.0, kInfD, "signal_noise_scale");
+    clamp_warn(nearir_noise_scale_,    0.0, kInfD, "nearir_noise_scale");
+    clamp_warn(dropout_rate_close_,    0.0, 1.0,   "dropout_rate_close");
+    clamp_warn(dropout_rate_far_,      0.0, 1.0,   "dropout_rate_far");
+    clamp_warn(edge_discon_threshold_, 0.0, kInfD, "edge_discon_threshold");
+    clamp_warn(base_signal_,           0.0, kInfD, "base_signal");
+    clamp_warn(base_reflectivity_,     0.0, 255.0, "base_reflectivity");
+    clamp_warn(max_range_,             1.0, kInfD, "max_range");
+    clamp_warn(gyro_noise_std_,        0.0, kInfD, "gyro_noise_std");
+    clamp_warn(accel_noise_std_,       0.0, kInfD, "accel_noise_std");
+    clamp_warn(gyro_bias_walk_,        0.0, kInfD, "gyro_bias_walk");
+    clamp_warn(accel_bias_walk_,       0.0, kInfD, "accel_bias_walk");
+    clamp_warn(panel_oversample_,      1.0, 4.0,   "panel_oversample");
     if (ray_mode_ != "panels" && ray_mode_ != "raycast") {
         RCLCPP_WARN(kLogger,
             "Unknown ray_mode='%s'; expected panels|raycast. "
@@ -726,8 +738,13 @@ void GzGpuOusterLidarSystem::initRosInterface()
         camera_info_msg_.header.frame_id = image_frame_id_;
         camera_info_msg_.height = H;
         camera_info_msg_.width = W;
-        camera_info_msg_.distortion_model = "equidistant";
-        // camera_info_msg_.distortion_model = "plumb_bob";
+        // The range image is an equirectangular panorama (u linear in
+        // azimuth, v linear in elevation) — no standard ROS distortion
+        // model describes it. Declare the honest non-standard name rather
+        // than "equidistant" (a fisheye model) so consumers fail loudly
+        // instead of silently mis-projecting; fx/fy in K are the
+        // pixels-per-radian scale factors of the angular mapping.
+        camera_info_msg_.distortion_model = "equirectangular";
         camera_info_msg_.k = {fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0};
         camera_info_msg_.d = {0.0, 0.0, 0.0, 0.0, 0.0};
         camera_info_msg_.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
@@ -750,11 +767,14 @@ void GzGpuOusterLidarSystem::initRosInterface()
     }
 
     // ── Declare ROS 2 parameters ──────────────────────────────────────────
-    // Read-only structural parameters (informational, cannot change at runtime).
-    ros_node_->declare_parameter("lidar_hz", lidar_hz_);
-    ros_node_->declare_parameter("max_range", max_range_);
+    // Structural parameters are declared read_only so rclcpp itself rejects
+    // runtime changes with a proper error (no manual rejection needed).
+    rcl_interfaces::msg::ParameterDescriptor read_only;
+    read_only.read_only = true;
+    ros_node_->declare_parameter("lidar_hz", lidar_hz_, read_only);
+    ros_node_->declare_parameter("max_range", max_range_, read_only);
     if (imu_enabled_) {
-        ros_node_->declare_parameter("imu_hz", imu_hz_);
+        ros_node_->declare_parameter("imu_hz", imu_hz_, read_only);
     }
 
     // Dynamically reconfigurable noise model parameters.
@@ -774,40 +794,42 @@ void GzGpuOusterLidarSystem::initRosInterface()
         ros_node_->declare_parameter("accel_bias_walk",  accel_bias_walk_);
     }
 
+    // Structural params (lidar_hz/max_range/imu_hz) are read_only above —
+    // rclcpp rejects writes to them before this callback ever runs.
     param_cb_handle_ = ros_node_->add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> & params)
             -> rcl_interfaces::msg::SetParametersResult {
-            for (const auto & p : params) {
-                const auto & name = p.get_name();
-                // Reject changes to structural parameters.
-                if (name == "lidar_hz" || name == "max_range" || name == "imu_hz") {
-                    RCLCPP_WARN(kLogger,
-                        "rejecting runtime change to '%s' (structural; "
-                        "set in SDF instead)", name.c_str());
-                    rcl_interfaces::msg::SetParametersResult r;
-                    r.successful = false;
-                    r.reason = name + " cannot be changed at runtime";
-                    return r;
-                }
-            }
             // Apply noise model updates under lock (sim thread reads these).
             {
                 std::lock_guard<std::mutex> lk(noise_mtx_);
                 for (const auto & p : params) {
                     const auto & name = p.get_name();
-                    if (name == "range_noise_min_std")       range_noise_min_std_     = std::max(0.0, p.as_double());
-                    else if (name == "range_noise_max_std")  range_noise_max_std_     = std::max(0.0, p.as_double());
-                    else if (name == "signal_noise_scale")   signal_noise_scale_      = std::max(0.0, p.as_double());
-                    else if (name == "nearir_noise_scale")   nearir_noise_scale_      = std::max(0.0, p.as_double());
-                    else if (name == "dropout_rate_close")   dropout_rate_close_      = std::clamp(p.as_double(), 0.0, 1.0);
-                    else if (name == "dropout_rate_far")     dropout_rate_far_        = std::clamp(p.as_double(), 0.0, 1.0);
-                    else if (name == "edge_discon_threshold") edge_discon_threshold_   = std::max(0.0, p.as_double());
-                    else if (name == "base_signal")          base_signal_             = std::max(0.0, p.as_double());
-                    else if (name == "base_reflectivity")    base_reflectivity_       = std::clamp(p.as_double(), 0.0, 255.0);
-                    else if (name == "gyro_noise_std")       gyro_noise_std_          = std::max(0.0, p.as_double());
-                    else if (name == "accel_noise_std")      accel_noise_std_         = std::max(0.0, p.as_double());
-                    else if (name == "gyro_bias_walk")       gyro_bias_walk_          = std::max(0.0, p.as_double());
-                    else if (name == "accel_bias_walk")      accel_bias_walk_         = std::max(0.0, p.as_double());
+                    // Out-of-range values are clamped AND reported.
+                    auto clamped = [&p](double lo, double hi) {
+                        const double v = p.as_double();
+                        const double c = std::clamp(v, lo, hi);
+                        if (c != v) {
+                            RCLCPP_WARN(kLogger,
+                                "%s=%g outside [%g, %g]; clamped to %g",
+                                p.get_name().c_str(), v, lo, hi, c);
+                        }
+                        return c;
+                    };
+                    constexpr double kInfD =
+                        std::numeric_limits<double>::infinity();
+                    if (name == "range_noise_min_std")       range_noise_min_std_     = clamped(0.0, kInfD);
+                    else if (name == "range_noise_max_std")  range_noise_max_std_     = clamped(0.0, kInfD);
+                    else if (name == "signal_noise_scale")   signal_noise_scale_      = clamped(0.0, kInfD);
+                    else if (name == "nearir_noise_scale")   nearir_noise_scale_      = clamped(0.0, kInfD);
+                    else if (name == "dropout_rate_close")   dropout_rate_close_      = clamped(0.0, 1.0);
+                    else if (name == "dropout_rate_far")     dropout_rate_far_        = clamped(0.0, 1.0);
+                    else if (name == "edge_discon_threshold") edge_discon_threshold_   = clamped(0.0, kInfD);
+                    else if (name == "base_signal")          base_signal_             = clamped(0.0, kInfD);
+                    else if (name == "base_reflectivity")    base_reflectivity_       = clamped(0.0, 255.0);
+                    else if (name == "gyro_noise_std")       gyro_noise_std_          = clamped(0.0, kInfD);
+                    else if (name == "accel_noise_std")      accel_noise_std_         = clamped(0.0, kInfD);
+                    else if (name == "gyro_bias_walk")       gyro_bias_walk_          = clamped(0.0, kInfD);
+                    else if (name == "accel_bias_walk")      accel_bias_walk_         = clamped(0.0, kInfD);
                 }
             }
             rcl_interfaces::msg::SetParametersResult r;
@@ -823,18 +845,60 @@ void GzGpuOusterLidarSystem::initRosInterface()
         ros_executor_->spin();
     });
 
-    // Publish initial metadata AFTER executor is spinning.  rmw_zenoh_cpp
-    // requires the executor thread to pump outgoing control messages before
-    // publish() will actually deliver data to peers.  100 ms is enough for
-    // the executor to complete its first spin cycle and for Zenoh peer
-    // discovery to settle on a local router (zenohd runs on the same host).
-    // This is a one-time startup cost; subsequent metadata republishing is
-    // handled in OnRender() with a subscriber-count check.
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    std_msgs::msg::String meta_msg;
-    meta_msg.data = metadata_str_;
-    meta_pub_->publish(meta_msg);
-    RCLCPP_INFO(kLogger, "Initial metadata published on %s/metadata", abs_prefix.c_str());
+    // Metadata publishing happens in publishMetadataIfNeeded() (driven from
+    // PostUpdate, so it works in both ray modes): first publish on the first
+    // sim tick — by which point the executor thread above is pumping Zenoh
+    // control messages — then sim-time-throttled republish until a
+    // subscriber has acked. No startup sleep needed.
+    RCLCPP_INFO(kLogger, "Metadata will publish on %s/metadata",
+                abs_prefix.c_str());
+}
+
+// ── Metadata publishing ──────────────────────────────────────────────────────
+// Driven from PostUpdate (sim thread) so it works in BOTH ray modes — the
+// previous home in OnRender never fired in raycast mode. rmw_zenoh_cpp
+// transient_local replay is unreliable across processes and
+// get_subscription_count() may lag actual Zenoh peer state, so republish on
+// a sim-time throttle until a subscriber is visible AND enough copies have
+// gone out for Zenoh discovery to settle; re-arm if the subscriber drops
+// (Foxglove tab refresh, os_cloud restart, network blip).
+
+void GzGpuOusterLidarSystem::publishMetadataIfNeeded(
+    std::chrono::nanoseconds sim_now)
+{
+    if (!meta_pub_) return;
+
+    constexpr auto kRepubPeriod = std::chrono::milliseconds(500);
+    constexpr int kMinPublishes = 5;  // ≥ 2 s of copies before declaring done
+
+    const auto meta_subs = meta_pub_->get_subscription_count();
+    if (metadata_published_ && meta_subs == 0) {
+        metadata_published_ = false;
+        metadata_pub_count_ = 0;
+        last_meta_pub_time_ = std::chrono::nanoseconds(-1);
+        RCLCPP_INFO(kLogger,
+            "metadata subscriber count dropped to 0; re-arming republish");
+    }
+    if (metadata_published_) return;
+
+    if (last_meta_pub_time_.count() < 0 ||
+        sim_now - last_meta_pub_time_ >= kRepubPeriod) {
+        std_msgs::msg::String meta_msg;
+        meta_msg.data = metadata_str_;
+        {
+            std::lock_guard<std::mutex> pub_lk(publish_mtx_);
+            meta_pub_->publish(meta_msg);
+        }
+        ++metadata_pub_count_;
+        last_meta_pub_time_ = sim_now;
+    }
+
+    if (meta_subs > 0 && metadata_pub_count_ >= kMinPublishes) {
+        metadata_published_ = true;
+        RCLCPP_INFO(kLogger,
+            "metadata delivered to os_cloud (after %d publishes)",
+            metadata_pub_count_.load());
+    }
 }
 
 // ── Rendering-thread callback ────────────────────────────────────────────────
@@ -857,41 +921,6 @@ void GzGpuOusterLidarSystem::OnRender()
     onrender_entries_.fetch_add(1, std::memory_order_relaxed);
 
     if (sensor_initialized_.load(std::memory_order_acquire)) {
-        // Republish metadata periodically until os_cloud confirms receipt.
-        // rmw_zenoh_cpp transient_local replay is unreliable across processes,
-        // and get_subscription_count() may lag behind actual Zenoh peer state.
-        // Republish every ~1s (assuming render ticks at sensor hz) until we
-        // see a subscriber AND have published at least a few times.
-        const auto meta_subs = meta_pub_->get_subscription_count();
-        if (metadata_published_ && meta_subs == 0) {
-            // Subscriber dropped (Foxglove tab refresh, os_cloud restart,
-            // network blip). transient_local replay won't reliably re-deliver
-            // the latched metadata when the sub reconnects on rmw_zenoh, so
-            // re-arm the republish loop instead of staying latched forever.
-            metadata_published_ = false;
-            metadata_pub_count_ = 0;
-            RCLCPP_INFO(kLogger,
-                "metadata subscriber count dropped to 0; re-arming republish");
-        }
-        if (!metadata_published_) {
-            ++metadata_pub_count_;
-            // Throttle: republish roughly every 1 second worth of render ticks.
-            // Clamp ticks-per-second to >= 1 to avoid division by zero when lidar_hz < 1.
-            const int ticks_per_sec = std::max(1, static_cast<int>(lidar_hz_));
-            if (metadata_pub_count_ <= 5 || metadata_pub_count_ % ticks_per_sec == 0) {
-                std_msgs::msg::String meta_msg;
-                meta_msg.data = metadata_str_;
-                std::lock_guard<std::mutex> pub_lk(publish_mtx_);
-                meta_pub_->publish(meta_msg);
-            }
-            // Only stop after subscriber detected AND we've sent enough for Zenoh to settle
-            if (meta_subs > 0 && metadata_pub_count_ > ticks_per_sec * 2) {
-                metadata_published_ = true;
-                RCLCPP_INFO(kLogger, "metadata delivered to os_cloud (after %d publishes)",
-                    metadata_pub_count_.load());
-            }
-        }
-
         // ── Throttle to lidar_hz_ ───────────────────────────────────────────
         auto now = std::chrono::steady_clock::now();
         const auto period = std::chrono::duration_cast<
@@ -1068,6 +1097,10 @@ void GzGpuOusterLidarSystem::PostUpdate(
     }
 
     if (!sensor_initialized_.load(std::memory_order_acquire)) return;
+
+    // ── Metadata (re)publish — sim-thread, works in both ray modes ──────────
+    publishMetadataIfNeeded(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime));
 
     // ── Locate the gpu_lidar sensor entity (once) ────────────────────────────
     // Gazebo merges fixed-joint child links into the parent, so
@@ -1384,7 +1417,11 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     ReflMatrix    refl_mat(reflectivity_buf_.data(), H_, W_);
     NirMatrix     nearir_mat(nearir_buf_.data(), H_, W_);
 
-    std::vector<ouster_sensor_msgs::msg::PacketMsg> new_pkts(static_cast<size_t>(n_packets));
+    // encode_pkts_ is a member so its PacketMsg buffers (and the vector
+    // itself) are reused across scans: after the drain swap below it holds
+    // the drain thread's previously published packets, whose buf capacity
+    // the assign() below reuses — zero allocations in steady state.
+    encode_pkts_.resize(static_cast<size_t>(n_packets));
 
     for (int p = 0; p < n_packets; ++p) {
         std::memset(pkt_buf_.data(), 0, pkt_buf_.size());
@@ -1407,7 +1444,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
         pw_->set_block<uint8_t> (refl_mat.data(),   W_, ouster::sdk::core::ChanField::REFLECTIVITY, pkt_buf_.data());
         pw_->set_block<uint16_t>(nearir_mat.data(), W_, ouster::sdk::core::ChanField::NEAR_IR,      pkt_buf_.data());
 
-        new_pkts[static_cast<size_t>(p)].buf.assign(pkt_buf_.begin(), pkt_buf_.end());
+        encode_pkts_[static_cast<size_t>(p)].buf.assign(pkt_buf_.begin(), pkt_buf_.end());
     }
 
     ++frame_id_;
@@ -1418,7 +1455,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     // ── Wake drain thread ────────────────────────────────────────────────────
     {
         std::lock_guard<std::mutex> lk(drain_mtx_);
-        drain_pkts_.swap(new_pkts);
+        drain_pkts_.swap(encode_pkts_);
         drain_ready_.store(true, std::memory_order_release);
     }
     drain_cv_.notify_one();
@@ -1661,6 +1698,8 @@ void GzGpuOusterLidarSystem::publishImu(
 void GzGpuOusterLidarSystem::drainThreadFunc()
 {
     std::vector<ouster_sensor_msgs::msg::PacketMsg> local_pkts;
+    std::chrono::steady_clock::time_point prev_batch{};
+    bool have_prev_batch = false;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
         {
@@ -1682,10 +1721,30 @@ void GzGpuOusterLidarSystem::drainThreadFunc()
         // scheduler jitter would round each sleep up and the packets would
         // bunch toward the end of the scan. Anchoring on a fixed t0 lets
         // any individual sleep finish late without pushing the next one.
-        const auto period = std::chrono::nanoseconds(
-            static_cast<int64_t>(1e9 / lidar_hz_));
-        const auto spacing = period / static_cast<int64_t>(local_pkts.size());
+        //
+        // Pace across the OBSERVED wall-clock scan cadence, not the nominal
+        // 1/lidar_hz: scans arrive at lidar_hz in SIM time, so at RTF > 1
+        // batches land faster than nominal and spreading over the nominal
+        // period would back the drain up indefinitely (dropped frames).
+        // min() with nominal keeps RTF < 1 behaviour unchanged (finish
+        // early, idle); the 5% margin finishes before the next batch; the
+        // 1 ms floor keeps spacing sane after a scheduling hiccup. Packet
+        // timestamps are sim time regardless — only wall spacing adapts.
         const auto t0 = std::chrono::steady_clock::now();
+        const auto nominal = std::chrono::nanoseconds(
+            static_cast<int64_t>(1e9 / lidar_hz_));
+        auto period = nominal;
+        if (have_prev_batch) {
+            const auto observed =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    t0 - prev_batch);
+            period = std::min(nominal, observed);
+        }
+        prev_batch = t0;
+        have_prev_batch = true;
+        period = std::max(std::chrono::nanoseconds(1'000'000),
+                          period * 95 / 100);
+        const auto spacing = period / static_cast<int64_t>(local_pkts.size());
 
         try {
             for (size_t i = 0; i < local_pkts.size(); ++i) {
