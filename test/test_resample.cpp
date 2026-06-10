@@ -367,8 +367,9 @@ TEST(Resample, AzimuthOffsetShiftsColumns)
                     range_offset.data(), sig.data(), refl.data(), nearir.data(), pp);
 
     // The offset rotates the sampled azimuth, so columns must differ — and
-    // by the expected shift: column m samples az = az_off − m·(360/W), so a
-    // +17° offset reproduces column m's zero-offset value at m + 17/(360/W).
+    // by the expected shift. beam_azimuth is SUBTRACTED to match the Ouster
+    // XYZ LUT (azimuth = -beam_azimuth), so column m samples
+    // az = −az_off − m·(360/W).
     bool any_differ = false;
     for (int i = 0; i < n; ++i) {
         if (range_zero[i] != range_offset[i]) {
@@ -382,7 +383,7 @@ TEST(Resample, AzimuthOffsetShiftsColumns)
     // compare against the analytic scene instead of integer-shifted output).
     const float deg_per_col = 360.0f / W;
     for (int m = 0; m < n; m += 7) {
-        const float az = (17.0f - m * deg_per_col) * 3.14159265f / 180.0f;
+        const float az = (-17.0f - m * deg_per_col) * 3.14159265f / 180.0f;
         const float expect_mm = (5.0f + std::cos(az)) * 1000.0f;
         EXPECT_NEAR(static_cast<float>(range_offset[m]), expect_mm, 40.0f)
             << "column " << m;

@@ -333,9 +333,16 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     // offset). The ray origin sits on the beam-origin circle at the ENCODER
     // azimuth — that is the convention the Ouster XYZ LUT inverts, so
     // reporting r = s + n reconstructs the exact hit point.
+    //
+    // beam_azimuth is SUBTRACTED, matching the Ouster SDK XYZ LUT
+    // (xyzlut.cpp: azimuth = -beam_azimuth_angles; direction =
+    // cos(encoder + azimuth) = cos(encoder - beam_az)). Casting with the
+    // opposite sign would land each return 2*beam_az away from where os_cloud
+    // reconstructs it — splitting every object into one arc per beam-azimuth
+    // group (4 for OS1-64).
     const float az_enc = -static_cast<float>(m) * deg_per_col *
                          rpmath::kPi / 180.0f;
-    const float az = az_enc + beam_az_deg[beam] * rpmath::kPi / 180.0f;
+    const float az = az_enc - beam_az_deg[beam] * rpmath::kPi / 180.0f;
     const float el = beam_alt_deg[beam] * rpmath::kPi / 180.0f;
 
     const float ce = rpmath::gzm::cos_(el);

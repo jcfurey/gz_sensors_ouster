@@ -67,9 +67,11 @@ __global__ void resampleKernel(
     const int m    = tid % rp.W;
 
     // Output column m is the Ouster measurement id: m = 0 forward (+x),
-    // azimuth decreasing with m (clockwise encoder).
+    // azimuth decreasing with m (clockwise encoder). beam_azimuth is
+    // SUBTRACTED to match the Ouster XYZ LUT (azimuth = -beam_azimuth);
+    // adding it would fan each object into one copy per beam-azimuth group.
     const float el = beam_alt[beam];
-    const float az = beam_az[beam] -
+    const float az = -beam_az[beam] -
         static_cast<float>(m) * (360.0f / static_cast<float>(rp.W));
 
     float depth = rpmath::sampleBeamRange(raw, rp, el, az, CUDART_INF_F);
