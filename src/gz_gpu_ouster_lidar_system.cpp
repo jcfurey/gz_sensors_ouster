@@ -324,8 +324,10 @@ void GzGpuOusterLidarSystem::Configure(
     if (layout_.n_panels == 0) {
         RCLCPP_ERROR(kLogger,
             "Unsupported beam geometry: altitude range [%.1f, %.1f] deg has "
-            "no panel-rig coverage (supported: within ±60 deg cylindrical, "
-            "or -32..+90 deg hemispherical); plugin disabled.",
+            "no panel-rig coverage (supported: bands within ±60 deg use the "
+            "cylindrical rig; higher bands use the hemispherical rig, which "
+            "accepts -32 deg up to +120 deg — elevations past +90 wrap "
+            "through the zenith cap); plugin disabled.",
             min_alt_, max_alt_);
         return;
     }
@@ -1203,9 +1205,11 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0 || cpp_ <= 0) return;
     if (!ray_processor_) return;
     if (raw_n != layout_.rp.raw_n) {
-        RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
-            "%s: raw frame size %d != rig size %d; dropping",
-            sensor_name_.c_str(), raw_n, layout_.rp.raw_n);
+        if (ros_node_) {
+            RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
+                "%s: raw frame size %d != rig size %d; dropping",
+                sensor_name_.c_str(), raw_n, layout_.rp.raw_n);
+        }
         return;
     }
 

@@ -52,8 +52,12 @@ struct PanelLayout {
 ///                       sensor's finest angular resolution (clamped 1..4)
 /// @param max_panel_dim  hard cap on panel width/height in pixels
 ///
-/// Returns n_panels == 0 when the elevation band cannot be covered
-/// (below -60° in dome mode, beyond +90.5° in any mode).
+/// Returns n_panels == 0 when the elevation band cannot be covered.
+/// Bands fitting within ±60° (after internal padding) use the cylindrical
+/// rig. Bands reaching higher use the hemispherical rig, which accepts
+/// elevations from -32° up to +120° — values past +90° wrap through the
+/// zenith cap, covering metadata whose padded band slightly exceeds the
+/// zenith. Anything outside those limits yields n_panels == 0.
 PanelLayout buildOusterPanelLayout(
     double min_alt_deg, double max_alt_deg,
     int H, int W,
