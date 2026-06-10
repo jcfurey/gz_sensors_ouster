@@ -1,9 +1,9 @@
 # Standalone test image for gz_sensors_ouster.
 #
 # Builds the plugin in isolation against a selectable ROS 2 distro and exercises
-# it on a drivable TurtleBot3 waffle in the new Gazebo. No CUDA/GPU toolchain is
-# installed, so the plugin compiles its CPU (OpenMP) backend and the default
-# headless smoke runs the plugin in *raycast* mode (no render engine required).
+# it on a drivable TurtleBot3 waffle in the new Gazebo. By default no CUDA
+# toolchain is installed, so the plugin compiles its CPU (OpenMP) backend and the
+# default headless smoke runs in *raycast* mode (no render engine / GPU needed).
 #
 #   docker build -t gzouster .                          # ROS 2 Jazzy (default)
 #   docker build -t gzouster --build-arg ROS_DISTRO=kilted .
@@ -14,12 +14,34 @@
 #   docker run --rm -it -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix \
 #       --gpus all gzouster drive                       # interactive GUI + teleop
 #
+# CUDA (NVIDIA) — leverage the HOST's GPU without the rovermax_ws image. This
+# installs only the CUDA *toolkit* (nvcc + cudart + curand) into the image and
+# builds the plugin's CUDA backend; the GPU driver itself comes from the host at
+# run time via --gpus all (needs nvidia-container-toolkit on the host). No CUDA
+# install on the host is required beyond the driver.
+#
+#   docker build -t gzouster-cuda --build-arg ENABLE_CUDA=true \
+#       --build-arg CUDA_ARCH=86 .                      # 86 = Ampere (RTX 30xx)
+#   docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster-cuda
+#       # plugin logs "Using cuda backend." instead of the CPU fallback.
+#
 # Distros: jazzy (Harmonic), kilted (Ionic), lyrical (Jetty). Humble is NOT
-# supported (no gz_*_vendor; it ships Gazebo Fortress, not Harmonic+).
+# supported (no gz_*_vendor; it ships Gazebo Fortress, not Harmonic+). CUDA is
+# wired for the noble-based distros (jazzy/kilted); see CUDA_DISTRO to override.
 
 ARG ROS_DISTRO=jazzy
 FROM osrf/ros:${ROS_DISTRO}-desktop
 ARG ROS_DISTRO
+
+# CUDA backend (optional). ENABLE_CUDA=true installs the toolkit + builds it.
+# CUDA_ARCH is a ';'-separated SM list (e.g. "86" for RTX 30xx, "89" for 40xx,
+# "75;80;86;89" for a portable image). CUDA_DISTRO/CUDA_PKG_VERSION pick the
+# NVIDIA apt repo + toolkit version (default: Ubuntu 24.04 'noble', CUDA 12.6).
+ARG ENABLE_CUDA=false
+ARG CUDA_ARCH=80;86;89
+ARG CUDA_DISTRO=ubuntu2404
+ARG CUDA_PKG_VERSION=12-6
+ARG CUDA_HOME_VERSION=12.6
 
 # ouster-ros is pinned to the jcfurey fork (carries an in-tree ouster-sdk
 # submodule at v0.16.2+); the apt ros-${ROS_DISTRO}-ouster-ros lags and exposes
@@ -58,6 +80,33 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       ros-${ROS_DISTRO}-teleop-twist-keyboard \
  && rm -rf /var/lib/apt/lists/*
 
+# ── CUDA toolkit (optional; ENABLE_CUDA=true) ─────────────────────────────────
+# Only the toolkit (nvcc + cudart + curand) goes in the image; the driver/libcuda
+# comes from the host at run time via --gpus all. We install the versioned
+# packages and symlink /usr/local/cuda so CMake's CUDAToolkit lookup + the
+# package's check_language(CUDA) both resolve. ENV is set unconditionally (a
+# missing /usr/local/cuda/bin on a CPU image is simply absent from PATH).
+RUN if [ "${ENABLE_CUDA}" = "true" ]; then \
+      set -e; \
+      apt-get update -qq; \
+      apt-get install -y -qq --no-install-recommends wget ca-certificates gnupg; \
+      wget -qO /tmp/cuda-keyring.deb \
+        "https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_DISTRO}/x86_64/cuda-keyring_1.1-1_all.deb"; \
+      dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb; \
+      apt-get update -qq; \
+      apt-get install -y -qq --no-install-recommends \
+        cuda-nvcc-${CUDA_PKG_VERSION} \
+        cuda-cudart-dev-${CUDA_PKG_VERSION} \
+        libcurand-dev-${CUDA_PKG_VERSION}; \
+      ln -sfn /usr/local/cuda-${CUDA_HOME_VERSION} /usr/local/cuda; \
+      rm -rf /var/lib/apt/lists/*; \
+      /usr/local/cuda/bin/nvcc --version; \
+    else \
+      echo "ENABLE_CUDA=${ENABLE_CUDA}: skipping CUDA toolkit (CPU backend only)"; \
+    fi
+ENV PATH=/usr/local/cuda/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+
 # ── ouster-ros (jcfurey fork, pinned commit, with ouster-sdk submodule) ───────
 # Clone the ros2 branch specifically (its layout nests ouster-ros/ouster-sdk);
 # a full clone keeps the pinned commit reachable, then resync submodules to it.
@@ -93,8 +142,12 @@ RUN for i in 1 2 3 4 5; do \
 # ── build (ouster_sensor_msgs -> ouster_ros -> turtlebot3_description ->
 #          gz_sensors_ouster). -DBUILD_TESTING=ON is required: the gtest targets
 #          are guarded by if(BUILD_TESTING). ──────────────────────────────────
+# When ENABLE_CUDA=true, nvcc is on PATH so the package's check_language(CUDA)
+# enables the CUDA backend automatically; CMAKE_CUDA_ARCHITECTURES targets the
+# GPU(s) you pass via CUDA_ARCH. With CUDA off the flag is inert (no CUDA lang).
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
- && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+ && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+      -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}"
 
 # ── build-time test gate (mirror CI: fail if zero tests ran) ──────────────────
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash \

@@ -371,6 +371,29 @@ GPU). Docker `-e` flags must come **before** the image name, e.g.
 `docker run ... -e RVIZ=false ... gzouster drive` — flags placed after the image
 name are passed to the entrypoint as arguments, not env vars.
 
+### Using the host GPU (CUDA backend)
+
+By default the image installs no CUDA toolchain, so the plugin runs its CPU
+(OpenMP) backend. To build the **CUDA backend** and run it on the **host's** GPU
+— without pulling in the full `rovermax_ws` image — build with `ENABLE_CUDA=true`
+and run with `--gpus all`. Only the CUDA *toolkit* (nvcc/cudart/curand) is baked
+into the image; the driver/`libcuda` comes from the host at run time (needs
+`nvidia-container-toolkit` on the host — no host CUDA install required):
+
+```bash
+# CUDA_ARCH: 86 = Ampere (RTX 30xx), 89 = Ada (40xx), or "75;80;86;89" for portability.
+docker build -t gzouster-cuda --build-arg ENABLE_CUDA=true --build-arg CUDA_ARCH=86 .
+
+docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster-cuda
+# the plugin logs "Using cuda backend." instead of the CPU-fallback warning.
+```
+
+`CUDA_DISTRO`/`CUDA_PKG_VERSION`/`CUDA_HOME_VERSION` override the NVIDIA apt repo
+and toolkit version (defaults: Ubuntu 24.04 `noble`, CUDA 12.6 — valid for the
+jazzy/kilted bases). The selected backend accelerates **both** ray modes — the
+per-beam casting in `raycast` and the resample/noise pipeline in `panels`
+(verified: with `--gpus all` the plugin logs `Using cuda backend.` in raycast).
+
 The vehicle (`examples/urdf/turtlebot3_ouster.urdf.xacro`) reuses the genuine
 ROBOTIS `turtlebot3_description` waffle geometry, adds a new-Gazebo
 `gz-sim-diff-drive-system` (so it drives off `/cmd_vel`), and mounts the Ouster
