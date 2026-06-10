@@ -354,19 +354,22 @@ docker run --rm gzouster
 # 2) Re-run the gtest suite.
 docker run --rm gzouster test
 
-# 3) Interactive: gz GUI + teleop_twist_keyboard on /cmd_vel (needs a display;
-#    --gpus all only if you want the GUI to render on the NVIDIA card).
+# 3) Interactive: gz GUI + RViz + teleop_twist_keyboard on /cmd_vel (needs a
+#    display; --gpus all only if you want the GUI to render on the NVIDIA card).
 docker run --rm -it --gpus all \
   -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix gzouster drive
 
-# 3b) Same, but with RViz up (add RVIZ=true to `drive` for teleop + RViz):
+# 3b) Just the windows (gz GUI + RViz), no teleop:
 docker run --rm -it --gpus all \
   -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix gzouster gui
 ```
 
-`drive` puts teleop_twist_keyboard in the foreground (drive with the keys);
-`gui` brings up RViz instead. Both default to `ray_mode:=raycast` (override with
-`-e RAY_MODE=panels`, which needs a GPU).
+`drive` runs teleop_twist_keyboard in the foreground (drive with the keys);
+`gui` just shows the windows. **Both bring up RViz by default.** Toggle it off
+with `-e RVIZ=false`, and switch ray modes with `-e RAY_MODE=panels` (needs a
+GPU). Docker `-e` flags must come **before** the image name, e.g.
+`docker run ... -e RVIZ=false ... gzouster drive` — flags placed after the image
+name are passed to the entrypoint as arguments, not env vars.
 
 The vehicle (`examples/urdf/turtlebot3_ouster.urdf.xacro`) reuses the genuine
 ROBOTIS `turtlebot3_description` waffle geometry, adds a new-Gazebo

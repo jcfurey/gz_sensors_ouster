@@ -38,16 +38,16 @@ case "$cmd" in
 
   drive|gui)
     echo "[entrypoint] interactive sim (raycast)."
-    # gui shows RViz by default; drive focuses on teleop (override with RVIZ=true).
-    rviz_default=false
-    [ "$cmd" = "gui" ] && rviz_default=true
+    # Both bring up RViz by default; disable with `-e RVIZ=false` (note: docker
+    # -e flags go BEFORE the image name). drive also runs teleop in the
+    # foreground; gui just shows the windows.
     ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py \
-      headless:=false ray_mode:="${RAY_MODE:-raycast}" rviz:="${RVIZ:-$rviz_default}" &
+      headless:=false ray_mode:="${RAY_MODE:-raycast}" rviz:="${RVIZ:-true}" &
     launch_pid=$!
     trap 'kill -- -'"$launch_pid"' 2>/dev/null || kill "$launch_pid" 2>/dev/null || true' EXIT
     sleep 5
     if [ "$cmd" = "drive" ]; then
-      echo "[entrypoint] drive with the teleop keys (set RVIZ=true to also show RViz)."
+      echo "[entrypoint] drive with the teleop keys."
       ros2 run teleop_twist_keyboard teleop_twist_keyboard
     else
       wait "$launch_pid"
