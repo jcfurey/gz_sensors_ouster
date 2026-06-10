@@ -40,6 +40,11 @@ struct ResampleParams {
     int W;              ///< Ouster columns per frame (output cols)
     int n_panels;       ///< Number of valid entries in panels[]
     int raw_n;          ///< Total floats in the packed raw buffer
+    /// 1 → nearest-pixel sampling: each beam takes the single closest
+    /// rendered ray (a true raycast with direction quantised to the panel
+    /// pixel grid; no range blending at depth edges). 0 → bilinear (default):
+    /// smoother surfaces, but silhouette pixels blend fore/background range.
+    int nearest;
     float far_clip;     ///< Metres; planar depth at/beyond this is a miss
     float beam_origin_m; ///< lidar_origin_to_beam_origin in metres
     ResamplePanel panels[kMaxResamplePanels];

@@ -148,6 +148,9 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("panel_oversample")) {
         panel_oversample_ = sdf->Get<double>("panel_oversample");
     }
+    if (sdf->HasElement("panel_sampling")) {
+        panel_sampling_ = sdf->Get<std::string>("panel_sampling");
+    }
     if (sdf->HasElement("image_qos")) {
         image_qos_ = sdf->Get<std::string>("image_qos");
     }
@@ -230,6 +233,12 @@ void GzGpuOusterLidarSystem::Configure(
     gyro_bias_walk_        = std::max(0.0, gyro_bias_walk_);
     accel_bias_walk_       = std::max(0.0, accel_bias_walk_);
     panel_oversample_      = std::clamp(panel_oversample_, 1.0, 4.0);
+    if (panel_sampling_ != "bilinear" && panel_sampling_ != "nearest") {
+        RCLCPP_WARN(kLogger,
+            "Unknown panel_sampling='%s'; expected bilinear|nearest. "
+            "Defaulting to bilinear.", panel_sampling_.c_str());
+        panel_sampling_ = "bilinear";
+    }
 
     auto validate_qos = [](std::string & val, const char * field, const char * fallback) {
         if (val != "reliable" && val != "best_effort" && val != "sensor_data") {
@@ -322,6 +331,7 @@ void GzGpuOusterLidarSystem::Configure(
     }
     layout_.rp.far_clip = static_cast<float>(max_range_);
     layout_.rp.beam_origin_m = static_cast<float>(beam_origin_mm_ / 1000.0);
+    layout_.rp.nearest = (panel_sampling_ == "nearest") ? 1 : 0;
 
     // Verify the exact calibrated beams (incl. per-beam azimuth offsets)
     // against the rig. The builder already self-checks a fine grid; this
@@ -341,9 +351,10 @@ void GzGpuOusterLidarSystem::Configure(
                     std::to_string(layout_.cams[i].height);
         }
         RCLCPP_INFO(kLogger,
-            "Panel rig: %d %s panels (%.1f MiB raw):%s",
+            "Panel rig: %d %s panels, %s sampling (%.1f MiB raw):%s",
             layout_.n_panels,
             layout_.hemispherical ? "hemispherical" : "cylindrical",
+            panel_sampling_.c_str(),
             layout_.rp.raw_n * sizeof(float) / 1048576.0, dims.c_str());
     }
 

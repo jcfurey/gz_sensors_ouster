@@ -163,6 +163,10 @@ private:
     // handed to the backends each frame.
     PanelLayout layout_;
     double panel_oversample_ = 2.0;  // SDF <panel_oversample>, clamped 1..4
+    // SDF <panel_sampling>: "bilinear" (smooth surfaces, default) or
+    // "nearest" (raycast-like: one exact rendered ray per beam, direction
+    // quantised to the pixel grid, no range blending at depth edges).
+    std::string panel_sampling_ = "bilinear";
 
     // Rendering objects (created lazily on the render thread in OnRender).
     std::vector<::gz::rendering::DepthCameraPtr> panel_cams_;

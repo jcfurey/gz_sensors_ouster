@@ -44,6 +44,17 @@
        sharpen edges at the cost of VRAM and render time. Clamped to 1-4. -->
   <!-- <panel_oversample>2.0</panel_oversample> -->
 
+  <!-- How each beam samples its covering panel:
+         bilinear (default) — interpolate the 4 neighbouring rendered rays.
+             Smoothest surfaces, but silhouette pixels blend foreground and
+             background range (partially rejected by edge_discon_threshold).
+         nearest — take the single closest rendered ray: a true raycast with
+             the beam direction quantised to the panel pixel grid (≤ half a
+             pixel, i.e. ≤ 1/(2*panel_oversample) of the beam spacing). No
+             range blending at depth edges. Combine with panel_oversample 4
+             for the tightest direction quantisation. -->
+  <!-- <panel_sampling>bilinear</panel_sampling> -->
+
   <!-- ─── Noise Model (optional, defaults tuned for OS1-64 rev6) ──── -->
   <!-- All noise parameters can be changed at runtime:
        ros2 param set /gz_gpu_ouster_lidar range_noise_min_std 0.005 -->

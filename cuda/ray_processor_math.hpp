@@ -183,6 +183,22 @@ GZ_OUSTER_HD inline float sampleBeamRange(
     const int pi = panelForDirection(rp, dx, dy, dz, u, v, cosp);
     if (pi < 0) return inf_value;
     const ResamplePanel & p = rp.panels[pi];
+    const float far_lim = rp.far_clip * kFarClipFrac;
+
+    if (rp.nearest) {
+        // Nearest-pixel mode: take the single closest rendered ray. The
+        // rasterised pixel IS an exact ray-scene intersection, so this is a
+        // true raycast with the beam direction quantised to the pixel grid
+        // (≤ half a pixel, i.e. ≤ 1/(2·oversample) of the beam spacing).
+        // No interpolation → no fore/background range blending at edges.
+        const int ui = static_cast<int>(u + 0.5f);
+        const int vi = static_cast<int>(v + 0.5f);
+        const float d = raw[p.offset + vi * p.width + ui];
+        if (!gzm::isfinite_(d) || d <= kValidDepthMin || d >= far_lim) {
+            return inf_value;
+        }
+        return d / cosp;
+    }
 
     const int u0 = static_cast<int>(gzm::floor_(u));
     const int v0 = static_cast<int>(gzm::floor_(v));
@@ -197,7 +213,6 @@ GZ_OUSTER_HD inline float sampleBeamRange(
     const float d10 = img[v1 * p.width + u0];
     const float d11 = img[v1 * p.width + u1];
 
-    const float far_lim = rp.far_clip * kFarClipFrac;
     const bool b00 = gzm::isfinite_(d00) && d00 > kValidDepthMin && d00 < far_lim;
     const bool b01 = gzm::isfinite_(d01) && d01 > kValidDepthMin && d01 < far_lim;
     const bool b10 = gzm::isfinite_(d10) && d10 > kValidDepthMin && d10 < far_lim;

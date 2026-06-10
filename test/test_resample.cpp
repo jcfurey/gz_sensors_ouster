@@ -162,6 +162,79 @@ TEST(Resample, UniformRangeHemisphericalRig)
     }
 }
 
+TEST(Resample, NearestSamplingDoesNotBlendAcrossEdges)
+{
+    // A beam landing exactly between a near and a far surface: bilinear
+    // blends the two ranges (the classic floating-silhouette artifact);
+    // nearest mode must return one of the two real surfaces.
+    ResampleParams rp{};
+    rp.n_panels = 1;
+    rp.far_clip = 120.0f;
+    ResamplePanel & p = rp.panels[0];
+    p.r[0] = 1.0f; p.r[4] = 1.0f; p.r[8] = 1.0f;  // identity: panel faces +x
+    p.width = 8;
+    p.height = 8;
+    p.fx = p.fy = 4.0f;
+    p.cx = p.cy = 3.5f;
+    p.offset = 0;
+    rp.raw_n = p.width * p.height;
+
+    // Left half (u <= 3) at 5 m planar, right half at 50 m.
+    std::vector<float> raw(static_cast<size_t>(rp.raw_n));
+    for (int v = 0; v < p.height; ++v) {
+        for (int u = 0; u < p.width; ++u) {
+            raw[v * p.width + u] = (u <= 3) ? 5.0f : 50.0f;
+        }
+    }
+
+    const float kInf = std::numeric_limits<float>::infinity();
+    // el=0, az=0 → u = cx = 3.5, dead centre between the two surfaces.
+    const float blended = rpmath::sampleBeamRange(raw.data(), rp, 0.0f, 0.0f, kInf);
+    EXPECT_GT(blended, 20.0f);
+    EXPECT_GT(35.0f, blended);  // bilinear lands between the surfaces
+
+    rp.nearest = 1;
+    const float snapped = rpmath::sampleBeamRange(raw.data(), rp, 0.0f, 0.0f, kInf);
+    const bool on_surface =
+        std::abs(snapped - 5.0f) < 1e-3f || std::abs(snapped - 50.0f) < 1e-3f;
+    EXPECT_TRUE(on_surface)
+        << "nearest sampling returned " << snapped
+        << " — must be one of the real surfaces (5 or 50), never a blend";
+}
+
+TEST(Resample, NearestSamplingUniformRangeWithinQuantization)
+{
+    // In nearest mode each beam takes an exactly-cast neighbouring ray, so
+    // a constant-range scene reads back the range to within the direction
+    // quantisation (≤ half a pixel of the oversampled grid).
+    constexpr int H = 8, W = 64;
+    constexpr float kRange = 20.0f;
+
+    auto layout = makeRig(-10.0f, 10.0f, H, W, 120.0f, /*oversample=*/4.0);
+    ASSERT_EQ(layout.n_panels, 4);
+    layout.rp.nearest = 1;
+
+    const auto raw = makeUniformRangeRaw(layout.rp, kRange);
+    auto beam_alt = makeBeams(H, -10.0f, 10.0f);
+    std::vector<float> beam_az(H, 0.0f);
+    const auto pp = noNoise(H, W);
+
+    const int n = H * W;
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    RayProcessor proc;
+    proc.processRaw(raw.data(), beam_alt.data(), beam_az.data(), layout.rp,
+                    range.data(), signal.data(), refl.data(), nearir.data(), pp);
+
+    for (int i = 0; i < n; ++i) {
+        EXPECT_NEAR(static_cast<double>(range[i]), 20000.0, 100.0)
+            << "pixel " << i << " range mismatch";
+    }
+}
+
 TEST(Resample, AllInfProducesZeroRange)
 {
     constexpr int H = 4, W = 32;

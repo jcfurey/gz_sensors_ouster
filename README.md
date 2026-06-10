@@ -383,6 +383,7 @@ All noise model parameters can be changed at runtime via
 | `max_range` | *auto* | >= 1 | Max sensing range in metres. Auto-derived from metadata `prod_line` if not set (OS0: 50, OS1: 120, OS2: 240). Also sets the GPU far clip plane. |
 | `visibility_mask` | 4294967295 | 0 to 4294967295 | Gazebo render visibility mask applied to the panel cameras. Use to include or exclude visuals from raycasting. |
 | `panel_oversample` | 2.0 | 1 to 4 | Panel angular resolution as a multiple of the sensor's finest angular resolution. Higher = sharper edges, more VRAM and render time. |
+| `panel_sampling` | `bilinear` | `bilinear` \| `nearest` | `bilinear` interpolates the 4 neighbouring rendered rays (smooth surfaces, but silhouettes blend fore/background range). `nearest` takes the single closest rendered ray — a true raycast with direction quantised to the pixel grid (≤ 1/(2·oversample) of the beam spacing) and no range blending at depth edges. |
 
 ### QoS overrides
 
@@ -551,7 +552,7 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 | Binary | Coverage |
 |--------|---------|
 | `test_noise_model` | Range/signal/refl/nearir math + statistical bounds on dropouts and range noise |
-| `test_resample` | Panel-rig layout (coverage, packing) + beam resample math (uniform range through cylindrical and hemispherical rigs, all-inf, far clip, beam-origin subtraction, azimuth offset) |
+| `test_resample` | Panel-rig layout (coverage, packing) + beam resample math (uniform range through cylindrical and hemispherical rigs, all-inf, far clip, beam-origin subtraction, azimuth offset, nearest-mode edge non-blending and quantisation bound) |
 | `test_metadata_parsing` | Loads each shipped `config/metadata/*.json` via the Ouster SDK |
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
 | `test_imu_noise` | IMU white-noise variance vs. density²/dt, bias drift growth, RNG-draw gating, determinism under fixed seed |
