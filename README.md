@@ -358,7 +358,15 @@ docker run --rm gzouster test
 #    --gpus all only if you want the GUI to render on the NVIDIA card).
 docker run --rm -it --gpus all \
   -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix gzouster drive
+
+# 3b) Same, but with RViz up (add RVIZ=true to `drive` for teleop + RViz):
+docker run --rm -it --gpus all \
+  -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix gzouster gui
 ```
+
+`drive` puts teleop_twist_keyboard in the foreground (drive with the keys);
+`gui` brings up RViz instead. Both default to `ray_mode:=raycast` (override with
+`-e RAY_MODE=panels`, which needs a GPU).
 
 The vehicle (`examples/urdf/turtlebot3_ouster.urdf.xacro`) reuses the genuine
 ROBOTIS `turtlebot3_description` waffle geometry, adds a new-Gazebo

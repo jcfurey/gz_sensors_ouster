@@ -37,13 +37,17 @@ case "$cmd" in
     ;;
 
   drive|gui)
-    echo "[entrypoint] interactive sim (raycast). Drive with the teleop keys."
+    echo "[entrypoint] interactive sim (raycast)."
+    # gui shows RViz by default; drive focuses on teleop (override with RVIZ=true).
+    rviz_default=false
+    [ "$cmd" = "gui" ] && rviz_default=true
     ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py \
-      headless:=false ray_mode:="${RAY_MODE:-raycast}" rviz:="${RVIZ:-false}" &
+      headless:=false ray_mode:="${RAY_MODE:-raycast}" rviz:="${RVIZ:-$rviz_default}" &
     launch_pid=$!
     trap 'kill -- -'"$launch_pid"' 2>/dev/null || kill "$launch_pid" 2>/dev/null || true' EXIT
     sleep 5
     if [ "$cmd" = "drive" ]; then
+      echo "[entrypoint] drive with the teleop keys (set RVIZ=true to also show RViz)."
       ros2 run teleop_twist_keyboard teleop_twist_keyboard
     else
       wait "$launch_pid"
