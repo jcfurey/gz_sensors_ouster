@@ -146,11 +146,15 @@ COPY . src/gz_sensors_ouster
 # ── system deps via rosdep ────────────────────────────────────────────────────
 # `rosdep update` pulls the rosdistro index from raw.githubusercontent.com, which
 # intermittently resets the connection; retry a few times so a flaky network
-# doesn't fail the whole build.
-RUN for i in 1 2 3 4 5; do \
-      rosdep update --rosdistro=${ROS_DISTRO} && break; \
+# doesn't fail the whole build, but fail loudly once retries are exhausted
+# (falling through surfaces as confusing unresolvable-key errors from
+# rosdep install instead).
+RUN ok=""; \
+    for i in 1 2 3 4 5; do \
+      rosdep update --rosdistro=${ROS_DISTRO} && { ok=1; break; }; \
       echo "rosdep update failed (attempt $i); retrying in 10s..."; sleep 10; \
-    done \
+    done; \
+    [ -n "$ok" ] || { echo "ERROR: rosdep update failed after 5 attempts."; exit 1; } \
  && apt-get update -qq \
  && rosdep install --from-paths src --rosdistro=${ROS_DISTRO} -y --ignore-src \
  && rm -rf /var/lib/apt/lists/*

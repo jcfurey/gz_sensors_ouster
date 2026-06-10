@@ -68,9 +68,16 @@ if [ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]; then
 fi
 
 # cpplint pinned to the version CI uses; PEP 668 requires --break-system-packages
-# on noble (ephemeral sandbox, no host Python to corrupt).
-command -v cpplint >/dev/null 2>&1 || \
-  pip install --break-system-packages --no-cache-dir cpplint==1.6.1
+# on noble (ephemeral sandbox, no host Python to corrupt). Checked as a module of
+# the CURRENT python3 — a bare `command -v cpplint` can pass while the module is
+# orphaned on another interpreter (e.g. after the 3.12 repoint above).
+if ! python3 -c 'import cpplint' >/dev/null 2>&1; then
+  python3 -m pip --version >/dev/null 2>&1 || {
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends python3-pip
+  }
+  python3 -m pip install --break-system-packages --no-cache-dir cpplint==1.6.1
+fi
 
 # ── workspace: pinned ouster-ros + this repo (symlink) ────────────────────────
 mkdir -p "$WS/src"
@@ -87,12 +94,16 @@ fi
 # ── system deps via rosdep ────────────────────────────────────────────────────
 [ -f /etc/ros/rosdep/sources.list.d/20-default.list ] || rosdep init
 # rosdep update pulls from raw.githubusercontent.com, which intermittently
-# resets connections; retry like the Dockerfile does.
+# resets connections; retry like the Dockerfile does, and fail loudly if all
+# attempts are exhausted (falling through would surface as confusing
+# unresolvable-key errors from rosdep install instead).
+rosdep_ok=""
 for i in 1 2 3 4 5; do
-  rosdep update --rosdistro=${ROS_DISTRO} && break
+  if rosdep update --rosdistro=${ROS_DISTRO}; then rosdep_ok=1; break; fi
   echo "rosdep update failed (attempt $i); retrying in 10s..."
   sleep 10
 done
+[ -n "$rosdep_ok" ] || { echo "ERROR: rosdep update failed after 5 attempts." >&2; exit 1; }
 apt-get update -qq
 rosdep install --from-paths "$WS/src" --rosdistro=${ROS_DISTRO} -y --ignore-src
 

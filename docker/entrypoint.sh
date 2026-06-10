@@ -27,7 +27,7 @@ case "$cmd" in
     setsid ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py \
       headless:=true ray_mode:=raycast rviz:=false &
     launch_pid=$!
-    trap 'kill -- "-$launch_pid" 2>/dev/null || true' EXIT
+    trap 'kill -- "-$launch_pid" 2>/dev/null || kill "$launch_pid" 2>/dev/null || true' EXIT
 
     set +e
     python3 "/ws/src/gz_sensors_ouster/docker/smoke_check.py" \
@@ -45,7 +45,7 @@ case "$cmd" in
     setsid ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py \
       headless:=false ray_mode:="${RAY_MODE:-raycast}" rviz:="${RVIZ:-true}" &
     launch_pid=$!
-    trap 'kill -- "-$launch_pid" 2>/dev/null || true' EXIT
+    trap 'kill -- "-$launch_pid" 2>/dev/null || kill "$launch_pid" 2>/dev/null || true' EXIT
     sleep 5
     if [ "$cmd" = "drive" ]; then
       echo "[entrypoint] drive with the teleop keys."
