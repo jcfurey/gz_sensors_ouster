@@ -13,7 +13,6 @@ void launchResampleKernel(
     const float * d_beam_alt,
     const float * d_beam_az,
     float *       d_depth_out,
-    float *       d_retro_out,
     const ResampleParams & rp,
     void * stream);
 

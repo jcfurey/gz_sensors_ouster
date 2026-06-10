@@ -11,6 +11,11 @@
   per-ray raycast path instead.
 
   Run with examples/launch/depthcam_derisk.launch.py.
+
+  RESOLVED: the stock depth_camera rendered cleanly, so the plugin now models
+  the Ouster cylindrical/hemispherical rays directly from a rig of perspective
+  DepthCamera panels (see cuda/panel_layout.hpp) and no longer uses the
+  GpuRays cubemap at all. This world is kept as a historical harness.
 -->
 <sdf version="1.9">
   <world name="depthcam_derisk">

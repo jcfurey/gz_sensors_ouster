@@ -85,7 +85,8 @@ For IMU simulation, your world SDF must also load the Gazebo IMU system:
 ### World requirements (read this if no point cloud is published)
 
 This plugin does **not** register a `<sensor type="gpu_lidar">`. It creates its
-own `GpuRays` inside the ogre2 scene that `gz-sim-sensors-system` owns, and it is
+own rig of perspective depth cameras inside the ogre2 scene that
+`gz-sim-sensors-system` owns, and it is
 driven by that system's `events::Render` event. Therefore the world must:
 
 1. Load the Sensors system with the ogre2 engine:
@@ -99,7 +100,7 @@ driven by that system's `events::Render` event. Therefore the world must:
    rendering — building the scene and emitting `events::Render` — once such a
    sensor exists in the ECM. With **only** non-rendering sensors (e.g. an
    `altimeter` pose anchor plus an `imu`), the Sensors system never starts
-   rendering, `OnRender()` never fires, the `GpuRays` is never created, and **no
+   rendering, `OnRender()` never fires, the panel rig is never created, and **no
    point cloud is produced**.
 
 The bundled examples satisfy (2) by defaulting the pose-anchor sensor to a tiny
@@ -197,8 +198,8 @@ With IMU auto-detection:
 
 ### Multiple Sensors
 
-Add one `<plugin>` block per sensor. Each gets its own topics, GpuRays
-instance, GPU stream (or CPU OpenMP pool), and drain thread. Use
+Add one `<plugin>` block per sensor. Each gets its own topics, panel
+rig, GPU stream (or CPU OpenMP pool), and drain thread. Use
 different `sensor_name` prefixes and metadata files:
 
 ```xml
@@ -220,9 +221,10 @@ different `sensor_name` prefixes and metadata files:
 </plugin>
 ```
 
-Each sensor adds ~100 MB GPU VRAM (Ogre2 cubemap) and two threads
-(ROS executor + drain). Ogre2 renders sensors sequentially on the
-render thread, so 2-3 sensors at 10 Hz is comfortable. For 4+
+Each sensor adds the panel-rig render targets (~10-50 MB GPU VRAM
+depending on density; the exact size is logged at startup) and two
+threads (ROS executor + drain). Ogre2 renders sensors sequentially on
+the render thread, so 2-3 sensors at 10 Hz is comfortable. For 4+
 sensors, consider staggering scan rates or reducing beam density.
 
 ## Examples (URDF + world + launch)
@@ -265,8 +267,8 @@ RViz config includes a `PointCloud` display for that topic.
 
 ### How the URDF wires to the plugin
 
-The plugin is a Gazebo **system** plugin on the model; it ray-casts with
-its own `GpuRays` rather than a gz `<sensor type="gpu_lidar">`. The macro
+The plugin is a Gazebo **system** plugin on the model; it renders with
+its own depth-panel rig rather than a gz `<sensor type="gpu_lidar">`. The macro
 therefore emits, per sensor:
 
 - A **pose-anchor `<sensor>`** named exactly like the last segment of
@@ -329,7 +331,7 @@ simulation without real hardware:
 | `os0_128_rev7.json` | OS0-128 | 128 | 90° | Nominal (uniform spacing) | Ultra-wide short-range |
 | `os1_128_rev7.json` | OS1-128 | 128 | 45° | Nominal | High-density mid-range |
 | `os2_128_rev7.json` | OS2-128 | 128 | 22.5° | Nominal | Long-range narrow |
-| `osdome_128_rev7.json` | OSDome-128 | 128 | 180° | Nominal | Hemispheric (experimental) |
+| `osdome_128_rev7.json` | OSDome-128 | 128 | 180° | Nominal | Hemispheric (8 pitched panels + zenith cap) |
 
 The default files use the `RNG19_RFL8_SIG16_NIR16` lidar profile, `LEGACY`
 IMU profile, and 1024 columns/frame at 10 Hz. `max_range` is auto-derived
@@ -379,7 +381,8 @@ All noise model parameters can be changed at runtime via
 |-----------|---------|-------|-------------|
 | `lidar_hz` | 10.0 | > 0 | Scan rate in Hz. |
 | `max_range` | *auto* | >= 1 | Max sensing range in metres. Auto-derived from metadata `prod_line` if not set (OS0: 50, OS1: 120, OS2: 240). Also sets the GPU far clip plane. |
-| `visibility_mask` | 4294967295 | 0 to 4294967295 | Gazebo render visibility mask applied to GpuRays. Use to include or exclude visuals from raycasting. |
+| `visibility_mask` | 4294967295 | 0 to 4294967295 | Gazebo render visibility mask applied to the panel cameras. Use to include or exclude visuals from raycasting. |
+| `panel_oversample` | 2.0 | 1 to 4 | Panel angular resolution as a multiple of the sensor's finest angular resolution. Higher = sharper edges, more VRAM and render time. |
 
 ### QoS overrides
 
@@ -470,8 +473,9 @@ consumers don't get literal-zero variances.
 
 ## Performance
 
-The rendering bottleneck is Ogre2's GpuRays cubemap (6 faces per
-frame). The GPU post-processing pipeline (resample + noise) adds only
+The rendering bottleneck is the panel rig's depth passes (4 for
+cylindrical sensors, 9 for the OSDome). The GPU post-processing
+pipeline (resample + noise) adds only
 ~2-3 ms per frame regardless of sensor density on any of the supported
 backends. All numbers assume a single sensor.
 
@@ -509,28 +513,29 @@ kernel rows to 5-10 ms each.
 
 | Stage | Time | Notes |
 |-------|------|-------|
-| Ogre2 cubemap (6 faces) | 20-50 ms | **Dominant cost** -- GPU raycast |
-| onNewFrame memcpy | <1 ms | 24 MB raw buffer copy |
+| Panel depth passes (4 or 9) | 20-50 ms | **Dominant cost** -- GPU render |
+| onPanelFrame memcpys | <1 ms | packed rig buffer copy |
 | H2D transfer | ~1 ms | Raw frame to device (skipped on hip-apu / sycl-igpu) |
-| resampleKernel | ~1 ms | 2M threads, bilinear interp |
+| resampleKernel | ~1 ms | 2M threads, panel projection + bilinear |
 | rayProcessKernel | ~1 ms | 2M threads, noise + channels |
 | D2H transfer | ~1 ms | Final channel results (skipped on hip-apu / sycl-igpu) |
 | Packet encoding | 2-3 ms | 256 packets × 4 set_block calls |
 
 ### Tips for high-density configs
 
-- **Reduce `v_samples`**: The cubemap resolution scales with vertical
-  ray count. For sensors where some vertical aliasing is acceptable,
-  the `v_samples` calculation in `OnRender()` can be tuned down.
+- **Reduce `<panel_oversample>`**: Panel resolution defaults to 2x the
+  sensor's angular resolution. Dropping it toward 1.0 quarters the
+  rendered pixels at the cost of more interpolation smoothing.
 - **Stagger scan rates**: With multiple sensors, use different
   `lidar_hz` values (e.g. 10 Hz primary, 5 Hz secondary) to avoid
-  simultaneous cubemap renders.
+  simultaneous rig renders.
 - **CPU fallback is viable** for low-density sensors (OS1-16, OS1-32).
   OpenMP parallelisation keeps resampling under 5 ms for <100K pixels.
-- **GPU VRAM**: Each sensor uses ~100 MB for the Ogre2 cubemap plus
-  ~10-20 MB for backend device buffers (raw frame, channels, RNG state).
-  The plugin logs the per-sensor breakdown on first frame; check the
-  log if multi-sensor configs run into VRAM pressure.
+- **GPU VRAM**: Each sensor uses the panel-rig render targets (logged
+  as the raw-buffer size at startup) plus ~10-20 MB for backend device
+  buffers (raw frame, channels, RNG state). The plugin logs the
+  per-sensor breakdown on first frame; check the log if multi-sensor
+  configs run into VRAM pressure.
 
 ## Tests
 
@@ -546,7 +551,7 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 | Binary | Coverage |
 |--------|---------|
 | `test_noise_model` | Range/signal/refl/nearir math + statistical bounds on dropouts and range noise |
-| `test_resample` | Bilinear resample math (uniform depth, all-inf, beam-origin subtraction, azimuth offset) |
+| `test_resample` | Panel-rig layout (coverage, packing) + beam resample math (uniform range through cylindrical and hemispherical rigs, all-inf, far clip, beam-origin subtraction, azimuth offset) |
 | `test_metadata_parsing` | Loads each shipped `config/metadata/*.json` via the Ouster SDK |
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
 | `test_imu_noise` | IMU white-noise variance vs. density²/dt, bias drift growth, RNG-draw gating, determinism under fixed seed |
@@ -578,7 +583,8 @@ Set `GZ_OUSTER_BACKEND=cpu` (or any backend name) to force a specific
 choice for debugging.
 
 ```
-GpuRays sensor created: 1024x256 rays, vertical FOV [-22.6, 22.6] deg
+Panel rig: 4 cylindrical panels (12.4 MiB raw): 1374x658 1374x658 1374x658 1374x658
+Panel rig created: 4 depth cameras, beam altitude span [-23.6, 23.6] deg, cylindrical model
 Configured: H=128 W=1024 cpp=16 sensor_name=/sensor/lidar/lidar0 ...
 ```
 Dimensions and tuning derived from the loaded metadata.
@@ -589,8 +595,8 @@ Dimensions and tuning derived from the loaded metadata.
 /sensor/lidar/lidar0: GPU buffers ~12.4 MiB (cuda backend) — raw=3.1 channels=0.6 resample=1.0 rand=7.7
 ```
 Per-sensor backend memory footprint. Use this to budget multi-sensor
-configs against available VRAM. The four numbers are the raw cubemap,
-the channel outputs (range/signal/reflec/nearir), the depth+retro
+configs against available VRAM. The four numbers are the packed panel
+rig buffer, the channel outputs (range/signal/reflec/nearir), the depth
 intermediate, and the curand/hiprand state (zero on SYCL — its RNG is
 counter-based and stateless).
 
@@ -610,7 +616,7 @@ metadata subscriber count dropped to 0; re-arming republish
 ### Throttled WARN (5 s)
 
 ```
-/sensor/lidar/lidar0: dropped GpuRays frame (PostUpdate didn't drain); total dropped=37
+/sensor/lidar/lidar0: dropped rig frame (PostUpdate didn't drain); total dropped=37
 ```
 The render thread fired a new frame before the sim thread consumed the
 previous one. Rare under the lidar_hz throttle; sustained drops mean
@@ -639,14 +645,22 @@ noise params to 0 falls back to the ouster_ros default literals
 
 ## Architecture
 
-1. **Configure()** loads metadata, creates ROS publishers, declares parameters
-2. **OnRender()** (render thread) lazily creates GpuRays, triggers GPU raycast
-3. **onNewFrame()** fast-copies the raw GpuRays buffer into a staging area (memcpy only, <1ms)
+1. **Configure()** loads metadata, builds the panel-rig layout from the
+   beam intrinsics (cylindrical sectors for OS0/1/2, pitched sectors +
+   zenith cap for the OSDome), verifies that every calibrated beam ray is
+   covered, creates ROS publishers, declares parameters
+2. **OnRender()** (render thread) lazily creates one perspective depth
+   camera per panel, then renders the whole rig each scan tick
+3. **onPanelFrame()** fast-copies each panel's planar-depth buffer into its
+   packed slot in a staging area (memcpy only, <1ms total)
 4. **PostUpdate()** (sim thread) caches pose, swaps the raw frame out, dispatches to `encodeAndPublish()`, publishes IMU
-5. **encodeAndPublish()** hands the raw frame to the active `RayProcessor`
-   backend (CUDA / HIP / SYCL / CPU — chosen at construction by probing
-   for a usable device). The backend runs the resample kernel
-   (bilinear interpolation to exact Ouster beam geometry) → noise kernel
+5. **encodeAndPublish()** hands the packed rig buffer to the active
+   `RayProcessor` backend (CUDA / HIP / SYCL / CPU — chosen at
+   construction by probing for a usable device). The backend runs the
+   resample kernel — for each beam (exact calibrated elevation, per-beam
+   azimuth offset, encoder column) it projects the ray into the covering
+   panel, bilinearly samples planar depth, and divides by the ray/axis
+   cosine to recover Euclidean range — then the noise kernel
    (range/signal/reflectivity/near-IR with reflectivity-dependent
    effects), then PacketWriter encodes the result. The GPU backends use
    one device stream per sensor; the CPU backend uses OpenMP for

@@ -36,6 +36,14 @@
        Only set this if you need to override the auto-detected value. -->
   <!-- <max_range>120.0</max_range> -->
 
+  <!-- Panel-rig angular resolution, as a multiple of the sensor's finest
+       angular resolution (beam spacing / column spacing). The rig renders
+       perspective depth panels around the sensor (4 cylindrical sectors
+       for OS0/1/2, 8 pitched sectors + zenith cap for OSDome) and each
+       calibrated beam is sampled from the covering panel. Higher values
+       sharpen edges at the cost of VRAM and render time. Clamped to 1-4. -->
+  <!-- <panel_oversample>2.0</panel_oversample> -->
+
   <!-- ─── Noise Model (optional, defaults tuned for OS1-64 rev6) ──── -->
   <!-- All noise parameters can be changed at runtime:
        ros2 param set /gz_gpu_ouster_lidar range_noise_min_std 0.005 -->

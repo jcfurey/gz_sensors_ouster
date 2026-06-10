@@ -26,6 +26,8 @@
 
 #pragma once
 
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
+
 #include <cstdint>
 
 #if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)
@@ -46,6 +48,8 @@ namespace rpmath {
 // ── Named constants (replace magic numbers previously inlined per backend) ───
 constexpr float kPi              = 3.14159265358979f;
 constexpr float kValidDepthMin   = 0.001f;    ///< metres; below this a return is a miss
+constexpr float kPanelMinCos     = 1.0e-3f;   ///< min ray·axis cosine for panel hit
+constexpr float kFarClipFrac     = 0.999f;    ///< planar depth ≥ far×this → miss
 constexpr float kMinDenom        = 0.0001f;   ///< guards the 1/r² signal denominator
 constexpr float kRangeToMm       = 1000.0f;
 constexpr float kU16Max          = 65535.0f;
@@ -75,12 +79,16 @@ GZ_OUSTER_HD inline float fmax_(float a, float b) { return a > b ? a : b; }
 GZ_OUSTER_HD inline float sqrt_(float x)     { return sycl::sqrt(x); }
 GZ_OUSTER_HD inline float log2_(float x)     { return sycl::log2(x); }
 GZ_OUSTER_HD inline float cos_(float x)      { return sycl::cos(x); }
+GZ_OUSTER_HD inline float sin_(float x)      { return sycl::sin(x); }
+GZ_OUSTER_HD inline float floor_(float x)    { return sycl::floor(x); }
 GZ_OUSTER_HD inline float fabs_(float x)     { return sycl::fabs(x); }
 GZ_OUSTER_HD inline bool  isfinite_(float x) { return sycl::isfinite(x); }
 #else
 GZ_OUSTER_HD inline float sqrt_(float x)     { return std::sqrt(x); }
 GZ_OUSTER_HD inline float log2_(float x)     { return std::log2(x); }
 GZ_OUSTER_HD inline float cos_(float x)      { return std::cos(x); }
+GZ_OUSTER_HD inline float sin_(float x)      { return std::sin(x); }
+GZ_OUSTER_HD inline float floor_(float x)    { return std::floor(x); }
 GZ_OUSTER_HD inline float fabs_(float x)     { return std::fabs(x); }
 GZ_OUSTER_HD inline bool  isfinite_(float x) { return std::isfinite(x); }
 #endif
@@ -110,6 +118,97 @@ GZ_OUSTER_HD inline float bilinearOrAverage(
     if (v10) sum += a10;
     if (v11) sum += a11;
     return sum / static_cast<float>(n_valid);
+}
+
+// ── Panel-rig sampling (cylindrical / hemispherical beam model) ──────────────
+//
+// Beam directions use the Gazebo sensor frame: x forward, y left, z up.
+// Each panel is a perspective depth render; image u grows rightward (−y),
+// v grows downward (−z), pixel centres at integer coordinates with the
+// principal point at ((w−1)/2, (h−1)/2).
+
+/// Unit direction of a beam given elevation and azimuth in degrees.
+GZ_OUSTER_HD inline void beamDirection(float el_deg, float az_deg,
+                                       float & dx, float & dy, float & dz)
+{
+    const float el = el_deg * kPi / 180.0f;
+    const float az = az_deg * kPi / 180.0f;
+    const float ce = gzm::cos_(el);
+    dx = ce * gzm::cos_(az);
+    dy = ce * gzm::sin_(az);
+    dz = gzm::sin_(el);
+}
+
+/// Project a unit direction into one panel. On success returns true and
+/// fills (u, v) — continuous pixel coordinates inside the image — plus the
+/// ray·axis cosine used to convert planar depth back to Euclidean range.
+GZ_OUSTER_HD inline bool projectToPanel(const ResamplePanel & p,
+    float dx, float dy, float dz, float & u, float & v, float & cosp)
+{
+    const float xc = p.r[0] * dx + p.r[1] * dy + p.r[2] * dz;
+    if (xc < kPanelMinCos) return false;
+    const float yc = p.r[3] * dx + p.r[4] * dy + p.r[5] * dz;
+    const float zc = p.r[6] * dx + p.r[7] * dy + p.r[8] * dz;
+    u = p.cx - p.fx * (yc / xc);
+    v = p.cy - p.fy * (zc / xc);
+    cosp = xc;
+    return u >= 0.0f && u <= static_cast<float>(p.width - 1) &&
+           v >= 0.0f && v <= static_cast<float>(p.height - 1);
+}
+
+/// First panel containing the direction, or -1 when uncovered.
+/// (u, v, cosp) are valid only for a non-negative return.
+GZ_OUSTER_HD inline int panelForDirection(const ResampleParams & rp,
+    float dx, float dy, float dz, float & u, float & v, float & cosp)
+{
+    for (int i = 0; i < rp.n_panels; ++i) {
+        if (projectToPanel(rp.panels[i], dx, dy, dz, u, v, cosp)) return i;
+    }
+    return -1;
+}
+
+/// Resample one beam ray from the panel rig: bilinear on planar depth in the
+/// covering panel, then divide by the ray cosine to recover range along the
+/// beam. Returns `inf_value` for misses, clipped pixels and uncovered rays.
+/// `inf_value` is caller-supplied because each backend has its own portable
+/// spelling of +inf.
+GZ_OUSTER_HD inline float sampleBeamRange(
+    const float * raw, const ResampleParams & rp,
+    float el_deg, float az_deg, float inf_value)
+{
+    float dx, dy, dz;
+    beamDirection(el_deg, az_deg, dx, dy, dz);
+
+    float u, v, cosp;
+    const int pi = panelForDirection(rp, dx, dy, dz, u, v, cosp);
+    if (pi < 0) return inf_value;
+    const ResamplePanel & p = rp.panels[pi];
+
+    const int u0 = static_cast<int>(gzm::floor_(u));
+    const int v0 = static_cast<int>(gzm::floor_(v));
+    const int u1 = (u0 + 1 < p.width)  ? u0 + 1 : p.width - 1;
+    const int v1 = (v0 + 1 < p.height) ? v0 + 1 : p.height - 1;
+    const float ha = u - static_cast<float>(u0);
+    const float va = v - static_cast<float>(v0);
+
+    const float * img = raw + p.offset;
+    const float d00 = img[v0 * p.width + u0];
+    const float d01 = img[v0 * p.width + u1];
+    const float d10 = img[v1 * p.width + u0];
+    const float d11 = img[v1 * p.width + u1];
+
+    const float far_lim = rp.far_clip * kFarClipFrac;
+    const bool b00 = gzm::isfinite_(d00) && d00 > kValidDepthMin && d00 < far_lim;
+    const bool b01 = gzm::isfinite_(d01) && d01 > kValidDepthMin && d01 < far_lim;
+    const bool b10 = gzm::isfinite_(d10) && d10 > kValidDepthMin && d10 < far_lim;
+    const bool b11 = gzm::isfinite_(d11) && d11 > kValidDepthMin && d11 < far_lim;
+    const int n_valid = static_cast<int>(b00) + static_cast<int>(b01) +
+                        static_cast<int>(b10) + static_cast<int>(b11);
+
+    const float planar = bilinearOrAverage(
+        d00, d01, d10, d11, ha, va, b00, b01, b10, b11, n_valid, inf_value);
+    if (!gzm::isfinite_(planar)) return inf_value;
+    return planar / cosp;
 }
 
 /// Beam-origin parallax correction: subtract the lidar-origin-to-beam-origin

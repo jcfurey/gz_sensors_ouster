@@ -8,18 +8,41 @@
 
 namespace gz_gpu_ouster_lidar {
 
-/// Parameters for GPU beam resampling kernel
+/// Maximum panels in a rig: 8 azimuth sectors + zenith cap + headroom.
+constexpr int kMaxResamplePanels = 12;
+
+/// One perspective depth panel of the cylindrical / hemispherical rig.
+///
+/// The raw input buffer is a concatenation of per-panel planar-depth images
+/// (one float per pixel: distance along the panel's forward axis; ±inf for
+/// clipped pixels). A beam ray is resampled by rotating its direction into
+/// the panel frame, projecting through the pinhole model below, bilinearly
+/// sampling planar depth, and dividing by the ray/axis cosine to recover
+/// Euclidean range.
+struct ResamplePanel {
+    float r[9];     ///< Row-major sensor→panel rotation (d_panel = R · d_sensor)
+    float fx;       ///< Focal length, pixels (horizontal)
+    float fy;       ///< Focal length, pixels (vertical; == fx, square pixels)
+    float cx;       ///< Principal point x: (width - 1) / 2
+    float cy;       ///< Principal point y: (height - 1) / 2
+    int width;      ///< Panel image width (pixels)
+    int height;     ///< Panel image height (pixels)
+    int offset;     ///< Float index of this panel's block in the raw buffer
+};
+
+/// Parameters for the beam resampling kernel: exact Ouster beam directions
+/// (cylindrical for OS0/1/2, hemispherical for OSDome) sampled from a rig of
+/// perspective depth panels. Replaces the former GpuRays-cubemap equirect
+/// grid: one bilinear pass straight from a single perspective render to each
+/// calibrated beam, instead of cubemap→equirect→beam double interpolation.
 struct ResampleParams {
     int H;              ///< Ouster beam count (output rows)
     int W;              ///< Ouster columns per frame (output cols)
-    int gpu_H;          ///< GpuRays vertical samples (input rows)
-    int gpu_W;          ///< GpuRays horizontal samples (input cols)
-    int gpu_chan;        ///< GpuRays channels per pixel (typically 3)
-    float min_alt;      ///< Vertical FOV min (degrees, with margin)
-    float v_range;      ///< Vertical FOV range (degrees)
-    float deg_per_col;  ///< 360 / W
+    int n_panels;       ///< Number of valid entries in panels[]
+    int raw_n;          ///< Total floats in the packed raw buffer
+    float far_clip;     ///< Metres; planar depth at/beyond this is a miss
     float beam_origin_m; ///< lidar_origin_to_beam_origin in metres
-    int half_W;         ///< W / 2 (azimuth remapping offset)
+    ResamplePanel panels[kMaxResamplePanels];
 };
 
 /// Parameters for CUDA ray post-processing kernel
@@ -51,9 +74,9 @@ struct RayProcessParams {
 // Forward declaration for pimpl.
 class Backend;
 
-/// Vendor-neutral ray post-processor: resamples GpuRays → Ouster beam
-/// geometry, then synthesises channel arrays (range_mm, signal,
-/// reflectivity, near_ir). Internally dispatches to whichever backend was
+/// Vendor-neutral ray post-processor: resamples the panel-rig depth buffer
+/// → Ouster beam geometry, then synthesises channel arrays (range_mm,
+/// signal, reflectivity, near_ir). Internally dispatches to whichever backend was
 /// detected at construction time — CUDA (NVIDIA), HIP (AMD incl. APUs),
 /// SYCL (Intel), or CPU.
 class RayProcessor {
@@ -69,11 +92,12 @@ public:
     RayProcessor(const RayProcessor &) = delete;
     RayProcessor & operator=(const RayProcessor &) = delete;
 
-    /// Resample raw GpuRays buffer to Ouster beam geometry, then run the
-    /// noise model and produce final channel outputs. Fast path for the
-    /// GPU pipeline; one host synchronisation per call.
+    /// Resample the packed panel-rig depth buffer to Ouster beam geometry,
+    /// then run the noise model and produce final channel outputs. Fast path
+    /// for the GPU pipeline; one host synchronisation per call.
     ///
-    /// @param raw_host         gpu_H × gpu_W × gpu_chan float array from GpuRays
+    /// @param raw_host         rp.raw_n floats: concatenated per-panel
+    ///                         planar-depth images (see ResamplePanel)
     /// @param beam_alt_host    H float array of beam altitude angles (degrees)
     /// @param beam_az_host     H float array of beam azimuth offsets (degrees)
     /// @param rp               Resample parameters

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
+#include "panel_test_utils.hpp"
 
 namespace gz_gpu_ouster_lidar {
 
@@ -97,44 +98,22 @@ TEST(Dispatch, SeedIsReported)
     EXPECT_EQ(b.seed(), 12345u);
 }
 
-// End-to-end through the dispatcher: a uniform depth field must resample to a
-// uniform range, exercising RayProcessor::processRaw → backend → outputs.
+// End-to-end through the dispatcher: a uniform-range panel rig must resample
+// to a uniform range, exercising RayProcessor::processRaw → backend → outputs.
 TEST(Dispatch, ProcessRawThroughWrapperProducesUniformRange)
 {
     BackendEnvGuard guard("cpu");
 
     constexpr int H = 8, W = 16;
-    constexpr int gpu_H = 32, gpu_W = 16, gpu_chan = 3;
-    constexpr float depth = 15.0f;
+    constexpr float kRange = 15.0f;
 
-    std::vector<float> raw(static_cast<size_t>(gpu_H) * gpu_W * gpu_chan, 0.0f);
-    for (int r = 0; r < gpu_H; ++r) {
-        for (int c = 0; c < gpu_W; ++c) {
-            const int base = (r * gpu_W + c) * gpu_chan;
-            raw[base] = depth;
-            raw[base + 1] = 0.5f;
-        }
-    }
+    const auto layout = testutil::makeRig(-10.0f, 10.0f, H, W);
+    ASSERT_GT(layout.n_panels, 0);
+    const auto raw = testutil::makeUniformRangeRaw(layout.rp, kRange);
+    const auto beam_alt = testutil::makeBeams(H, -10.0f, 10.0f);
+    std::vector<float> beam_az(H, 0.0f);
 
-    std::vector<float> beam_alt(H), beam_az(H, 0.0f);
-    const float min_alt = -10.0f, max_alt = 10.0f;
-    for (int i = 0; i < H; ++i) {
-        beam_alt[i] = min_alt + (max_alt - min_alt) * (i + 0.5f) / H;
-    }
-
-    ResampleParams rp{};
-    rp.H = H; rp.W = W;
-    rp.gpu_H = gpu_H; rp.gpu_W = gpu_W; rp.gpu_chan = gpu_chan;
-    rp.min_alt = min_alt; rp.v_range = max_alt - min_alt;
-    rp.deg_per_col = 360.0f / W;
-    rp.beam_origin_m = 0.0f;
-    rp.half_W = W / 2;
-
-    RayProcessParams pp{};
-    pp.H = H; pp.W = W;
-    pp.base_signal = 800.0f;
-    pp.base_reflectivity = 50.0f;
-    pp.max_range = 120.0f;
+    const auto pp = testutil::noNoise(H, W);
     // all noise terms left at 0 → deterministic resample only
 
     const int n = H * W;
@@ -145,7 +124,7 @@ TEST(Dispatch, ProcessRawThroughWrapperProducesUniformRange)
 
     RayProcessor proc;
     ASSERT_TRUE(proc.usesCpuFallback());
-    proc.processRaw(raw.data(), beam_alt.data(), beam_az.data(), rp,
+    proc.processRaw(raw.data(), beam_alt.data(), beam_az.data(), layout.rp,
                     range.data(), signal.data(), refl.data(), nearir.data(), pp);
 
     for (int i = 0; i < n; ++i) {

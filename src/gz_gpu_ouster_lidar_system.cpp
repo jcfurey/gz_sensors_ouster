@@ -31,7 +31,7 @@
 #include <gz/sim/components/AngularVelocity.hh>
 #include <gz/sim/components/LinearAcceleration.hh>
 #include <gz/math/Pose3.hh>
-#include <gz/rendering/GpuRays.hh>
+#include <gz/rendering/DepthCamera.hh>
 #include <gz/rendering/RenderEngine.hh>
 #include <gz/rendering/RenderingIface.hh>
 #include <gz/rendering/Scene.hh>
@@ -52,10 +52,14 @@ namespace gz_gpu_ouster_lidar {
 
 static const rclcpp::Logger kLogger = rclcpp::get_logger("gz_gpu_ouster_lidar");
 
-// Small angular pad added to the beam altitude range so the GpuRays vertical
-// FOV extends a touch beyond the outermost beams; avoids cubemap-edge
-// interpolation artefacts during bilinear resample.
+// Small angular pad added to the beam altitude range so the panel rig's
+// vertical coverage extends a touch beyond the outermost beams; keeps
+// bilinear corners of the edge beams inside rendered pixels.
 static constexpr double kBeamMarginDeg = 1.0;
+
+// Near clip plane for the panel depth cameras (metres). Matches the real
+// sensor's minimum range region where returns are unreliable anyway.
+static constexpr double kNearClip = 0.3;
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
@@ -88,9 +92,8 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     // 4. Tear down the rest in reverse construction order.
     shutdown_.store(true, std::memory_order_release);
     render_conn_.reset();
-    frame_conn_.reset();
     { std::lock_guard<std::recursive_mutex> lk(render_busy_mtx_); }
-    DestroyGpuRays();
+    DestroyPanels();
 
     drain_cv_.notify_all();
     if (drain_thread_.joinable()) {
@@ -141,6 +144,9 @@ void GzGpuOusterLidarSystem::Configure(
     }
     if (sdf->HasElement("visibility_mask")) {
         visibility_mask_ = sdf->Get<uint32_t>("visibility_mask");
+    }
+    if (sdf->HasElement("panel_oversample")) {
+        panel_oversample_ = sdf->Get<double>("panel_oversample");
     }
     if (sdf->HasElement("image_qos")) {
         image_qos_ = sdf->Get<std::string>("image_qos");
@@ -223,6 +229,7 @@ void GzGpuOusterLidarSystem::Configure(
     accel_noise_std_       = std::max(0.0, accel_noise_std_);
     gyro_bias_walk_        = std::max(0.0, gyro_bias_walk_);
     accel_bias_walk_       = std::max(0.0, accel_bias_walk_);
+    panel_oversample_      = std::clamp(panel_oversample_, 1.0, 4.0);
 
     auto validate_qos = [](std::string & val, const char * field, const char * fallback) {
         if (val != "reliable" && val != "best_effort" && val != "sensor_data") {
@@ -300,6 +307,46 @@ void GzGpuOusterLidarSystem::Configure(
     // Pad beam_az_f_ to H if shorter (some metadata omits azimuth offsets).
     beam_az_f_.resize(static_cast<size_t>(H_), 0.0f);
 
+    // ── Build the panel rig from the beam geometry ───────────────────────────
+    // Cylindrical sectors for OS0/1/2; pitched sectors + zenith cap for the
+    // hemispherical OSDome. min_alt_/max_alt_ already carry kBeamMarginDeg.
+    layout_ = buildOusterPanelLayout(
+        min_alt_, max_alt_, H_, W_, panel_oversample_);
+    if (layout_.n_panels == 0) {
+        RCLCPP_ERROR(kLogger,
+            "Unsupported beam geometry: altitude range [%.1f, %.1f] deg has "
+            "no panel-rig coverage (supported: within ±60 deg cylindrical, "
+            "or -32..+90 deg hemispherical); plugin disabled.",
+            min_alt_, max_alt_);
+        return;
+    }
+    layout_.rp.far_clip = static_cast<float>(max_range_);
+    layout_.rp.beam_origin_m = static_cast<float>(beam_origin_mm_ / 1000.0);
+
+    // Verify the exact calibrated beams (incl. per-beam azimuth offsets)
+    // against the rig. The builder already self-checks a fine grid; this
+    // catches pathological metadata (offsets beyond the pads).
+    const int uncovered = countUncoveredRays(
+        layout_.rp, beam_alt_f_.data(), beam_az_f_.data());
+    if (uncovered > 0) {
+        RCLCPP_WARN(kLogger,
+            "%d of %d beam rays fall outside the panel rig and will read as "
+            "misses (check beam_azimuth_angles in the metadata).",
+            uncovered, H_ * W_);
+    }
+    {
+        std::string dims;
+        for (int i = 0; i < layout_.n_panels; ++i) {
+            dims += " " + std::to_string(layout_.cams[i].width) + "x" +
+                    std::to_string(layout_.cams[i].height);
+        }
+        RCLCPP_INFO(kLogger,
+            "Panel rig: %d %s panels (%.1f MiB raw):%s",
+            layout_.n_panels,
+            layout_.hemispherical ? "hemispherical" : "cylindrical",
+            layout_.rp.raw_n * sizeof(float) / 1048576.0, dims.c_str());
+    }
+
     // Derive the Gazebo sensor entity name for pose tracking.
     // sensor_name_ is e.g. "/sensor/lidar/lidar0" → extract "lidar0".
     // Gazebo merges fixed-joint child links (including lidar_frame) into the
@@ -335,7 +382,7 @@ void GzGpuOusterLidarSystem::Configure(
     }
 
     // Connect to the rendering-thread Render event (fires after scene->PreRender()
-    // at Sensors.cc:496) so that GpuRays initialisation and Render() happen on
+    // at Sensors.cc:496) so that panel-rig initialisation and Render() happen on
     // the correct (EGL) thread with the scene already set up.
     event_mgr_ = &event_mgr;
     render_conn_ = event_mgr.Connect<::gz::sim::events::Render>(
@@ -794,24 +841,60 @@ void GzGpuOusterLidarSystem::OnRender()
         if (now - last_render_time_ < period) return;
         last_render_time_ = now;
 
-        // Trigger the GPU render pass and fire onNewFrame callback.
-        // Render() does the actual GPU raycast; PostRender() reads back
-        // the data and fires the NewGpuRaysFrame event.
-        if (gpu_rays_) {
-            // Position the sensor at the lidar_frame world pose.
+        // Render every panel of the rig at the lidar_frame world pose.
+        // Render() does the perspective depth pass; PostRender() reads the
+        // buffer back and synchronously fires onPanelFrame, which copies
+        // the data into its packed slot in pending_buf_.
+        if (!panel_cams_.empty()) {
+            ::gz::math::Pose3d pose;
             {
                 std::lock_guard<std::mutex> lk(pose_mtx_);
-                gpu_rays_->SetWorldPose(cached_pose_);
+                pose = cached_pose_;
             }
-            gpu_rays_->Render();
-            gpu_rays_->PostRender();
+            std::fill(panel_filled_.begin(), panel_filled_.end(), false);
+            for (size_t i = 0; i < panel_cams_.size(); ++i) {
+                panel_cams_[i]->SetWorldPosition(pose.Pos());
+                panel_cams_[i]->SetWorldRotation(pose.Rot() * panel_quats_[i]);
+                panel_cams_[i]->Render();
+                panel_cams_[i]->PostRender();
+            }
+
+            const bool complete = std::all_of(
+                panel_filled_.begin(), panel_filled_.end(),
+                [](bool b) { return b; });
+            if (complete) {
+                std::lock_guard<std::mutex> lk(frame_mtx_);
+                if (frame_ready_.load(std::memory_order_acquire)) {
+                    // Previous frame hasn't been consumed by PostUpdate yet;
+                    // we're about to overwrite it. Surface the drop so a
+                    // sustained problem (sim-time stall, post-pause burst)
+                    // is visible in logs instead of silent.
+                    const uint64_t dropped = dropped_frames_.fetch_add(1) + 1;
+                    if (ros_node_) {
+                        RCLCPP_WARN_THROTTLE(kLogger,
+                            *ros_node_->get_clock(), 5000,
+                            "%s: dropped rig frame (PostUpdate didn't drain); "
+                            "total dropped=%lu",
+                            sensor_name_.c_str(),
+                            static_cast<unsigned long>(dropped));
+                    }
+                }
+                // O(1) vector swap; capacity is preserved and reused.
+                pending_buf_.swap(raw_frame_buf_);
+                raw_frame_n_ = layout_.rp.raw_n;
+                frame_ready_ = true;
+            } else if (ros_node_) {
+                RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
+                    "%s: incomplete panel rig frame (a depth camera did not "
+                    "deliver); dropping this scan", sensor_name_.c_str());
+            }
         }
         return;
     }
 
-    // ── Lazy GpuRays sensor initialisation ───────────────────────────────────
-    // Guard: metadata must have loaded successfully (beam angles populated).
-    if (beam_alt_angles_.empty()) return;
+    // ── Lazy panel-rig initialisation ────────────────────────────────────────
+    // Guard: metadata must have loaded and the layout must have been built.
+    if (beam_alt_angles_.empty() || layout_.n_panels == 0) return;
 
     // Wait until the Sensors system has created the OGRE2 scene.
     auto * engine = ::gz::rendering::engine("ogre2");
@@ -821,60 +904,60 @@ void GzGpuOusterLidarSystem::OnRender()
     auto scene = engine->SceneByIndex(0);
     if (!scene) return;
 
-    // Create GpuRays sensor programmatically.
-    // Each beam row gets its own ray with the exact Ouster elevation angle.
-    auto gpuRays = scene->CreateGpuRays(sensor_name_ + "_gpu_rays");
-    if (!gpuRays) {
-        RCLCPP_ERROR(kLogger, "Failed to create GpuRays sensor");
-        return;
-    }
-
-    // Horizontal: full 360° FOV, W columns
-    gpuRays->SetAngleMin(-GZ_PI);
-    gpuRays->SetAngleMax(GZ_PI);
-    gpuRays->SetRayCount(W_);
-
-    // Vertical: use the min/max from beam_altitude_angles (cached with
-    // kBeamMarginDeg padding in loadMetadata).
-    // GpuRays fires UNIFORM vertical samples between min/max.
-    // We oversample vertically and resample to exact beam angles in onNewFrame.
-    gpuRays->SetVerticalAngleMin(min_alt_ * GZ_PI / 180.0);
-    gpuRays->SetVerticalAngleMax(max_alt_ * GZ_PI / 180.0);
-
-    // Ogre2GpuRays cubemap face resolution = next_power_of_2(max(hs, vs)),
-    // where hs = RangeCount/4 for 360° HFOV and vs ≈ VerticalRangeCount.
-    // With W_=512 → hs=128. Default v_samples=64 → cubemap 128×128 (coarse,
-    // causes visible squared-off corners at cubemap face boundaries).
-    // Raising v_samples to 256 → cubemap 256×256, halving the artifact.
-    const int v_samples = std::max(H_ * 4, 256);
-    gpuRays->SetVerticalRayCount(v_samples);
-
-    gpuRays->SetNearClipPlane(0.3);
-    gpuRays->SetFarClipPlane(max_range_);
-    // Preserve out-of-range samples as +/-inf instead of clamping.
-    // This matches upstream GpuLidarSensor behavior and keeps miss handling explicit.
-    gpuRays->SetClamp(false);
-    gpuRays->SetVisibilityMask(visibility_mask_);
-
-    // Attach to scene root; world pose is set from ECM each frame in OnRender().
     auto root = scene->RootVisual();
-    if (root) {
-        root->AddChild(gpuRays);
+
+    // One perspective depth camera per panel. Each is a plain single-pass
+    // render — the Ouster beam model (cylindrical or hemispherical) is
+    // applied in the resample kernel, not by the renderer, so there is no
+    // cubemap and no equirect intermediate.
+    panel_cams_.reserve(static_cast<size_t>(layout_.n_panels));
+    panel_conns_.reserve(static_cast<size_t>(layout_.n_panels));
+    panel_quats_.reserve(static_cast<size_t>(layout_.n_panels));
+    for (int i = 0; i < layout_.n_panels; ++i) {
+        const auto & cs = layout_.cams[i];
+        auto cam = scene->CreateDepthCamera(
+            sensor_name_ + "_panel" + std::to_string(i));
+        if (!cam) {
+            RCLCPP_ERROR(kLogger,
+                "Failed to create depth camera for panel %d", i);
+            DestroyPanels();
+            return;
+        }
+        cam->SetImageWidth(cs.width);
+        cam->SetImageHeight(cs.height);
+        // Square pixels: aspect = w/h reproduces the layout's fx == fy
+        // pinhole model exactly.
+        cam->SetAspectRatio(
+            static_cast<double>(cs.width) / static_cast<double>(cs.height));
+        cam->SetHFOV(::gz::math::Angle(cs.hfov_rad));
+        cam->SetNearClipPlane(kNearClip);
+        cam->SetFarClipPlane(max_range_);
+        cam->SetVisibilityMask(visibility_mask_);
+        cam->CreateDepthTexture();
+
+        if (root) {
+            root->AddChild(cam);
+        }
+
+        // Panel orientation relative to the sensor frame. Gazebo's positive
+        // pitch tilts the x axis down, so an upward panel axis is -pitch.
+        panel_quats_.emplace_back(0.0, -cs.pitch_rad, cs.yaw_rad);
+        panel_conns_.push_back(cam->ConnectNewDepthFrame(
+            [this, i](const float * data, unsigned int w, unsigned int h,
+                      unsigned int ch, const std::string & /*format*/) {
+                onPanelFrame(static_cast<size_t>(i), data, w, h, ch);
+            }));
+        panel_cams_.push_back(cam);
     }
+    panel_filled_.assign(static_cast<size_t>(layout_.n_panels), false);
 
-    // Connect frame callback
-    frame_conn_ = gpuRays->ConnectNewGpuRaysFrame(
-        std::bind(&GzGpuOusterLidarSystem::onNewFrame, this,
-                  std::placeholders::_1, std::placeholders::_2,
-                  std::placeholders::_3, std::placeholders::_4,
-                  std::placeholders::_5));
-    frame_connected_ = true;
-
-    gpu_rays_ = gpuRays;
     sensor_initialized_.store(true, std::memory_order_release);
 
-    RCLCPP_INFO(kLogger, "GpuRays sensor created: %dx%d rays, vertical FOV [%.1f, %.1f] deg",
-        W_, v_samples, min_alt_, max_alt_);
+    RCLCPP_INFO(kLogger,
+        "Panel rig created: %d depth cameras, beam altitude span "
+        "[%.1f, %.1f] deg, %s model",
+        layout_.n_panels, min_alt_, max_alt_,
+        layout_.hemispherical ? "hemispherical" : "cylindrical");
 }
 
 // ── ISystemPostUpdate ────────────────────────────────────────────────────────
@@ -884,7 +967,7 @@ void GzGpuOusterLidarSystem::PostUpdate(
     const ::gz::sim::EntityComponentManager & ecm)
 {
     // ── Silent-failure guard ─────────────────────────────────────────────────
-    // The plugin attaches its GpuRays to the ogre2 scene owned by
+    // The plugin attaches its depth-camera rig to the ogre2 scene owned by
     // gz-sim-sensors-system and is driven by the events::Render event. On
     // Gazebo Harmonic the Sensors system only initialises rendering (and emits
     // events::Render) when the world contains at least one *rendering* sensor
@@ -904,7 +987,7 @@ void GzGpuOusterLidarSystem::PostUpdate(
             RCLCPP_ERROR(kLogger,
                 "events::Render has not fired after %.1fs of sim time — gz-sim's "
                 "Sensors system has not started rendering. This plugin attaches "
-                "its GpuRays to the ogre2 scene owned by gz-sim-sensors-system, "
+                "its depth-camera rig to the ogre2 scene owned by gz-sim-sensors-system, "
                 "which only initialises rendering when the world contains at "
                 "least one rendering sensor (camera or gpu_lidar). Add a "
                 "rendering sensor (the example URDF's anchor_type defaults to a "
@@ -1017,16 +1100,14 @@ void GzGpuOusterLidarSystem::PostUpdate(
     // frame_mtx_, so the render thread is free to memcpy a new frame
     // concurrently. process_buf_ keeps its capacity across calls.
     bool have_frame = false;
-    int local_H = 0, local_W = 0, local_chan = 0;
+    int local_n = 0;
     {
         std::lock_guard<std::mutex> lk(frame_mtx_);
         have_frame = frame_ready_;
         frame_ready_ = false;
         if (have_frame) {
             process_buf_.swap(raw_frame_buf_);
-            local_H    = raw_frame_H_;
-            local_W    = raw_frame_W_;
-            local_chan = raw_frame_chan_;
+            local_n = raw_frame_n_;
         }
     }
 
@@ -1034,8 +1115,7 @@ void GzGpuOusterLidarSystem::PostUpdate(
         const auto stamp_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 info.simTime).count();
-        encodeAndPublish(stamp_ns, process_buf_.data(),
-                         local_H, local_W, local_chan);
+        encodeAndPublish(stamp_ns, process_buf_.data(), local_n);
     }
 
     // ── Publish IMU at configured rate ──────────────────────────────────────
@@ -1044,101 +1124,79 @@ void GzGpuOusterLidarSystem::PostUpdate(
     }
 }
 
-// ── GpuRays frame callback ──────────────────────────────────────────────────
+// ── Panel depth frame callback ──────────────────────────────────────────────
 
-void GzGpuOusterLidarSystem::onNewFrame(
-    const float * data, unsigned int width,
-    unsigned int height, unsigned int channels,
-    const std::string & /*format*/)
+void GzGpuOusterLidarSystem::onPanelFrame(
+    size_t panel, const float * data,
+    unsigned int width, unsigned int height, unsigned int channels)
 {
     // See render_busy_mtx_ comment in the header. This callback is signaled
-    // synchronously by gpu_rays_->PostRender(), so it runs nested on the render
-    // thread inside OnRender() which already holds this lock — hence the lock
-    // is recursive. Re-taking it here keeps the dtor's shutdown barrier honest
-    // for the (defensive) case of an out-of-band signal, and is a no-op cost
-    // in the normal nested path.
+    // synchronously by the panel camera's PostRender(), so it runs nested on
+    // the render thread inside OnRender() which already holds this lock —
+    // hence the lock is recursive. Re-taking it here keeps the dtor's
+    // shutdown barrier honest for the (defensive) case of an out-of-band
+    // signal, and is a no-op cost in the normal nested path.
     std::lock_guard<std::recursive_mutex> render_lk(render_busy_mtx_);
     if (shutdown_.load(std::memory_order_acquire)) return;
 
-    // Fast path: just memcpy the raw GpuRays buffer into a staging area.
-    // Bilinear resampling is done later on the GPU (CUDA) or CPU (fallback)
-    // in encodeAndPublish(), avoiding heavy computation under this lock.
-
     if (!data || width == 0 || height == 0 || channels == 0) return;
-    if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0) return;
+    if (panel >= static_cast<size_t>(layout_.n_panels)) return;
 
-    // Defensive: the resampler assumes the GpuRays frame matches the geometry
-    // configured in OnRender — exactly W_ columns (the azimuth remap and
-    // per-column offset are in W_ units) and at least H_ vertical samples to
-    // interpolate beam altitudes from. If GpuRays/OGRE2 ever hands back a
-    // differently-sized frame (cubemap resize, reconfigure), the mapping would
-    // silently mis-sample, so drop the frame and surface it rather than
-    // emitting garbage ranges.
-    if (width != static_cast<unsigned int>(W_) ||
-        height < static_cast<unsigned int>(H_)) {
+    // Defensive: the resampler's panel intrinsics assume exactly the layout
+    // dimensions. If OGRE2 ever hands back a differently-sized frame the
+    // projection would silently mis-sample, so drop it loudly instead.
+    const auto & cs = layout_.cams[panel];
+    if (width != static_cast<unsigned int>(cs.width) ||
+        height != static_cast<unsigned int>(cs.height)) {
         if (ros_node_) {
             RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
-                "%s: unexpected GpuRays frame %ux%u (expected width=%d, height>=%d); "
-                "dropping frame", sensor_name_.c_str(), width, height, W_, H_);
+                "%s: panel %zu frame %ux%u (expected %dx%d); dropping",
+                sensor_name_.c_str(), panel, width, height,
+                cs.width, cs.height);
         }
         return;
     }
 
-    // One-shot: report the actual raw GpuRays frame geometry. The resample
-    // assumes width == W_ and treats `height` as the oversampled vertical count;
-    // if OGRE2 hands back a height other than the requested SetVerticalRayCount,
-    // the vertical mapping silently scales. Logged once to aid diagnosis.
     RCLCPP_INFO_ONCE(kLogger,
-        "%s: raw GpuRays frame %ux%ux%u (requested vertical_rays=%d, beams H=%d, W=%d)",
-        sensor_name_.c_str(), width, height, channels,
-        std::max(H_ * 4, 256), H_, W_);
+        "%s: panel depth frames flowing (%ux%ux%u for panel 0 of %d)",
+        sensor_name_.c_str(), width, height, channels, layout_.n_panels);
 
-    const size_t n = static_cast<size_t>(width) * height * channels;
-
-    // Memcpy into the render-only pending_buf_ FIRST, no lock held. After
-    // warmup pending_buf_'s capacity matches the largest seen frame (it
-    // takes whatever raw_frame_buf_ had after the previous swap), so this
-    // resize is a no-op and the memcpy is the only meaningful cost.
-    pending_buf_.resize(n);
-    std::memcpy(pending_buf_.data(), data, n * sizeof(float));
-
-    {
-        std::lock_guard<std::mutex> lk(frame_mtx_);
-        if (frame_ready_.load(std::memory_order_acquire)) {
-            // Previous frame hasn't been consumed by PostUpdate yet; we're
-            // about to overwrite it. Surface the drop so a sustained problem
-            // (sim-time stall, post-pause burst, undersized PostUpdate budget)
-            // is visible in logs instead of silent.
-            const uint64_t dropped = dropped_frames_.fetch_add(1) + 1;
-            if (ros_node_) {
-                RCLCPP_WARN_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
-                    "%s: dropped GpuRays frame (PostUpdate didn't drain); "
-                    "total dropped=%lu",
-                    sensor_name_.c_str(),
-                    static_cast<unsigned long>(dropped));
-            }
-        }
-        // O(1) vector swap: pending_buf_ ↔ raw_frame_buf_. Capacity of the
-        // vector that previously held the (now-stale) frame is preserved
-        // and reused next render cycle.
-        pending_buf_.swap(raw_frame_buf_);
-        raw_frame_H_    = static_cast<int>(height);
-        raw_frame_W_    = static_cast<int>(width);
-        raw_frame_chan_ = static_cast<int>(channels);
-        frame_ready_ = true;
+    // Copy into this panel's packed slot in the render-only pending_buf_,
+    // no lock held. After warmup the resize is a no-op (capacity is kept
+    // across the triple-buffer swaps) and the memcpy is the only cost.
+    const size_t n = static_cast<size_t>(width) * height;
+    if (pending_buf_.size() < static_cast<size_t>(layout_.rp.raw_n)) {
+        pending_buf_.resize(static_cast<size_t>(layout_.rp.raw_n));
     }
+    float * dst = pending_buf_.data() + layout_.rp.panels[panel].offset;
+    if (channels == 1) {
+        std::memcpy(dst, data, n * sizeof(float));
+    } else {
+        // Defensive stride copy if a depth implementation delivers packed
+        // multi-channel data; channel 0 is depth.
+        for (size_t i = 0; i < n; ++i) {
+            dst[i] = data[i * channels];
+        }
+    }
+    panel_filled_[panel] = true;
 }
 
 // ── Encode depth → Ouster packets ───────────────────────────────────────────
 
 void GzGpuOusterLidarSystem::encodeAndPublish(
     int64_t stamp_ns,
-    const float * raw_data, int gpu_H, int gpu_W, int gpu_chan)
+    const float * raw_data, int raw_n)
 {
     if (stamp_ns <= 0) return;
     if (!pw_ || pkt_buf_.empty()) return;
     if (beam_alt_angles_.empty() || H_ <= 0 || W_ <= 0 || cpp_ <= 0) return;
     if (!ray_processor_) return;
+    if (raw_n != layout_.rp.raw_n) {
+        RCLCPP_ERROR_THROTTLE(kLogger, *ros_node_->get_clock(), 5000,
+            "%s: raw frame size %d != rig size %d; dropping",
+            sensor_name_.c_str(), raw_n, layout_.rp.raw_n);
+        return;
+    }
 
     // ── Snapshot noise parameters (may be updated by ROS param callback) ───
     double snap_range_noise_min_std, snap_range_noise_max_std;
@@ -1161,19 +1219,9 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     }
 
     // ── Resample params ──────────────────────────────────────────────────────
-    // min_alt_, max_alt_, v_range_ were cached (with kBeamMarginDeg padding)
-    // in loadMetadata.
-    ResampleParams rp;
-    rp.H = H_;
-    rp.W = W_;
-    rp.gpu_H = gpu_H;
-    rp.gpu_W = gpu_W;
-    rp.gpu_chan = gpu_chan;
-    rp.min_alt = static_cast<float>(min_alt_);
-    rp.v_range = static_cast<float>(v_range_);
-    rp.deg_per_col = 360.0f / static_cast<float>(W_);
-    rp.beam_origin_m = static_cast<float>(beam_origin_mm_ / 1000.0);
-    rp.half_W = W_ / 2;
+    // Panel geometry, intrinsics and packed offsets were computed once in
+    // Configure (buildOusterPanelLayout); far_clip/beam_origin set there too.
+    const ResampleParams & rp = layout_.rp;
 
     // ── Noise params ─────────────────────────────────────────────────────────
     RayProcessParams pp;
@@ -1196,11 +1244,11 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
         // dispatched backend has settled on actual buffer sizes. Helps
         // diagnose multi-sensor OOMs — a dense sensor (4096×512) plus
         // curand state can easily exceed 100 MB of VRAM on its own.
-        const size_t raw_bytes  = static_cast<size_t>(gpu_H) * gpu_W * gpu_chan * sizeof(float);
+        const size_t raw_bytes  = static_cast<size_t>(rp.raw_n) * sizeof(float);
         const size_t channel_bytes =
             static_cast<size_t>(H_) * W_ *
             (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint16_t));
-        const size_t resample_bytes = static_cast<size_t>(H_) * W_ * 2 * sizeof(float);
+        const size_t resample_bytes = static_cast<size_t>(H_) * W_ * sizeof(float);
         // curandState (XORWOW) is 48 B; hiprand similar; SYCL counter-based
         // RNG is stateless. Approximate with 48 B to avoid backend coupling.
         const size_t rand_bytes = noiseEnabled(pp)
@@ -1569,20 +1617,29 @@ void GzGpuOusterLidarSystem::drainThreadFunc()
     }
 }
 
-void GzGpuOusterLidarSystem::DestroyGpuRays()
+void GzGpuOusterLidarSystem::DestroyPanels()
 {
-    if (!gpu_rays_) return;
+    if (panel_cams_.empty()) return;
+
+    // Disconnect frame callbacks before destroying the cameras. Safe here:
+    // callbacks only fire from OnRender's PostRender calls, and the caller
+    // (dtor) has already disconnected the render event and flushed the
+    // render-busy barrier.
+    panel_conns_.clear();
 
     auto * engine = ::gz::rendering::engine("ogre2");
     if (engine && engine->SceneCount() > 0) {
         auto scene = engine->SceneByIndex(0);
         if (scene) {
-            scene->DestroySensor(gpu_rays_);
+            for (auto & cam : panel_cams_) {
+                if (cam) scene->DestroySensor(cam);
+            }
         }
     }
 
-    gpu_rays_.reset();
-    frame_connected_ = false;
+    panel_cams_.clear();
+    panel_quats_.clear();
+    panel_filled_.clear();
 }
 
 }  // namespace gz_gpu_ouster_lidar
