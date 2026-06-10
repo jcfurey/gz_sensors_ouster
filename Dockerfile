@@ -104,8 +104,11 @@ RUN if [ "${ENABLE_CUDA}" = "true" ]; then \
     else \
       echo "ENABLE_CUDA=${ENABLE_CUDA}: skipping CUDA toolkit (CPU backend only)"; \
     fi
+# LD_LIBRARY_PATH is unset on the base image; assign it outright (no ${...:-}
+# append) to avoid a trailing-colon CWD entry. The entrypoint's setup.bash later
+# prepends the ROS lib paths, leaving the CUDA libs resolvable at the end.
 ENV PATH=/usr/local/cuda/bin:${PATH} \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64
 
 # ── ouster-ros (jcfurey fork, pinned commit, with ouster-sdk submodule) ───────
 # Clone the ros2 branch specifically (its layout nests ouster-ros/ouster-sdk);
