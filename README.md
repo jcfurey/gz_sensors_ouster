@@ -380,7 +380,7 @@ name are passed to the entrypoint as arguments, not env vars.
 ### Using the host GPU (CUDA backend)
 
 The image **builds the CUDA backend by default** and runs it on the **host's**
-GPU — without pulling in the full `rovermax_ws` image. Only the CUDA *toolkit*
+GPU. Only the CUDA *toolkit*
 (nvcc/cudart/curand) is baked in; the driver/`libcuda` comes from the host at run
 time (needs `nvidia-container-toolkit` on the host — no host CUDA install
 required). Tune the target GPU with `CUDA_ARCH`, or opt out entirely with
