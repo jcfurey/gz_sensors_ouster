@@ -72,7 +72,12 @@ Detection probability falls when the return signal approaches the detector
 threshold; received signal ∝ ρ/R², so miss probability rises with range and
 inverse reflectance. The `1/ρ` weighting follows the first-order `1/SNR`
 heuristic; intensity-thresholded ray dropping is the standard treatment in
-simulation:
+simulation. Additionally, beyond the **reflectance-dependent detection
+limit** `d_max(ρ) = max_range·√(ρ/0.8)` the return is always dropped: the
+1/R² lidar equation makes the threshold range scale with √ρ, and vendor
+range specs are quoted at 80% Lambertian — the OS1's published 120 m @ 80% /
+~45 m @ 10% pair matches the √ law's 42 m prediction. (Same construct as
+the reflectance limit function `RL(d)` of arXiv:2208.10295 §II-D.)
 
 - Hahner et al. — *LiDAR Snowfall Simulation for Robust 3D Object Detection*,
   CVPR 2022 (returns culled when attenuated intensity falls below the
@@ -177,9 +182,15 @@ The cos(2α)ⁿ lobe is the monostatic Phong form (receiver at the emitter:
 `(r̂·(−d̂))ⁿ = cosⁿ 2α`); n = 8 is a fixed qualitative width since SDF
 exposes no per-material shininess. Demo objects exercising the model live in
 `examples/worlds/turtlebot3_ouster_headless.sdf` (`glass_pane`,
-`box_behind_glass`, `glossy_black_box`). Unmodeled remainder: the *mirror
-ghost* path (specular bounce hitting a third object, reported behind the
-pane) — see the gaps table.
+`box_behind_glass`, `glossy_black_box`).
+
+The *mirror ghost* path is also modeled: a hit with `ks ≥ 0.5` casts the
+specular bounce; an object found there competes as a ghost candidate along
+the **original** beam at the total path length, weighted `((1−τ)·ks)²·ρ`
+(the pulse interacts with the mirror twice — glass ghosts weak, true
+mirrors strong), exactly the artifact Velas et al. detect and exploit. SDF
+has no roughness channel, so `ks = 0.5` is the gloss/mirror discriminator:
+keep paint below it, mirrors and glass near 1.
 
 ### 9. Beam geometry — XYZ-LUT conventions
 
@@ -201,7 +212,6 @@ Ordered roughly by expected impact on downstream perception realism.
 |---|---|---|
 | **Motion distortion (rolling shutter)** | A spinning lidar sweeps its columns over ~1/`lidar_hz`; ego/agent motion during the sweep warps the cloud. This plugin snapshots the whole scan at one instant (README, Architecture §) — the dominant unmodeled effect for a moving platform. LiDARsim and CARLA both simulate per-column poses; correction methods quantify the magnitude. | Manivasagam et al. (LiDARsim), CVPR 2020; *Lidar with Velocity*, arXiv:2111.09497; UTIAS Motion-Distorted Lidar Simulation Dataset, <https://asrl.utias.utoronto.ca/datasets/mdlidar/> |
 | Beam divergence / footprint | Finite-footprint returns: edge mixing, multi-return, footprint-averaged ranges on oblique/rough surfaces; energy is ~2-D Gaussian over the footprint. HELIOS++ subsamples the beam cone. | Winiwarter et al. 2022 |
-| Mirror ghost returns | The specular *bounce* path: a beam reflecting off glass/mirror onto a third object produces a ghost point behind the pane. §8 models the surface lobe and transmission but not the bounce (needs one more cast + the reverse path). | Velas et al., arXiv:1909.12483 |
 | Retroreflector blooming / crosstalk | Very strong returns (signs, plates) saturate detectors and scatter into neighbouring channels — halo points, range bias. This plugin encodes ρ > 1 in the reflectivity byte but produces no artifacts. | *LiDAR Blooming Artifacts Estimation … with Synthetic Data Modeling*, IEEE (10.1109/10774004), 2024 |
 | Atmospheric attenuation | `P_r ∝ e^(−2ζR)`; ζ from rain rate / fog visibility via Mie scattering. Hooks cleanly into `signalFromRange` if weather sim is ever needed. | Rasshofer et al., Adv. Radio Sci. 9, 2011; MDPI Sensors 23(15):6891, 2023 |
 | Weather scatterers (rain/fog/snow) | Backscatter returns *off the weather itself* (early false hits), not just attenuation. Physics-based augmentation is a mature line of work and a good template. | Hahner et al., *Fog Simulation on Real LiDAR Point Clouds*, ICCV 2021 (arXiv:2108.05249); Kilic et al., *LISA*, arXiv:2107.07004; Hahner et al., *LiDAR Snowfall Simulation*, CVPR 2022 |

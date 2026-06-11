@@ -97,6 +97,9 @@ subscriber), and messages are `std::move`d into the rmw layer.
 - **Version-cached scene upload** (`castScan` re-uploads geometry only when
   the scene version changes; per-scan transforms are the only steady-state
   upload) — transfer minimisation as recommended by the same literature.
+- **Cached beam-table upload**: the per-beam calibration arrays are
+  constant for a sensor's lifetime, so all three GPU backends upload them
+  once (keyed by host pointer + count) instead of every frame.
 - **Kernel launch count is 1–2 per frame**, so launch-overhead remedies
   (CUDA Graphs, persistent kernels) have nothing to amortise; AstroAccelerate
   (arXiv:2101.00941) shows stream/graph restructuring pays off at tens of

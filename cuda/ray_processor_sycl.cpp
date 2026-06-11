@@ -125,8 +125,7 @@ public:
         ensureResampleBuffers(raw_n, rp.H);
 
         std::memcpy(u_raw_frame_, raw_host,      static_cast<size_t>(raw_n) * sizeof(float));
-        std::memcpy(u_beam_alt_,  beam_alt_host, static_cast<size_t>(rp.H) * sizeof(float));
-        std::memcpy(u_beam_az_,   beam_az_host,  static_cast<size_t>(rp.H) * sizeof(float));
+        uploadBeamTables(beam_alt_host, beam_az_host, rp.H);
 
         launchResampleKernel(rp, out_n);
         // No laser_retro channel from the panel rig — null retro selects
@@ -196,10 +195,7 @@ public:
                 static_cast<size_t>(scene.n_instances) *
                     sizeof(rc::InstanceXform));
         }
-        std::memcpy(u_beam_alt_, beam_alt_deg,
-                    static_cast<size_t>(sp.H) * sizeof(float));
-        std::memcpy(u_beam_az_, beam_az_deg,
-                    static_cast<size_t>(sp.H) * sizeof(float));
+        uploadBeamTables(beam_alt_deg, beam_az_deg, sp.H);
 
         float sr[9], st[3];
         for (int i = 0; i < 9; ++i) sr[i] = sensor_r[i];
@@ -440,7 +436,23 @@ private:
             allocShared(u_beam_alt_, static_cast<size_t>(H));
             allocShared(u_beam_az_,  static_cast<size_t>(H));
             beam_buf_n_ = H;
+            beam_src_alt_ = nullptr;  // USM buffers changed: re-copy
         }
+    }
+
+    // Beam calibration tables are constant for a sensor's lifetime; copy
+    // into USM once, keyed by host source pointer + count (see the CUDA
+    // twin and docs/SYSTEMS_REFERENCES.md).
+    void uploadBeamTables(const float * alt, const float * az, int H)
+    {
+        if (alt == beam_src_alt_ && az == beam_src_az_ && H == beam_src_h_) {
+            return;
+        }
+        std::memcpy(u_beam_alt_, alt, static_cast<size_t>(H) * sizeof(float));
+        std::memcpy(u_beam_az_,  az,  static_cast<size_t>(H) * sizeof(float));
+        beam_src_alt_ = alt;
+        beam_src_az_ = az;
+        beam_src_h_ = H;
     }
 
     uint64_t seed_ = 0;
@@ -457,6 +469,10 @@ private:
     float *    u_raw_frame_ = nullptr;
     float *    u_beam_alt_  = nullptr;
     float *    u_beam_az_   = nullptr;
+    // uploadBeamTables cache identity (host source pointers + count).
+    const float * beam_src_alt_ = nullptr;
+    const float * beam_src_az_  = nullptr;
+    int beam_src_h_ = 0;
     rc::RcInstance *    u_rc_insts_  = nullptr;
     float *             u_rc_verts_  = nullptr;
     int *               u_rc_tris_   = nullptr;

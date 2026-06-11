@@ -430,6 +430,37 @@ TEST(Raycast, GlassTransmissionReportsStrongestReturn)
     EXPECT_NEAR(retro[0], 0.4f, 1e-3f);
 }
 
+TEST(Raycast, MirrorGhostReportedBehindMirror)
+{
+    // Velas et al. §III: a mirror bounces the beam onto a side object; the
+    // return retraces the path and the sensor reports a ghost point along
+    // the ORIGINAL beam at the total path length.
+    //
+    // Mirror plane at (2,0,0), normal (−1,1,0)/√2 (45° about z): the +x
+    // beam reflects to +y and hits a box face at (2,2.5,0), t2 = 2.5.
+    // Direct surface return: kd = 0 and cos(2·45°) = 0 kills the lobe → 0.
+    // Ghost: ρ = (ks·(1−τ))²·ρ_box = 1²·1 = 1 at range 2 + 2.5 = 4.5.
+    rc::Scene scene;
+    const float r_lw[9] = {0.70710678f, 0.0f, -0.70710678f,
+                           0.70710678f, 0.0f,  0.70710678f,
+                           0.0f,       -1.0f,  0.0f};
+    const float psize[3] = {1.0f, 1.0f, 0.0f};
+    const int mirror = scene.addInstance(rc::GeomType::kPlane, psize,
+                                         /*retro=*/0.0f, -1, /*spec=*/1.0f);
+    const float bsize[3] = {0.5f, 0.5f, 0.5f};
+    const int box = scene.addInstance(rc::GeomType::kBox, bsize, 1.0f);
+
+    std::vector<rc::InstanceXform> xf = {
+        xformAt(scene, mirror, 2.0f, 0.0f, 0.0f, r_lw),
+        xformAt(scene, box, 2.0f, 3.0f, 0.0f)};
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> retro;
+    const auto range = cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+
+    EXPECT_NEAR(range[0], 4.5f, 5e-3f);
+    EXPECT_NEAR(retro[0], 1.0f, 1e-3f);
+}
+
 TEST(Raycast, PlaneRetroFollowsGrazingAngle)
 {
     // Ground plane 1 m below the sensor, beam at −30° elevation:

@@ -347,12 +347,7 @@ public:
         CUDA_CHECK(cudaMemcpyAsync(d_raw_frame_, raw_host,
             static_cast<size_t>(raw_n) * sizeof(float),
             cudaMemcpyHostToDevice, stream_));
-        CUDA_CHECK(cudaMemcpyAsync(d_beam_alt_, beam_alt_host,
-            static_cast<size_t>(rp.H) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
-        CUDA_CHECK(cudaMemcpyAsync(d_beam_az_, beam_az_host,
-            static_cast<size_t>(rp.H) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
+        uploadBeamTables(beam_alt_host, beam_az_host, rp.H);
 
         launchResampleKernel(
             static_cast<const float *>(d_raw_frame_),
@@ -442,12 +437,7 @@ public:
                     sizeof(rc::InstanceXform),
                 cudaMemcpyHostToDevice, stream_));
         }
-        CUDA_CHECK(cudaMemcpyAsync(d_beam_alt_, beam_alt_deg,
-            static_cast<size_t>(sp.H) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
-        CUDA_CHECK(cudaMemcpyAsync(d_beam_az_, beam_az_deg,
-            static_cast<size_t>(sp.H) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
+        uploadBeamTables(beam_alt_deg, beam_az_deg, sp.H);
 
         RcCastArgs args;
         for (int i = 0; i < 9; ++i) args.sr[i] = sensor_r[i];
@@ -546,7 +536,30 @@ private:
             realloc_(d_beam_alt_, static_cast<size_t>(H) * sizeof(float));
             realloc_(d_beam_az_,  static_cast<size_t>(H) * sizeof(float));
             beam_buf_n_ = H;
+            beam_src_alt_ = nullptr;  // device buffers changed: re-upload
         }
+    }
+
+    // Beam calibration tables are constant for a sensor's lifetime (derived
+    // from the metadata JSON at construction), so cache them on the device
+    // keyed by source pointer + count instead of re-copying every frame —
+    // transfer minimisation per docs/SYSTEMS_REFERENCES.md. Assumes the
+    // caller's arrays are immutable while the backend lives, which holds for
+    // the plugin's metadata-derived tables.
+    void uploadBeamTables(const float * alt, const float * az, int H)
+    {
+        if (alt == beam_src_alt_ && az == beam_src_az_ && H == beam_src_h_) {
+            return;
+        }
+        CUDA_CHECK(cudaMemcpyAsync(d_beam_alt_, alt,
+            static_cast<size_t>(H) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(d_beam_az_, az,
+            static_cast<size_t>(H) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        beam_src_alt_ = alt;
+        beam_src_az_ = az;
+        beam_src_h_ = H;
     }
 
     // Retro device buffer is only used by processDepth (the raycast mode
@@ -614,6 +627,10 @@ private:
     void * d_raw_frame_ = nullptr;
     void * d_beam_alt_  = nullptr;
     void * d_beam_az_   = nullptr;
+    // uploadBeamTables cache identity (host source pointers + count).
+    const float * beam_src_alt_ = nullptr;
+    const float * beam_src_az_  = nullptr;
+    int beam_src_h_ = 0;
 
     // Device buffers — raycast scene (cached by scene_version)
     void * d_rc_insts_  = nullptr;

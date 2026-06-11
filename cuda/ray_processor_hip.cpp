@@ -265,8 +265,7 @@ public:
         if (need_rand) ensureRandStates(out_n);
 
         h2d(d_raw_frame_, raw_host, static_cast<size_t>(raw_n) * sizeof(float));
-        h2d(d_beam_alt_, beam_alt_host, static_cast<size_t>(rp.H) * sizeof(float));
-        h2d(d_beam_az_,  beam_az_host,  static_cast<size_t>(rp.H) * sizeof(float));
+        uploadBeamTables(beam_alt_host, beam_az_host, rp.H);
 
         const int grid_r = (out_n + kBlock - 1) / kBlock;
         hipLaunchKernelGGL(resampleKernelHip, dim3(grid_r), dim3(kBlock), 0, stream_,
@@ -365,10 +364,7 @@ public:
                 static_cast<size_t>(scene.n_instances) *
                     sizeof(rc::InstanceXform));
         }
-        h2d(d_beam_alt_, beam_alt_deg,
-            static_cast<size_t>(sp.H) * sizeof(float));
-        h2d(d_beam_az_, beam_az_deg,
-            static_cast<size_t>(sp.H) * sizeof(float));
+        uploadBeamTables(beam_alt_deg, beam_az_deg, sp.H);
 
         RcCastArgsHip args;
         for (int i = 0; i < 9; ++i) args.sr[i] = sensor_r[i];
@@ -494,7 +490,23 @@ private:
             allocDev(d_beam_alt_, static_cast<size_t>(H) * sizeof(float));
             allocDev(d_beam_az_,  static_cast<size_t>(H) * sizeof(float));
             beam_buf_n_ = H;
+            beam_src_alt_ = nullptr;  // device buffers changed: re-upload
         }
+    }
+
+    // Beam calibration tables are constant for a sensor's lifetime; upload
+    // once, keyed by host source pointer + count (see the CUDA twin and
+    // docs/SYSTEMS_REFERENCES.md).
+    void uploadBeamTables(const float * alt, const float * az, int H)
+    {
+        if (alt == beam_src_alt_ && az == beam_src_az_ && H == beam_src_h_) {
+            return;
+        }
+        h2d(d_beam_alt_, alt, static_cast<size_t>(H) * sizeof(float));
+        h2d(d_beam_az_,  az,  static_cast<size_t>(H) * sizeof(float));
+        beam_src_alt_ = alt;
+        beam_src_az_ = az;
+        beam_src_h_ = H;
     }
 
     // Retro device buffer is only used by processDepth (raycast mode);
@@ -549,6 +561,10 @@ private:
     void * d_rand_states_ = nullptr;
     void * d_raw_frame_ = nullptr;
     void * d_beam_alt_ = nullptr;
+    // uploadBeamTables cache identity (host source pointers + count).
+    const float * beam_src_alt_ = nullptr;
+    const float * beam_src_az_  = nullptr;
+    int beam_src_h_ = 0;
     void * d_beam_az_ = nullptr;
     void * d_rc_insts_  = nullptr;
     void * d_rc_verts_  = nullptr;

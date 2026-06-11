@@ -143,9 +143,11 @@
            (specular lobe); oblique beams see box_behind_glass through it at
            weakened intensity (τ² double-pass), per Velas et al.,
            arXiv:1909.12483.
-         glossy_black_box — dark glossy paint (kd 0.05, ks 0.9): a strong
+         glossy_black_box — dark glossy paint (kd 0.05, ks 0.45): a strong
            return only when a face points at the sensor, dropout-prone
-           everywhere else — the classic black-car signature. -->
+           everywhere else — the classic black-car signature. ks stays below
+           the 0.5 mirror threshold so paint does not spawn mirror-ghost
+           bounces (only the glass pane does). -->
     <model name="glass_pane">
       <static>true</static>
       <pose>0 3.5 0.75 0 0 0</pose>
@@ -180,7 +182,7 @@
           <laser_retro>0.05</laser_retro>
           <geometry><box><size>0.8 0.8 0.8</size></box></geometry>
           <material><diffuse>0.05 0.05 0.05 1</diffuse>
-            <specular>0.9 0.9 0.9 1</specular></material>
+            <specular>0.45 0.45 0.45 1</specular></material>
         </visual>
       </link>
     </model>
