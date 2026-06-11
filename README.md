@@ -575,6 +575,12 @@ pipeline (resample + noise) adds only
 ~2-3 ms per frame regardless of sensor density on any of the supported
 backends. All numbers assume a single sensor.
 
+> The middleware (QoS / executor / RMW choice / zero-copy) and GPU-pipeline
+> (streams / pinned memory / launch overhead) design choices are mapped to
+> the systems literature in
+> [docs/SYSTEMS_REFERENCES.md](docs/SYSTEMS_REFERENCES.md), including which
+> optimisations are deliberately not applied and when to revisit them.
+
 ### Estimated max real-time scan rate
 
 The table below was measured **only on the CUDA backend** (NVIDIA RTX
