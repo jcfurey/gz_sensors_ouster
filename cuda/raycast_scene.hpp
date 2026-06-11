@@ -55,9 +55,13 @@ public:
                 const std::vector<int> & tris);
 
     /// Append an instance. For kMesh pass the root node from addMesh().
+    /// `retro` is the diffuse reflectance (laser_retro), `spec` the specular
+    /// coefficient (visual material specular), `transmit` the transmittance
+    /// (visual transparency) — see rcApparentReflectance / rcCastOneRay.
     /// Returns the instance index.
     int addInstance(GeomType type, const float size[3], float retro,
-                    int root_node = -1);
+                    int root_node = -1, float spec = 0.0f,
+                    float transmit = 0.0f);
 
     SceneView view() const;
 
@@ -100,7 +104,9 @@ private:
 /// range_out[H×W]: reported Ouster range in metres (+inf for a miss) — the
 /// value r such that the standard XYZ LUT xyz = (r−n)·d̂ + n·[cosθ,sinθ,0]
 /// reconstructs the true hit point. retro_out[H×W] (optional, may be null):
-/// laser_retro of the nearest hit instance, 0 when unset or on a miss.
+/// APPARENT reflectance of the reported return — kd·cos(α) + ks·cos(2α)⁸,
+/// transmission-weighted for glass (see rcCastOneRay) — 0 when the material
+/// is unset or on a miss.
 void castScan(const SceneView & scene,
               const InstanceXform * xforms,
               const float * beam_alt_deg,

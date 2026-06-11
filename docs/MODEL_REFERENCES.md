@@ -142,7 +142,46 @@ walk segments), with the same continuous→discrete conversions:
 - IEEE Std 952 (Allan-variance characterisation of gyros) — the underlying
   standard for the density/walk parametrisation datasheets quote.
 
-### 8. Beam geometry — XYZ-LUT conventions
+### 8. Specular and transparent surfaces (raycast mode)
+
+**Model:** per-visual material `(kd, ks, τ)` mirrored from SDF
+(`<laser_retro>`, material `<specular>` mean RGB, `<transparency>`); the
+monostatic apparent reflectance is
+
+```
+ρ_app = kd·cos(α) + ks·max(0, cos 2α)⁸
+```
+
+and a transparent first hit (τ ≥ 0.05) casts one continuation segment: the
+pane returns `(1−τ)·ρ_app` and the object behind returns `τ²·ρ_app` (the
+pulse crosses the pane twice); the **strongest received power `ρ/R²` wins**
+(single-return mode). Implemented in `rc::rcApparentReflectance` /
+`rcCastOneRay` (`cuda/raycast_math.hpp`) and the ECM material mirroring in
+`src/raycast_mirror.cpp`.
+
+This reproduces the empirically documented lidar-on-glass behaviour — a
+strong pane return only near surface-normal incidence, the object behind the
+glass at weakened intensity otherwise — and the missing-points signature of
+glossy/black paint (high ks, tiny kd → returns only from sensor-facing
+patches, elevated dropout elsewhere):
+
+- Velas et al. — *Detection and Utilization of Reflection in 3D Lidar
+  Scans*, arXiv:1909.12483 (§III: the three glass return cases).
+  <https://arxiv.org/abs/1909.12483>
+- *Investigation of Automotive LiDAR Vision in Rain from Material and
+  Optical Perspectives*, Sensors 24(10), 2024 — material-dependent missing
+  points / reduced reflectivity on specular and dark surfaces.
+  <https://pmc.ncbi.nlm.nih.gov/articles/PMC11124791/>
+
+The cos(2α)ⁿ lobe is the monostatic Phong form (receiver at the emitter:
+`(r̂·(−d̂))ⁿ = cosⁿ 2α`); n = 8 is a fixed qualitative width since SDF
+exposes no per-material shininess. Demo objects exercising the model live in
+`examples/worlds/turtlebot3_ouster_headless.sdf` (`glass_pane`,
+`box_behind_glass`, `glossy_black_box`). Unmodeled remainder: the *mirror
+ghost* path (specular bounce hitting a third object, reported behind the
+pane) — see the gaps table.
+
+### 9. Beam geometry — XYZ-LUT conventions
 
 **Model:** azimuth `enc − beam_azimuth` (`rpmath::beamRayAzimuthDeg`),
 beam-origin parallax (ray origins on the beam-origin circle; range reported
@@ -162,14 +201,14 @@ Ordered roughly by expected impact on downstream perception realism.
 |---|---|---|
 | **Motion distortion (rolling shutter)** | A spinning lidar sweeps its columns over ~1/`lidar_hz`; ego/agent motion during the sweep warps the cloud. This plugin snapshots the whole scan at one instant (README, Architecture §) — the dominant unmodeled effect for a moving platform. LiDARsim and CARLA both simulate per-column poses; correction methods quantify the magnitude. | Manivasagam et al. (LiDARsim), CVPR 2020; *Lidar with Velocity*, arXiv:2111.09497; UTIAS Motion-Distorted Lidar Simulation Dataset, <https://asrl.utias.utoronto.ca/datasets/mdlidar/> |
 | Beam divergence / footprint | Finite-footprint returns: edge mixing, multi-return, footprint-averaged ranges on oblique/rough surfaces; energy is ~2-D Gaussian over the footprint. HELIOS++ subsamples the beam cone. | Winiwarter et al. 2022 |
-| Specular / transparent surfaces | Smooth surfaces (glass, glossy/black paint, wet roads) reflect specularly: missing points, mirror ghost returns, partial passthrough on glass. The Lambertian cos(α) model cannot produce these; a low `laser_retro` only approximates the dropout half of the story. | *Investigation of Automotive LiDAR Vision in Rain from Material and Optical Perspectives*, Sensors 24(10), 2024 (PMC11124791); Velas et al., *Detection and Utilization of Reflection in 3D Lidar Scans*, arXiv:1909.12483 |
+| Mirror ghost returns | The specular *bounce* path: a beam reflecting off glass/mirror onto a third object produces a ghost point behind the pane. §8 models the surface lobe and transmission but not the bounce (needs one more cast + the reverse path). | Velas et al., arXiv:1909.12483 |
 | Retroreflector blooming / crosstalk | Very strong returns (signs, plates) saturate detectors and scatter into neighbouring channels — halo points, range bias. This plugin encodes ρ > 1 in the reflectivity byte but produces no artifacts. | *LiDAR Blooming Artifacts Estimation … with Synthetic Data Modeling*, IEEE (10.1109/10774004), 2024 |
 | Atmospheric attenuation | `P_r ∝ e^(−2ζR)`; ζ from rain rate / fog visibility via Mie scattering. Hooks cleanly into `signalFromRange` if weather sim is ever needed. | Rasshofer et al., Adv. Radio Sci. 9, 2011; MDPI Sensors 23(15):6891, 2023 |
 | Weather scatterers (rain/fog/snow) | Backscatter returns *off the weather itself* (early false hits), not just attenuation. Physics-based augmentation is a mature line of work and a good template. | Hahner et al., *Fog Simulation on Real LiDAR Point Clouds*, ICCV 2021 (arXiv:2108.05249); Kilic et al., *LISA*, arXiv:2107.07004; Hahner et al., *LiDAR Snowfall Simulation*, CVPR 2022 |
 | Solar background false alarms | Daytime background photons add a false-alarm floor (spurious returns), strongest for SPAD receivers; detection follows Neyman–Pearson statistics. The plugin only drops returns — it never invents them. | Jin et al., *Receiver performance and detection statistics of single photon lidar*, IET Radar Sonar Navig. 14, 2020 |
 | Multi-return / full waveform | Second returns through vegetation, edge splits. | Winiwarter et al. 2022 |
 | Incidence angle in panels mode | Depth-image normals (from gradients) could approximate cos(α); currently panels mode applies no incidence factor. | §1 references |
-| Specular / retroreflective BRDF | cos(α) assumes Lambertian; retroreflectors (ρ > 1) physically return *more* at normal incidence and are angle-insensitive. | Kashani et al. 2015 |
+| Retroreflective BRDF | Retroreflectors (ρ > 1) are *angle-insensitive* (corner cubes return along the incident path); §8's diffuse+specular split still attenuates them by cos(α). | Kashani et al. 2015 |
 | Sun model for NEAR_IR | Scene illumination, shadows, sky background. | §6 references |
 | Range walk | Amplitude-dependent timing bias (strong returns trigger earlier). | Hu et al. 2018 |
 

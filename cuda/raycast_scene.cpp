@@ -132,7 +132,7 @@ int Scene::addMesh(const std::vector<float> & verts,
 }
 
 int Scene::addInstance(GeomType type, const float size[3], float retro,
-                       int root_node)
+                       int root_node, float spec, float transmit)
 {
     RcInstance inst;
     inst.type = type;
@@ -140,6 +140,9 @@ int Scene::addInstance(GeomType type, const float size[3], float retro,
     inst.size[1] = size[1];
     inst.size[2] = size[2];
     inst.retro = retro;
+    inst.spec = (spec > 0.0f) ? spec : 0.0f;
+    inst.transmit = (transmit > 0.0f)
+        ? ((transmit < 1.0f) ? transmit : 1.0f) : 0.0f;
     inst.root_node = (type == GeomType::kMesh) ? root_node : -1;
 
     LocalBounds lb{};

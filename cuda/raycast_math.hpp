@@ -41,12 +41,14 @@ struct MeshBvhNode {
     int count = 0;    ///< leaf: triangle count
 };
 
-/// Immutable per-instance geometry (device-friendly).
+/// Immutable per-instance geometry + material (device-friendly).
 struct RcInstance {
     GeomType type = GeomType::kBox;
     float size[3] = {0, 0, 0};
-    float retro = 0.0f;   ///< laser_retro of the visual (0 = unset)
-    int root_node = -1;   ///< kMesh: global BVH root node index
+    float retro = 0.0f;     ///< laser_retro: diffuse reflectance kd (0 = unset)
+    float spec = 0.0f;      ///< specular coefficient ks (visual material specular)
+    float transmit = 0.0f;  ///< transmittance τ ∈ [0,1] (visual transparency)
+    int root_node = -1;     ///< kMesh: global BVH root node index
 };
 
 /// Per-scan rigid transform of one instance.
@@ -76,6 +78,13 @@ constexpr float kRcHugeExtent = 1.0e6f;
 /// cosine model is unreliable anyway (validated only up to ~20° incidence;
 /// Kaasalainen et al., Remote Sens. 3(10), 2011).
 constexpr float kRcMinCosInc = 0.01f;
+/// Transmittance below this is treated as opaque (no continuation segment).
+constexpr float kRcTransmitMin = 0.05f;
+/// Offset past a transparent surface before the continuation cast.
+constexpr float kRcSegEps = 1.0e-3f;
+/// Segment-local tmin for the continuation cast (the sensor near clip
+/// applies to the first segment only — objects just behind glass are valid).
+constexpr float kRcSegTmin = 1.0e-4f;
 
 // ── Small vector helpers ─────────────────────────────────────────────────────
 
@@ -388,6 +397,79 @@ GZ_OUSTER_HD inline float rcCosIncidence(const RcInstance & inst,
     return rpmath::gzm::fmin_(rpmath::gzm::fmax_(c, kRcMinCosInc), 1.0f);
 }
 
+/// Monostatic apparent reflectance of a hit: Lambertian diffuse term
+/// kd·cos(α) plus a specular lobe ks·cos(2α)⁸ (zero past 45°).
+///
+/// For a monostatic lidar the receiver sits at the emitter, so the Phong
+/// lobe around the mirror direction r̂ contributes ∝ (r̂·(−d̂))ⁿ =
+/// cos(2α)ⁿ: a smooth/glossy surface (glass, polished or dark metallic
+/// paint) returns strongly only when viewed near surface-normal and
+/// "drops quickly" off-normal — the empirically observed behaviour of
+/// lidar on glass (Velas et al., arXiv:1909.12483 §III) and the cause of
+/// the missing-points signature of glossy black vehicles. n = 8 is a
+/// fixed lobe width (≈ half-power at ~9° off normal), chosen qualitative:
+/// real lobe widths vary per material and are not exposed by SDF.
+GZ_OUSTER_HD inline float rcApparentReflectance(const RcInstance & inst,
+                                                float cos_inc)
+{
+    float rho = inst.retro * cos_inc;
+    if (inst.spec > 0.0f) {
+        const float c2 = 2.0f * cos_inc * cos_inc - 1.0f;  // cos(2α)
+        if (c2 > 0.0f) {
+            float lobe = c2 * c2;   // cos(2α)²
+            lobe *= lobe;           // ⁴
+            lobe *= lobe;           // ⁸
+            rho += inst.spec * lobe;
+        }
+    }
+    return rho;
+}
+
+/// Nearest hit of one ray over all instances. Returns the hit parameter
+/// (or -1), the winning instance in `inst_out` (-1 for a miss) and, for
+/// mesh hits, the winning global triangle index in `tri_out`.
+GZ_OUSTER_HD inline float rcNearestHit(
+    const RcInstance * instances, int n_instances,
+    const float * verts, const int * tris, const int * order,
+    const MeshBvhNode * nodes, const InstanceXform * xforms,
+    RcV3 o, RcV3 d, float tmin, float tmax,
+    int & inst_out, int & tri_out)
+{
+    float best = tmax;
+    inst_out = -1;
+    tri_out = -1;
+    for (int i = 0; i < n_instances; ++i) {
+        const InstanceXform & x = xforms[i];
+        if (!rcHitAabb(o, d, x.bmin, x.bmax, tmin, best)) continue;
+        const RcV3 o_l = rcXformPoint(x.r, x.t, o);
+        const RcV3 d_l = rcRotate(x.r, d);
+        int tri = -1;
+        const float t = rcHitInstance(instances[i], verts, tris, order,
+                                      nodes, o_l, d_l, tmin, best, &tri);
+        if (t > 0.0f && t < best) {
+            best = t;
+            inst_out = i;
+            tri_out = tri;
+        }
+    }
+    return (inst_out >= 0) ? best : -1.0f;
+}
+
+/// Apparent reflectance of a known hit (instance-local cos incidence
+/// recomputed from the world-frame ray).
+GZ_OUSTER_HD inline float rcHitReflectance(
+    const RcInstance * instances, const InstanceXform * xforms,
+    const float * verts, const int * tris,
+    RcV3 o, RcV3 d, float t, int inst, int tri)
+{
+    const InstanceXform & x = xforms[inst];
+    const RcV3 o_l = rcXformPoint(x.r, x.t, o);
+    const RcV3 d_l = rcRotate(x.r, d);
+    const float cos_inc =
+        rcCosIncidence(instances[inst], verts, tris, o_l, d_l, t, tri);
+    return rcApparentReflectance(instances[inst], cos_inc);
+}
+
 /// Cast one output pixel (beam × measurement id) against the whole scene.
 /// Writes the reported Ouster range (metres; `inf_value` for a miss — the
 /// value satisfying the XYZ-LUT reconstruction, see castScan docs) and the
@@ -429,44 +511,62 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     const RcV3 o = rcXformPoint(sensor_r, sensor_t, o_s);
     const RcV3 d = rcRotate(sensor_r, d_s);
 
-    const float tmin = sp.near_clip;
-    float best = sp.max_range - n_off;  // current nearest hit (ray param)
-    int best_inst = -1;
-    int best_tri = -1;
+    const float t_budget = sp.max_range - n_off;
 
-    for (int i = 0; i < n_instances; ++i) {
-        const InstanceXform & x = xforms[i];
-        if (!rcHitAabb(o, d, x.bmin, x.bmax, tmin, best)) continue;
-        const RcV3 o_l = rcXformPoint(x.r, x.t, o);
-        const RcV3 d_l = rcRotate(x.r, d);
-        int tri = -1;
-        const float t = rcHitInstance(instances[i], verts, tris, order,
-                                      nodes, o_l, d_l, tmin, best, &tri);
-        if (t > 0.0f && t < best) {
-            best = t;
-            best_inst = i;
-            best_tri = tri;
+    int inst0 = -1, tri0 = -1;
+    const float t0 = rcNearestHit(instances, n_instances, verts, tris, order,
+                                  nodes, xforms, o, d, sp.near_clip, t_budget,
+                                  inst0, tri0);
+    if (inst0 < 0) {
+        range_out = inf_value;
+        retro_out = 0.0f;
+        return;
+    }
+
+    // Apparent reflectance of the front surface: kd·cos(α) + ks·cos(2α)⁸
+    // (see rcApparentReflectance) — the extended-Lambertian lidar equation
+    // P ∝ ρ_app/R² plus the monostatic specular lobe. Folding the angular
+    // terms in here makes the downstream signal, reflectivity byte and
+    // noise weighting all respond to oblique/glossy surfaces the way a real
+    // return does. laser_retro == 0 with no specular stays 0 and keeps its
+    // base_reflectivity fallback downstream.
+    const float tau =
+        rpmath::gzm::fmin_(rpmath::gzm::fmax_(instances[inst0].transmit, 0.0f),
+                           1.0f);
+    float rho = rcHitReflectance(instances, xforms, verts, tris,
+                                 o, d, t0, inst0, tri0) * (1.0f - tau);
+    float range = t0 + n_off;
+
+    // Transparent surface (glass): continue one segment behind it. The
+    // surface return keeps (1−τ); the behind-glass return is attenuated by
+    // τ² (the pulse crosses the pane twice); single-return mode reports the
+    // STRONGEST candidate by received power ρ/R², matching how lidar sees
+    // through windows in practice (Velas et al., arXiv:1909.12483 §III:
+    // near-normal glass returns the pane, otherwise the object behind, with
+    // weakened intensity). One continuation segment only — a second pane
+    // behind the first is treated as opaque.
+    if (tau >= kRcTransmitMin) {
+        const float seg_start = t0 + kRcSegEps;
+        const RcV3 p{o.x + d.x * seg_start, o.y + d.y * seg_start,
+                     o.z + d.z * seg_start};
+        int inst1 = -1, tri1 = -1;
+        const float t1 = rcNearestHit(instances, n_instances, verts, tris,
+                                      order, nodes, xforms, p, d, kRcSegTmin,
+                                      t_budget - seg_start, inst1, tri1);
+        if (inst1 >= 0) {
+            const float rho1 = rcHitReflectance(instances, xforms, verts,
+                                                tris, p, d, t1, inst1, tri1) *
+                               tau * tau;
+            const float range1 = seg_start + t1 + n_off;
+            if (rho1 * range * range > rho * range1 * range1) {
+                rho = rho1;
+                range = range1;
+            }
         }
     }
 
-    if (best_inst >= 0) {
-        range_out = best + n_off;
-        // Apparent reflectance = laser_retro × cos(incidence): an extended
-        // Lambertian target returns P ∝ ρ·cos(α)/R² (see rcCosIncidence), so
-        // folding the cosine in here makes the downstream signal,
-        // reflectivity byte and noise weighting all respond to oblique
-        // surfaces the way a real return does. laser_retro == 0 ("unset")
-        // stays 0 and keeps its base_reflectivity fallback downstream.
-        const InstanceXform & xb = xforms[best_inst];
-        const RcV3 o_b = rcXformPoint(xb.r, xb.t, o);
-        const RcV3 d_b = rcRotate(xb.r, d);
-        const float cos_inc = rcCosIncidence(
-            instances[best_inst], verts, tris, o_b, d_b, best, best_tri);
-        retro_out = instances[best_inst].retro * cos_inc;
-    } else {
-        range_out = inf_value;
-        retro_out = 0.0f;
-    }
+    range_out = range;
+    retro_out = rho;
 }
 
 }  // namespace rc

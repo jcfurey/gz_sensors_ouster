@@ -364,6 +364,72 @@ TEST(Raycast, RetroAttenuatedByIncidenceCosine)
     EXPECT_NEAR(retro[0], 0.8f, 1e-4f);
 }
 
+TEST(Raycast, SpecularLobePeaksAtNormalIncidence)
+{
+    // Monostatic specular return ks·cos(2α)⁸ (rcApparentReflectance):
+    // a glossy surface (kd = 0, ks = 1) returns full strength when viewed
+    // dead-on and effectively nothing at cos(α) = 0.8 (cos 2α = 0.28,
+    // 0.28⁸ ≈ 4e−5) — the missing-points signature of glossy/black paint.
+    rc::Scene scene;
+    const float ssize[3] = {0.5f, 0.0f, 0.0f};
+    const int si = scene.addInstance(rc::GeomType::kSphere, ssize,
+                                     /*retro=*/0.0f, -1, /*spec=*/1.0f);
+
+    // Dead-centre hit: cos α = 1.
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 3.0f, 0.0f, 0.0f)};
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> retro;
+    cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+    EXPECT_NEAR(retro[0], 1.0f, 1e-4f);
+
+    // Oblique hit (impact parameter 0.3, cos α = 0.8): lobe ≈ 0.
+    xf = {xformAt(scene, si, 3.0f, 0.3f, 0.0f)};
+    cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+    EXPECT_LT(retro[0], 1e-3f);
+}
+
+TEST(Raycast, GlassTransmissionReportsStrongestReturn)
+{
+    // Velas et al. (arXiv:1909.12483 §III) single-return behaviour: a
+    // transparent pane returns (1−τ)·ρ_surface; the object behind returns
+    // τ²·ρ_object (double pass); the stronger received power ρ/R² wins.
+    //
+    // Pane (ks 0.5, τ 0.9) face-on at 2 m: ρ_surf = 0.5·0.1 = 0.05,
+    // power 0.05/4 = 0.0125. Wall (kd 1.0) behind at 4.5 m:
+    // ρ = 0.81, power 0.81/20.25 = 0.04 → the wall wins.
+    rc::Scene scene;
+    // Plane local +z normal rotated to face the sensor (−x).
+    const float r_lw[9] = {0, 0, -1, 0, 1, 0, 1, 0, 0};
+    const float psize[3] = {1.0f, 1.0f, 0.0f};
+    const int pane = scene.addInstance(rc::GeomType::kPlane, psize,
+                                       /*retro=*/0.0f, -1, /*spec=*/0.5f,
+                                       /*transmit=*/0.9f);
+    const float bsize[3] = {0.5f, 0.5f, 0.5f};
+    const int wall = scene.addInstance(rc::GeomType::kBox, bsize, 1.0f);
+
+    std::vector<rc::InstanceXform> xf = {
+        xformAt(scene, pane, 2.0f, 0.0f, 0.0f, r_lw),
+        xformAt(scene, wall, 5.0f, 0.0f, 0.0f)};
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> retro;
+    auto range = cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+    EXPECT_NEAR(range[0], 4.5f, 1e-3f);
+    EXPECT_NEAR(retro[0], 0.81f, 1e-3f);
+
+    // Mostly opaque pane (τ 0.2): surface return 0.5·0.8 = 0.4 at 2 m
+    // (power 0.1) beats the weakened wall (1·0.04/20.25 ≈ 0.002).
+    rc::Scene scene2;
+    const int pane2 = scene2.addInstance(rc::GeomType::kPlane, psize,
+                                         0.0f, -1, 0.5f, 0.2f);
+    const int wall2 = scene2.addInstance(rc::GeomType::kBox, bsize, 1.0f);
+    std::vector<rc::InstanceXform> xf2 = {
+        xformAt(scene2, pane2, 2.0f, 0.0f, 0.0f, r_lw),
+        xformAt(scene2, wall2, 5.0f, 0.0f, 0.0f)};
+    range = cast(scene2, xf2, alt, az, scanParams(1, 4), &retro);
+    EXPECT_NEAR(range[0], 2.0f, 1e-3f);
+    EXPECT_NEAR(retro[0], 0.4f, 1e-3f);
+}
+
 TEST(Raycast, PlaneRetroFollowsGrazingAngle)
 {
     // Ground plane 1 m below the sensor, beam at −30° elevation:

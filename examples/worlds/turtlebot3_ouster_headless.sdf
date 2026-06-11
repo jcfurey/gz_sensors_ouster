@@ -134,5 +134,56 @@
       </link>
     </model>
 
+    <!-- ── Material-model demo objects (raycast mode) ──────────────────────
+         The raycast material model (docs/MODEL_REFERENCES.md) reads each
+         visual's <laser_retro> (diffuse kd), material <specular> (ks) and
+         <transparency> (τ):
+
+         glass_pane — beams near surface-normal return the pane itself
+           (specular lobe); oblique beams see box_behind_glass through it at
+           weakened intensity (τ² double-pass), per Velas et al.,
+           arXiv:1909.12483.
+         glossy_black_box — dark glossy paint (kd 0.05, ks 0.9): a strong
+           return only when a face points at the sensor, dropout-prone
+           everywhere else — the classic black-car signature. -->
+    <model name="glass_pane">
+      <static>true</static>
+      <pose>0 3.5 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2 0.02 1.5</size></box></geometry></collision>
+        <visual name="v">
+          <transparency>0.9</transparency>
+          <geometry><box><size>2 0.02 1.5</size></box></geometry>
+          <material><diffuse>0.8 0.9 1.0 0.3</diffuse>
+            <specular>1.0 1.0 1.0 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="box_behind_glass">
+      <static>true</static>
+      <pose>0 4.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 0.4 1</size></box></geometry></collision>
+        <visual name="v">
+          <laser_retro>0.9</laser_retro>
+          <geometry><box><size>0.8 0.4 1</size></box></geometry>
+          <material><diffuse>0.9 0.9 0.9 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="glossy_black_box">
+      <static>true</static>
+      <pose>-2.5 -1.5 0.4 0 0 0.3</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 0.8 0.8</size></box></geometry></collision>
+        <visual name="v">
+          <laser_retro>0.05</laser_retro>
+          <geometry><box><size>0.8 0.8 0.8</size></box></geometry>
+          <material><diffuse>0.05 0.05 0.05 1</diffuse>
+            <specular>0.9 0.9 0.9 1</specular></material>
+        </visual>
+      </link>
+    </model>
+
   </world>
 </sdf>
