@@ -169,6 +169,9 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("dropout_rate_far")) {
         dropout_rate_far_ = sdf->Get<double>("dropout_rate_far");
     }
+    if (sdf->HasElement("false_alarm_rate")) {
+        false_alarm_rate_ = sdf->Get<double>("false_alarm_rate");
+    }
     if (sdf->HasElement("edge_discon_threshold")) {
         edge_discon_threshold_ = sdf->Get<double>("edge_discon_threshold");
     }
@@ -235,6 +238,7 @@ void GzGpuOusterLidarSystem::Configure(
     clamp_warn(nearir_noise_scale_,    0.0, kInfD, "nearir_noise_scale");
     clamp_warn(dropout_rate_close_,    0.0, 1.0,   "dropout_rate_close");
     clamp_warn(dropout_rate_far_,      0.0, 1.0,   "dropout_rate_far");
+    clamp_warn(false_alarm_rate_,      0.0, 1.0,   "false_alarm_rate");
     clamp_warn(edge_discon_threshold_, 0.0, kInfD, "edge_discon_threshold");
     clamp_warn(base_signal_,           0.0, kInfD, "base_signal");
     clamp_warn(base_reflectivity_,     0.0, 255.0, "base_reflectivity");
@@ -387,6 +391,7 @@ void GzGpuOusterLidarSystem::Configure(
         noise.nearir_noise_scale = nearir_noise_scale_;
         noise.dropout_rate_close = dropout_rate_close_;
         noise.dropout_rate_far = dropout_rate_far_;
+        noise.false_alarm_rate = false_alarm_rate_;
         noise.edge_discon_threshold = edge_discon_threshold_;
         noise.base_signal = base_signal_;
         noise.base_reflectivity = base_reflectivity_;
@@ -708,6 +713,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     pp.nearir_noise_scale = static_cast<float>(noise.nearir_noise_scale);
     pp.dropout_rate_close = static_cast<float>(noise.dropout_rate_close);
     pp.dropout_rate_far = static_cast<float>(noise.dropout_rate_far);
+    pp.false_alarm_rate = static_cast<float>(noise.false_alarm_rate);
     pp.edge_discon_threshold =
         static_cast<float>(noise.edge_discon_threshold);
 

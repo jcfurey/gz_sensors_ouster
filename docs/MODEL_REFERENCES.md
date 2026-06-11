@@ -86,6 +86,27 @@ the reflectance limit function `RL(d)` of arXiv:2208.10295 §II-D.)
 This is a heuristic, not a calibrated detection model — a rigorous treatment
 would integrate the full detection statistics (see §2 references).
 
+### 3b. Solar-background false alarms
+
+**Model:** each no-return pixel becomes a spurious point with probability
+`false_alarm_rate` (default 0 = off), at a range uniform over
+`(0, max_range]` and a noise-floor signal of 1, implemented in each
+backend's noise stage (CPU reference: `ray_processor_cpu_impl.cpp`).
+
+Daytime background photons exceed the detection threshold at a constant
+rate, producing false alarms uniformly distributed in time — hence uniform
+in range over the unambiguous window — strongest for photon-sensitive
+(SPAD/APD) receivers; detection and false-alarm probabilities follow
+Neyman–Pearson threshold statistics:
+
+- Jin et al. — *Receiver performance and detection statistics of single
+  photon lidar*, IET Radar Sonar Navig. 14, 2020.
+- Haider et al., Sensors 22(19), 2022 — sunlight-induced noise listed among
+  the receiver effects required for accurate virtual lidar.
+
+Unmodeled refinement: the false-alarm rate should rise with scene/sky
+radiance (sun position, bright surfaces) rather than being uniform.
+
 ### 4. Signal / near-IR shot noise
 
 **Model:** `σ_channel = √(channel) · noise_scale` (Poisson shot-noise
@@ -215,7 +236,6 @@ Ordered roughly by expected impact on downstream perception realism.
 | Retroreflector blooming / crosstalk | Very strong returns (signs, plates) saturate detectors and scatter into neighbouring channels — halo points, range bias. This plugin encodes ρ > 1 in the reflectivity byte but produces no artifacts. | *LiDAR Blooming Artifacts Estimation … with Synthetic Data Modeling*, IEEE (10.1109/10774004), 2024 |
 | Atmospheric attenuation | `P_r ∝ e^(−2ζR)`; ζ from rain rate / fog visibility via Mie scattering. Hooks cleanly into `signalFromRange` if weather sim is ever needed. | Rasshofer et al., Adv. Radio Sci. 9, 2011; MDPI Sensors 23(15):6891, 2023 |
 | Weather scatterers (rain/fog/snow) | Backscatter returns *off the weather itself* (early false hits), not just attenuation. Physics-based augmentation is a mature line of work and a good template. | Hahner et al., *Fog Simulation on Real LiDAR Point Clouds*, ICCV 2021 (arXiv:2108.05249); Kilic et al., *LISA*, arXiv:2107.07004; Hahner et al., *LiDAR Snowfall Simulation*, CVPR 2022 |
-| Solar background false alarms | Daytime background photons add a false-alarm floor (spurious returns), strongest for SPAD receivers; detection follows Neyman–Pearson statistics. The plugin only drops returns — it never invents them. | Jin et al., *Receiver performance and detection statistics of single photon lidar*, IET Radar Sonar Navig. 14, 2020 |
 | Multi-return / full waveform | Second returns through vegetation, edge splits. | Winiwarter et al. 2022 |
 | Incidence angle in panels mode | Depth-image normals (from gradients) could approximate cos(α); currently panels mode applies no incidence factor. | §1 references |
 | Retroreflective BRDF | Retroreflectors (ρ > 1) are *angle-insensitive* (corner cubes return along the incident path); §8's diffuse+specular split still attenuates them by cos(α). | Kashani et al. 2015 |

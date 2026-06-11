@@ -93,7 +93,10 @@ subscriber), and messages are `std::move`d into the rmw layer.
   pattern (NVIDIA, *How to Optimize Data Transfers in CUDA C/C++*).
 - **Persistent device buffers and curand/hiprand states** (allocated once,
   re-seeded never; states stride per ray) — avoids the well-known
-  `curand_init` cost per frame.
+  `curand_init` cost per frame. The SYCL backend's stateless counter-based
+  RNG achieves the same by mixing a per-launch frame counter into the seed
+  (without it the noise pattern would freeze across frames — found and
+  fixed during this audit).
 - **Version-cached scene upload** (`castScan` re-uploads geometry only when
   the scene version changes; per-scan transforms are the only steady-state
   upload) — transfer minimisation as recommended by the same literature.

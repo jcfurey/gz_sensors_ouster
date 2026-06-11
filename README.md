@@ -518,7 +518,8 @@ targets produce weaker returns.
 | `base_signal` | 800.0 | >= 0 | photon m^2 | Baseline for 1/r^2 signal model. OS0: ~400, OS1: ~800. |
 | `base_reflectivity` | 50.0 | 0-255 | -- | Default reflectivity when no retro data available. |
 | `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
-| `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at max_range. |
+| `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at max_range. Returns past the reflectance-dependent detection limit `max_range·√(ρ/0.8)` always drop. |
+| `false_alarm_rate` | 0.0 | 0-1 | probability | Solar-background false alarms: each no-return pixel becomes a spurious point (uniform range, noise-floor signal) with this probability per frame. 0 = off. Try 0.0005-0.002 for bright daylight. |
 | `edge_discon_threshold` | 0.15 | >= 0 | m | Depth-discontinuity suppression threshold (1ns echo delay convention). 0 = off. |
 
 ### IMU (optional)

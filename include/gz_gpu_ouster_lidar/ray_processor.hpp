@@ -72,6 +72,10 @@ struct RayProcessParams {
     float dropout_rate_close;  ///< Dropout probability at 0 m (e.g. 0.001)
     float dropout_rate_far;    ///< Dropout probability at max_range (e.g. 0.05)
 
+    // ── Solar-background false alarms ────────────────────────────────────────
+    float false_alarm_rate;    ///< P(spurious return) per no-return pixel per
+                               ///< frame (daytime background photons; 0 = off)
+
     // ── Depth-discontinuity suppression ──────────────────────────────────────
     float edge_discon_threshold; ///< Depth jump threshold (metres) to suppress neighbor, 0=off
 };

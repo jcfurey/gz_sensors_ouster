@@ -159,6 +159,7 @@ __global__ void rayProcessKernel(
     float nearir_noise_scale,
     float dropout_rate_close,
     float dropout_rate_far,
+    float false_alarm_rate,
     float edge_discon_threshold,
     curandState * __restrict__   rand_states)
 {
@@ -170,6 +171,19 @@ __global__ void rayProcessKernel(
     const bool valid = isfinite(d) && d > rpmath::kValidDepthMin;
 
     if (!valid) {
+        // Solar-background false alarm: a no-return pixel may invent a
+        // spurious point uniformly over the range window (see the CPU
+        // reference in ray_processor_cpu_impl.cpp for the rationale).
+        if (false_alarm_rate > 0.f && rand_states != nullptr &&
+            curand_uniform(&rand_states[idx]) < false_alarm_rate) {
+            const float d_fa = curand_uniform(&rand_states[idx]) * max_range;
+            range_out[idx]  =
+                static_cast<uint32_t>(d_fa * rpmath::kRangeToMm);
+            signal_out[idx] = 1u;
+            refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+            nearir_out[idx] = 0u;
+            return;
+        }
         range_out[idx]  = 0u;
         signal_out[idx] = 0u;
         refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
@@ -281,6 +295,7 @@ void launchRayProcessKernel(
         p.range_noise_min_std, p.range_noise_max_std, p.max_range,
         p.signal_noise_scale, p.nearir_noise_scale,
         p.dropout_rate_close, p.dropout_rate_far,
+        p.false_alarm_rate,
         p.edge_discon_threshold,
         static_cast<curandState *>(d_rand_states));
     CUDA_CHECK(cudaGetLastError());

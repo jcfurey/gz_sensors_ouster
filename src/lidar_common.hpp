@@ -41,6 +41,7 @@ struct NoiseParams {
     double nearir_noise_scale = 1.0;
     double dropout_rate_close = 0.0005;
     double dropout_rate_far = 0.03;
+    double false_alarm_rate = 0.0;
     double edge_discon_threshold = 0.15;
     double base_signal = 800.0;
     double base_reflectivity = 50.0;

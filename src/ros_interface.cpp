@@ -183,6 +183,7 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
     node_->declare_parameter("nearir_noise_scale", noise_.nearir_noise_scale);
     node_->declare_parameter("dropout_rate_close", noise_.dropout_rate_close);
     node_->declare_parameter("dropout_rate_far", noise_.dropout_rate_far);
+    node_->declare_parameter("false_alarm_rate", noise_.false_alarm_rate);
     node_->declare_parameter("edge_discon_threshold", noise_.edge_discon_threshold);
     node_->declare_parameter("base_signal", noise_.base_signal);
     node_->declare_parameter("base_reflectivity", noise_.base_reflectivity);
@@ -230,6 +231,7 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
                     else if (name == "nearir_noise_scale")   np.nearir_noise_scale     = clamped(0.0, kInfD);
                     else if (name == "dropout_rate_close")   np.dropout_rate_close     = clamped(0.0, 1.0);
                     else if (name == "dropout_rate_far")     np.dropout_rate_far       = clamped(0.0, 1.0);
+                    else if (name == "false_alarm_rate")     np.false_alarm_rate       = clamped(0.0, 1.0);
                     else if (name == "edge_discon_threshold") np.edge_discon_threshold  = clamped(0.0, kInfD);
                     else if (name == "base_signal")          np.base_signal            = clamped(0.0, kInfD);
                     else if (name == "base_reflectivity")    np.base_reflectivity      = clamped(0.0, 255.0);

@@ -134,6 +134,7 @@ __global__ void rayProcessKernelHip(
     float nearir_noise_scale,
     float dropout_rate_close,
     float dropout_rate_far,
+    float false_alarm_rate,
     float edge_discon_threshold,
     hiprandState * __restrict__ rand_states)
 {
@@ -145,6 +146,19 @@ __global__ void rayProcessKernelHip(
     const bool valid = isfinite(d) && d > rpmath::kValidDepthMin;
 
     if (!valid) {
+        // Solar-background false alarm (see the CPU reference in
+        // ray_processor_cpu_impl.cpp for the rationale).
+        if (false_alarm_rate > 0.f && rand_states != nullptr &&
+            hiprand_uniform(&rand_states[idx]) < false_alarm_rate) {
+            const float d_fa =
+                hiprand_uniform(&rand_states[idx]) * max_range;
+            range_out[idx]  =
+                static_cast<uint32_t>(d_fa * rpmath::kRangeToMm);
+            signal_out[idx] = 1u;
+            refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+            nearir_out[idx] = 0u;
+            return;
+        }
         range_out[idx]  = 0u;
         signal_out[idx] = 0u;
         refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
@@ -290,6 +304,7 @@ public:
             pp.range_noise_min_std, pp.range_noise_max_std, pp.max_range,
             pp.signal_noise_scale, pp.nearir_noise_scale,
             pp.dropout_rate_close, pp.dropout_rate_far,
+            pp.false_alarm_rate,
             pp.edge_discon_threshold,
             need_rand ? static_cast<hiprandState *>(d_rand_states_) : nullptr);
         HIP_CHECK(hipGetLastError());
@@ -333,6 +348,7 @@ public:
             pp.range_noise_min_std, pp.range_noise_max_std, pp.max_range,
             pp.signal_noise_scale, pp.nearir_noise_scale,
             pp.dropout_rate_close, pp.dropout_rate_far,
+            pp.false_alarm_rate,
             pp.edge_discon_threshold,
             need_rand ? static_cast<hiprandState *>(d_rand_states_) : nullptr);
         HIP_CHECK(hipGetLastError());

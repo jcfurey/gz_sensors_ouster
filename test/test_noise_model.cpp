@@ -320,6 +320,41 @@ TEST(NoiseModel, DetectionLimitDropsDarkFarTargets)
     EXPECT_GT(static_cast<double>(valid) / n, 0.85);
 }
 
+TEST(NoiseModel, FalseAlarmsInventReturnsOnMisses)
+{
+    // Solar-background false alarms (Jin et al., IET RSN 14, 2020): a
+    // no-return pixel becomes a spurious point with probability
+    // false_alarm_rate, uniformly distributed over (0, max_range], at the
+    // signal floor.
+    constexpr int H = 1, W = 50000;
+    const int n = H * W;
+    std::vector<float> depth(n, std::numeric_limits<float>::infinity());
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.false_alarm_rate = 0.02f;
+    processCpu(depth.data(), nullptr,
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+
+    const uint32_t max_mm =
+        static_cast<uint32_t>(p.max_range * 1000.0f) + 1u;
+    int invented = 0;
+    for (int i = 0; i < n; ++i) {
+        if (range[i] > 0u) {
+            ++invented;
+            EXPECT_LE(range[i], max_mm) << "i=" << i;
+            EXPECT_EQ(signal[i], 1u) << "i=" << i;  // noise-floor signal
+        }
+    }
+    // Expected 2% of 50000 = 1000; SE ≈ 31. Bound to ±0.6% (~10σ).
+    const double rate = static_cast<double>(invented) / n;
+    EXPECT_GT(rate, 0.014);
+    EXPECT_LT(rate, 0.026);
+}
+
 TEST(NoiseModel, ZeroNoiseProducesDeterministicOutput)
 {
     constexpr int H = 2, W = 4;
