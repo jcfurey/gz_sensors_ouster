@@ -94,10 +94,20 @@
   <!-- <base_reflectivity>50.0</base_reflectivity> -->
 
   <!-- Random dropouts: probability of a missed return, increasing with
-       distance. Also scales with surface reflectivity (dark targets drop more).
+       distance. Also scales with surface reflectivity (dark targets drop more),
+       and returns past the reflectance-dependent detection limit
+       max_range·sqrt(reflectance/0.8) always drop — matching vendor range
+       specs quoted at 80% Lambertian (see docs/MODEL_REFERENCES.md §3).
        0 = never miss, 1 = always miss. -->
   <!-- <dropout_rate_close>0.0005</dropout_rate_close> -->
   <!-- <dropout_rate_far>0.03</dropout_rate_far> -->
+
+  <!-- Solar-background false alarms: each no-return pixel becomes a spurious
+       point (uniform range, noise-floor signal) with this probability per
+       frame — daytime background photons crossing the detection threshold
+       (docs/MODEL_REFERENCES.md §3b). 0 = off (default); try 0.0005-0.002
+       for bright daylight. -->
+  <!-- <false_alarm_rate>0.001</false_alarm_rate> -->
 
   <!-- Depth-discontinuity suppression: reject returns at depth edges
        where a neighbor differs by more than this threshold (metres). 0 = off. -->

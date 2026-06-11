@@ -64,10 +64,11 @@ constexpr float kRetroLogSlope   = 22.0f;     ///< (255-100)/7 → 7 doublings o
 // Reflectivity weighting of dropout / range noise on dark targets.
 constexpr float kDropoutRetroFloor = 0.33f;   ///< retro floor → up to 3× dropout
 constexpr float kDropoutRetroMax   = 3.0f;
-constexpr float kRangeRetroFloor   = 0.5f;    ///< retro floor → up to 2× range noise
+constexpr float kRangeRetroFloor   = 0.25f;   ///< retro floor → up to 2× range noise (1/√0.25)
 constexpr float kRangeRetroMax     = 2.0f;
 constexpr float kDefaultRetro      = 0.5f;    ///< assumed retro when the channel is absent
 constexpr float kMaxRangeFloor     = 0.1f;    ///< guards the d / max_range ratio
+constexpr float kRefReflectance    = 0.8f;    ///< reflectance vendor range specs are quoted at (80% Lambertian)
 
 // ── Math shim ────────────────────────────────────────────────────────────────
 namespace gzm {
@@ -276,9 +277,22 @@ GZ_OUSTER_HD inline float retroForNoise(const float * retro, int idx)
 
 /// Dropout probability, clamped to [0,1]. Rises with range and falls with
 /// reflectivity (dark targets drop out up to 3× more often).
+///
+/// Beyond the reflectance-dependent detection limit
+/// d_max(ρ) = max_range·√(ρ/0.8) the return is always dropped: detection
+/// SNR ∝ ρ/d², so the threshold range scales with √ρ, and vendor range
+/// specs are quoted at 80% Lambertian reflectance — e.g. the Ouster OS1 is
+/// specced 120 m @ 80% and ~45 m @ 10%; the √ law predicts 42 m. (Same
+/// detection-limit construct as the reflectance limit function RL(d) in
+/// "Physical LiDAR Simulation in Real-Time Engine", arXiv:2208.10295 §II-D,
+/// with the √ρ form from the 1/d² lidar equation.) Active only when
+/// dropout is enabled, so noise-free runs stay deterministic-exact.
 GZ_OUSTER_HD inline float dropoutProbability(float d, float retro_val,
     float drop_close, float drop_far, float max_range)
 {
+    const float d_max_eff = gzm::fmax_(max_range, kMaxRangeFloor) *
+                            gzm::sqrt_(retro_val / kRefReflectance);
+    if (d > d_max_eff) return 1.0f;
     const float t = rangeFraction(d, max_range);
     const float p = drop_close + t * (drop_far - drop_close);
     const float refl = gzm::fmin_(1.0f / gzm::fmax_(retro_val, kDropoutRetroFloor),
@@ -287,13 +301,22 @@ GZ_OUSTER_HD inline float dropoutProbability(float d, float retro_val,
 }
 
 /// Gaussian range-noise σ. Interpolated over range, then scaled by inverse
-/// reflectivity (dark targets up to 2× noisier).
+/// √reflectivity (dark targets up to 2× noisier).
+///
+/// The √ exponent follows ToF ranging theory: timing precision is
+/// σ ∝ 1/√N for N detected signal photons, and N ∝ ρ for a fixed range —
+/// so σ ∝ 1/√ρ. (E.g. "Influence of Waveform Characteristics on LiDAR
+/// Ranging Accuracy and Precision", Sensors 18(4), 2018; SPAD dToF precision
+/// bounds, arXiv:2507.11404.) Range dependence stays the configurable
+/// min→max ramp: datasheet precision-vs-range curves fold in firmware
+/// filtering that a pure r/√ρ law does not capture.
 GZ_OUSTER_HD inline float rangeNoiseSigma(float d, float retro_val,
     float min_std, float max_std, float max_range)
 {
     const float t = rangeFraction(d, max_range);
     float sigma = min_std + t * (max_std - min_std);
-    sigma *= gzm::fmin_(1.0f / gzm::fmax_(retro_val, kRangeRetroFloor), kRangeRetroMax);
+    sigma *= gzm::fmin_(1.0f / gzm::sqrt_(gzm::fmax_(retro_val, kRangeRetroFloor)),
+                        kRangeRetroMax);
     return sigma;
 }
 

@@ -45,6 +45,23 @@ void processCpu(
         const bool valid = std::isfinite(d) && d > rpmath::kValidDepthMin;
 
         if (!valid) {
+            // Solar-background false alarm: daytime background photons can
+            // exceed the detection threshold on a no-return pixel, inventing
+            // a spurious point uniformly distributed over the unambiguous
+            // range window (Jin et al., IET Radar Sonar Navig. 14, 2020).
+            // Minimal signal: a false alarm is by construction at the noise
+            // floor.
+            if (has_noise && p.false_alarm_rate > 0.f &&
+                uni(rng) < p.false_alarm_rate) {
+                const float d_fa = uni(rng) * p.max_range;
+                range_out[idx] =
+                    static_cast<uint32_t>(d_fa * rpmath::kRangeToMm);
+                signal_out[idx] = 1u;
+                reflectivity_out[idx] =
+                    static_cast<uint8_t>(p.base_reflectivity);
+                nearir_out[idx] = 0u;
+                continue;
+            }
             range_out[idx] = 0u;
             signal_out[idx] = 0u;
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);

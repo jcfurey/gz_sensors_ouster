@@ -12,6 +12,8 @@
 
 #include <gz/sim/components/Geometry.hh>
 #include <gz/sim/components/LaserRetro.hh>
+#include <gz/sim/components/Material.hh>
+#include <gz/sim/components/Transparency.hh>
 #include <gz/sim/components/Visual.hh>
 #include <gz/common/Mesh.hh>
 #include <gz/common/MeshManager.hh>
@@ -206,7 +208,24 @@ void RaycastMirror::rebuildScene(
                 ecm.Component<::gz::sim::components::LaserRetro>(ent);
             const float retro = lr ? static_cast<float>(lr->Data()) : 0.0f;
 
-            scene->addInstance(type, size, retro, root_node);
+            // Material model for the monostatic return (see
+            // rcApparentReflectance): specular coefficient from the visual
+            // material's <specular> colour (mean RGB), transmittance from
+            // the visual's <transparency>. Both default to 0 (pure
+            // Lambertian, opaque) when unset.
+            float spec = 0.0f;
+            if (const auto * mat =
+                    ecm.Component<::gz::sim::components::Material>(ent)) {
+                const auto & s = mat->Data().Specular();
+                spec = static_cast<float>((s.R() + s.G() + s.B()) / 3.0);
+            }
+            float transmit = 0.0f;
+            if (const auto * tr =
+                    ecm.Component<::gz::sim::components::Transparency>(ent)) {
+                transmit = static_cast<float>(tr->Data());
+            }
+
+            scene->addInstance(type, size, retro, root_node, spec, transmit);
             refs.push_back(ref);
             return true;
         });

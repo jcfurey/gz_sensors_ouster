@@ -90,6 +90,7 @@ private:
     double nearir_noise_scale_ = 1.0;
     double dropout_rate_close_ = 0.0005;
     double dropout_rate_far_ = 0.03;
+    double false_alarm_rate_ = 0.0;
     double edge_discon_threshold_ = 0.15;
     double base_signal_ = 800.0;
     double base_reflectivity_ = 50.0;

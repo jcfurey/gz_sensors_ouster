@@ -125,8 +125,7 @@ public:
         ensureResampleBuffers(raw_n, rp.H);
 
         std::memcpy(u_raw_frame_, raw_host,      static_cast<size_t>(raw_n) * sizeof(float));
-        std::memcpy(u_beam_alt_,  beam_alt_host, static_cast<size_t>(rp.H) * sizeof(float));
-        std::memcpy(u_beam_az_,   beam_az_host,  static_cast<size_t>(rp.H) * sizeof(float));
+        uploadBeamTables(beam_alt_host, beam_az_host, rp.H);
 
         launchResampleKernel(rp, out_n);
         // No laser_retro channel from the panel rig — null retro selects
@@ -196,10 +195,7 @@ public:
                 static_cast<size_t>(scene.n_instances) *
                     sizeof(rc::InstanceXform));
         }
-        std::memcpy(u_beam_alt_, beam_alt_deg,
-                    static_cast<size_t>(sp.H) * sizeof(float));
-        std::memcpy(u_beam_az_, beam_az_deg,
-                    static_cast<size_t>(sp.H) * sizeof(float));
+        uploadBeamTables(beam_alt_deg, beam_az_deg, sp.H);
 
         float sr[9], st[3];
         for (int i = 0; i < 9; ++i) sr[i] = sensor_r[i];
@@ -280,7 +276,15 @@ private:
         uint8_t * refl_out, uint16_t * nearir_out,
         const RayProcessParams & p, int n)
     {
-        const uint64_t seed = effective_seed_;
+        // Mix a per-launch counter into the seed: the device RNG is
+        // stateless (counter restarts at 0 for every pixel every frame), so
+        // a constant seed would FREEZE the noise pattern across frames —
+        // identical dropouts and range errors every scan, i.e. perfectly
+        // time-correlated noise (the CUDA/HIP backends advance persistent
+        // curand states instead). Seeded callers stay reproducible: the
+        // frame sequence itself is deterministic.
+        const uint64_t seed =
+            splitmix64(effective_seed_ + (frame_counter_++));
         const int H = p.H, W = p.W;
         const float base_signal = p.base_signal;
         const float base_refl = p.base_reflectivity;
@@ -291,6 +295,7 @@ private:
         const float nir_scale = p.nearir_noise_scale;
         const float drop_close = p.dropout_rate_close;
         const float drop_far = p.dropout_rate_far;
+        const float fa_rate = p.false_alarm_rate;
         const float edge = p.edge_discon_threshold;
 
         q_.parallel_for(sycl::range<1>{static_cast<size_t>(n)},
@@ -301,6 +306,19 @@ private:
                 float d = depth[idx];
                 const bool valid = sycl::isfinite(d) && d > rpmath::kValidDepthMin;
                 if (!valid) {
+                    // Solar-background false alarm (see the CPU reference in
+                    // ray_processor_cpu_impl.cpp for the rationale).
+                    if (fa_rate > 0.f &&
+                        uniform01(counter, seed, idx) < fa_rate) {
+                        const float d_fa =
+                            uniform01(counter, seed, idx) * maxr;
+                        range_out[idx]  = static_cast<uint32_t>(
+                            d_fa * rpmath::kRangeToMm);
+                        signal_out[idx] = 1u;
+                        refl_out[idx]   = static_cast<uint8_t>(base_refl);
+                        nearir_out[idx] = 0u;
+                        return;
+                    }
                     range_out[idx]  = 0u;
                     signal_out[idx] = 0u;
                     refl_out[idx]   = static_cast<uint8_t>(base_refl);
@@ -440,11 +458,28 @@ private:
             allocShared(u_beam_alt_, static_cast<size_t>(H));
             allocShared(u_beam_az_,  static_cast<size_t>(H));
             beam_buf_n_ = H;
+            beam_src_alt_ = nullptr;  // USM buffers changed: re-copy
         }
+    }
+
+    // Beam calibration tables are constant for a sensor's lifetime; copy
+    // into USM once, keyed by host source pointer + count (see the CUDA
+    // twin and docs/SYSTEMS_REFERENCES.md).
+    void uploadBeamTables(const float * alt, const float * az, int H)
+    {
+        if (alt == beam_src_alt_ && az == beam_src_az_ && H == beam_src_h_) {
+            return;
+        }
+        std::memcpy(u_beam_alt_, alt, static_cast<size_t>(H) * sizeof(float));
+        std::memcpy(u_beam_az_,  az,  static_cast<size_t>(H) * sizeof(float));
+        beam_src_alt_ = alt;
+        beam_src_az_ = az;
+        beam_src_h_ = H;
     }
 
     uint64_t seed_ = 0;
     uint64_t effective_seed_ = 0;
+    uint64_t frame_counter_ = 0;  ///< advances the stateless RNG across frames
     sycl::queue q_;
     bool integrated_ = false;
 
@@ -457,6 +492,10 @@ private:
     float *    u_raw_frame_ = nullptr;
     float *    u_beam_alt_  = nullptr;
     float *    u_beam_az_   = nullptr;
+    // uploadBeamTables cache identity (host source pointers + count).
+    const float * beam_src_alt_ = nullptr;
+    const float * beam_src_az_  = nullptr;
+    int beam_src_h_ = 0;
     rc::RcInstance *    u_rc_insts_  = nullptr;
     float *             u_rc_verts_  = nullptr;
     int *               u_rc_tris_   = nullptr;

@@ -41,12 +41,14 @@ struct MeshBvhNode {
     int count = 0;    ///< leaf: triangle count
 };
 
-/// Immutable per-instance geometry (device-friendly).
+/// Immutable per-instance geometry + material (device-friendly).
 struct RcInstance {
     GeomType type = GeomType::kBox;
     float size[3] = {0, 0, 0};
-    float retro = 0.0f;   ///< laser_retro of the visual (0 = unset)
-    int root_node = -1;   ///< kMesh: global BVH root node index
+    float retro = 0.0f;     ///< laser_retro: diffuse reflectance kd (0 = unset)
+    float spec = 0.0f;      ///< specular coefficient ks (visual material specular)
+    float transmit = 0.0f;  ///< transmittance τ ∈ [0,1] (visual transparency)
+    int root_node = -1;     ///< kMesh: global BVH root node index
 };
 
 /// Per-scan rigid transform of one instance.
@@ -70,6 +72,24 @@ constexpr int kRcBvhStack = 64;
 /// "Infinite" plane half-extent: large enough for any practical world while
 /// keeping AABB corner transforms finite.
 constexpr float kRcHugeExtent = 1.0e6f;
+/// Grazing-incidence floor for the cos(incidence) reflectance factor: keeps
+/// the effective reflectance positive (0 means "retro unset" downstream) and
+/// caps the noise-weighting blow-up at extreme angles, where the Lambertian
+/// cosine model is unreliable anyway (validated only up to ~20° incidence;
+/// Kaasalainen et al., Remote Sens. 3(10), 2011).
+constexpr float kRcMinCosInc = 0.01f;
+/// Transmittance below this is treated as opaque (no continuation segment).
+constexpr float kRcTransmitMin = 0.05f;
+/// Specular coefficient at or above which a surface also produces the
+/// mirror-bounce ghost path. SDF has no roughness channel, so this is the
+/// mirror/gloss discriminator: keep paint-like materials below it (the demo
+/// glossy box uses 0.45) and actual mirrors/glass near 1.
+constexpr float kRcMirrorMin = 0.5f;
+/// Offset past a transparent surface before the continuation cast.
+constexpr float kRcSegEps = 1.0e-3f;
+/// Segment-local tmin for the continuation cast (the sensor near clip
+/// applies to the first segment only — objects just behind glass are valid).
+constexpr float kRcSegTmin = 1.0e-4f;
 
 // ── Small vector helpers ─────────────────────────────────────────────────────
 
@@ -104,6 +124,14 @@ GZ_OUSTER_HD inline RcV3 rcRotate(const float r[9], RcV3 p)
     return {r[0] * p.x + r[1] * p.y + r[2] * p.z,
             r[3] * p.x + r[4] * p.y + r[5] * p.z,
             r[6] * p.x + r[7] * p.y + r[8] * p.z};
+}
+
+/// Rotate by the transpose (= inverse) of a row-major rotation.
+GZ_OUSTER_HD inline RcV3 rcRotateT(const float r[9], RcV3 p)
+{
+    return {r[0] * p.x + r[3] * p.y + r[6] * p.z,
+            r[1] * p.x + r[4] * p.y + r[7] * p.z,
+            r[2] * p.x + r[5] * p.y + r[8] * p.z};
 }
 
 // ── Intersectors (instance-local frame; rays have unit direction) ───────────
@@ -249,11 +277,12 @@ GZ_OUSTER_HD inline float rcHitPlane(RcV3 o, RcV3 d, const float size[3],
 
 /// BVH traversal over the globally rebased arrays. `root` is the mesh's
 /// root node index; `order` holds global triangle indices; `tris` holds
-/// global vertex indices.
+/// global vertex indices. `hit_tri` (optional) receives the global index of
+/// the winning triangle, for normal reconstruction.
 GZ_OUSTER_HD inline float rcHitMesh(
     const float * verts, const int * tris, const int * order,
     const MeshBvhNode * nodes, int root,
-    RcV3 o, RcV3 d, float tmin, float tmax)
+    RcV3 o, RcV3 d, float tmin, float tmax, int * hit_tri = nullptr)
 {
     if (root < 0) return -1.0f;
     float best = -1.0f;
@@ -278,6 +307,7 @@ GZ_OUSTER_HD inline float rcHitMesh(
                 if (t > 0.0f) {
                     best = t;
                     limit = t;
+                    if (hit_tri) *hit_tri = tri;
                 }
             }
         } else if (sp + 2 <= kRcBvhStack) {
@@ -291,7 +321,7 @@ GZ_OUSTER_HD inline float rcHitMesh(
 GZ_OUSTER_HD inline float rcHitInstance(const RcInstance & inst,
     const float * verts, const int * tris, const int * order,
     const MeshBvhNode * nodes,
-    RcV3 o, RcV3 d, float tmin, float tmax)
+    RcV3 o, RcV3 d, float tmin, float tmax, int * hit_tri = nullptr)
 {
     switch (inst.type) {
         case GeomType::kPlane:
@@ -305,15 +335,169 @@ GZ_OUSTER_HD inline float rcHitInstance(const RcInstance & inst,
                                  tmin, tmax);
         case GeomType::kMesh:
             return rcHitMesh(verts, tris, order, nodes, inst.root_node,
-                             o, d, tmin, tmax);
+                             o, d, tmin, tmax, hit_tri);
     }
     return -1.0f;
+}
+
+/// Surface normal (instance-local frame, NOT normalised, sign arbitrary)
+/// at a known hit point `p` of instance `inst`. Returns {0,0,0} only for a
+/// degenerate mesh triangle.
+GZ_OUSTER_HD inline RcV3 rcSurfaceNormalLocal(const RcInstance & inst,
+    const float * verts, const int * tris, RcV3 p, int hit_tri)
+{
+    RcV3 n{0.0f, 0.0f, 1.0f};
+    switch (inst.type) {
+        case GeomType::kPlane:
+            break;  // n = +z by construction
+        case GeomType::kBox: {
+            // The hit face is the axis where |p_i| reaches its half-extent
+            // first (largest normalised coordinate).
+            const float rx = rpmath::gzm::fabs_(p.x) /
+                             rpmath::gzm::fmax_(inst.size[0], 1.0e-12f);
+            const float ry = rpmath::gzm::fabs_(p.y) /
+                             rpmath::gzm::fmax_(inst.size[1], 1.0e-12f);
+            const float rz = rpmath::gzm::fabs_(p.z) /
+                             rpmath::gzm::fmax_(inst.size[2], 1.0e-12f);
+            if (rx >= ry && rx >= rz) {
+                n = RcV3{1.0f, 0.0f, 0.0f};
+            } else if (ry >= rz) {
+                n = RcV3{0.0f, 1.0f, 0.0f};
+            } else {
+                n = RcV3{0.0f, 0.0f, 1.0f};
+            }
+            break;
+        }
+        case GeomType::kSphere:
+            n = p;  // radial; normalised via |n| below
+            break;
+        case GeomType::kCylinder: {
+            // Cap if the hit sits at an end disc, else the lateral surface.
+            const float half_len = inst.size[1];
+            if (rpmath::gzm::fabs_(p.z) >= half_len * (1.0f - 1.0e-4f)) {
+                n = RcV3{0.0f, 0.0f, 1.0f};
+            } else {
+                n = RcV3{p.x, p.y, 0.0f};
+            }
+            break;
+        }
+        case GeomType::kMesh: {
+            if (hit_tri < 0) return RcV3{0.0f, 0.0f, 0.0f};
+            const int * idx = &tris[3 * hit_tri];
+            const RcV3 v0{verts[3 * idx[0]], verts[3 * idx[0] + 1],
+                          verts[3 * idx[0] + 2]};
+            const RcV3 v1{verts[3 * idx[1]], verts[3 * idx[1] + 1],
+                          verts[3 * idx[1] + 2]};
+            const RcV3 v2{verts[3 * idx[2]], verts[3 * idx[2] + 1],
+                          verts[3 * idx[2] + 2]};
+            n = rcCross(rcSub(v1, v0), rcSub(v2, v0));
+            break;
+        }
+    }
+    return n;
+}
+
+/// cos of the incidence angle between the (unit) ray direction and the
+/// surface normal at a known hit, computed in the instance-local frame.
+/// Clamped to [kRcMinCosInc, 1].
+///
+/// Used to model the incidence-angle dependence of the received return: for
+/// an extended Lambertian target the lidar equation gives
+/// P_received ∝ ρ · cos(α) / R² — an oblique surface returns less light, so
+/// its apparent reflectance is ρ·cos(α). (Kashani et al., "A Review of LIDAR
+/// Radiometric Processing", Sensors 15(11), 2015; Kaasalainen et al., Remote
+/// Sens. 3(10), 2011; same model as the HELIOS++ simulator, Winiwarter et
+/// al., Remote Sens. Environ. 269, 2022.)
+GZ_OUSTER_HD inline float rcCosIncidence(const RcInstance & inst,
+    const float * verts, const int * tris,
+    RcV3 o_l, RcV3 d_l, float t, int hit_tri)
+{
+    const RcV3 p{o_l.x + t * d_l.x, o_l.y + t * d_l.y, o_l.z + t * d_l.z};
+    const RcV3 n = rcSurfaceNormalLocal(inst, verts, tris, p, hit_tri);
+    const float nn = rpmath::gzm::sqrt_(rcDot(n, n));
+    if (nn < 1.0e-12f) return 1.0f;  // degenerate normal: no attenuation
+    const float c = rpmath::gzm::fabs_(rcDot(d_l, n)) / nn;
+    return rpmath::gzm::fmin_(rpmath::gzm::fmax_(c, kRcMinCosInc), 1.0f);
+}
+
+/// Monostatic apparent reflectance of a hit: Lambertian diffuse term
+/// kd·cos(α) plus a specular lobe ks·cos(2α)⁸ (zero past 45°).
+///
+/// For a monostatic lidar the receiver sits at the emitter, so the Phong
+/// lobe around the mirror direction r̂ contributes ∝ (r̂·(−d̂))ⁿ =
+/// cos(2α)ⁿ: a smooth/glossy surface (glass, polished or dark metallic
+/// paint) returns strongly only when viewed near surface-normal and
+/// "drops quickly" off-normal — the empirically observed behaviour of
+/// lidar on glass (Velas et al., arXiv:1909.12483 §III) and the cause of
+/// the missing-points signature of glossy black vehicles. n = 8 is a
+/// fixed lobe width (≈ half-power at ~9° off normal), chosen qualitative:
+/// real lobe widths vary per material and are not exposed by SDF.
+GZ_OUSTER_HD inline float rcApparentReflectance(const RcInstance & inst,
+                                                float cos_inc)
+{
+    float rho = inst.retro * cos_inc;
+    if (inst.spec > 0.0f) {
+        const float c2 = 2.0f * cos_inc * cos_inc - 1.0f;  // cos(2α)
+        if (c2 > 0.0f) {
+            float lobe = c2 * c2;   // cos(2α)²
+            lobe *= lobe;           // ⁴
+            lobe *= lobe;           // ⁸
+            rho += inst.spec * lobe;
+        }
+    }
+    return rho;
+}
+
+/// Nearest hit of one ray over all instances. Returns the hit parameter
+/// (or -1), the winning instance in `inst_out` (-1 for a miss) and, for
+/// mesh hits, the winning global triangle index in `tri_out`.
+GZ_OUSTER_HD inline float rcNearestHit(
+    const RcInstance * instances, int n_instances,
+    const float * verts, const int * tris, const int * order,
+    const MeshBvhNode * nodes, const InstanceXform * xforms,
+    RcV3 o, RcV3 d, float tmin, float tmax,
+    int & inst_out, int & tri_out)
+{
+    float best = tmax;
+    inst_out = -1;
+    tri_out = -1;
+    for (int i = 0; i < n_instances; ++i) {
+        const InstanceXform & x = xforms[i];
+        if (!rcHitAabb(o, d, x.bmin, x.bmax, tmin, best)) continue;
+        const RcV3 o_l = rcXformPoint(x.r, x.t, o);
+        const RcV3 d_l = rcRotate(x.r, d);
+        int tri = -1;
+        const float t = rcHitInstance(instances[i], verts, tris, order,
+                                      nodes, o_l, d_l, tmin, best, &tri);
+        if (t > 0.0f && t < best) {
+            best = t;
+            inst_out = i;
+            tri_out = tri;
+        }
+    }
+    return (inst_out >= 0) ? best : -1.0f;
+}
+
+/// Apparent reflectance of a known hit (instance-local cos incidence
+/// recomputed from the world-frame ray).
+GZ_OUSTER_HD inline float rcHitReflectance(
+    const RcInstance * instances, const InstanceXform * xforms,
+    const float * verts, const int * tris,
+    RcV3 o, RcV3 d, float t, int inst, int tri)
+{
+    const InstanceXform & x = xforms[inst];
+    const RcV3 o_l = rcXformPoint(x.r, x.t, o);
+    const RcV3 d_l = rcRotate(x.r, d);
+    const float cos_inc =
+        rcCosIncidence(instances[inst], verts, tris, o_l, d_l, t, tri);
+    return rcApparentReflectance(instances[inst], cos_inc);
 }
 
 /// Cast one output pixel (beam × measurement id) against the whole scene.
 /// Writes the reported Ouster range (metres; `inf_value` for a miss — the
 /// value satisfying the XYZ-LUT reconstruction, see castScan docs) and the
-/// nearest hit's laser_retro (0 on a miss).
+/// nearest hit's APPARENT reflectance: laser_retro × cos(incidence)
+/// (0 on a miss, or when laser_retro is unset).
 GZ_OUSTER_HD inline void rcCastOneRay(
     const RcInstance * instances, int n_instances,
     const float * verts, const int * tris, const int * order,
@@ -350,30 +534,112 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     const RcV3 o = rcXformPoint(sensor_r, sensor_t, o_s);
     const RcV3 d = rcRotate(sensor_r, d_s);
 
-    const float tmin = sp.near_clip;
-    float best = sp.max_range - n_off;  // current nearest hit (ray param)
-    int best_inst = -1;
+    const float t_budget = sp.max_range - n_off;
 
-    for (int i = 0; i < n_instances; ++i) {
-        const InstanceXform & x = xforms[i];
-        if (!rcHitAabb(o, d, x.bmin, x.bmax, tmin, best)) continue;
-        const RcV3 o_l = rcXformPoint(x.r, x.t, o);
-        const RcV3 d_l = rcRotate(x.r, d);
-        const float t = rcHitInstance(instances[i], verts, tris, order,
-                                      nodes, o_l, d_l, tmin, best);
-        if (t > 0.0f && t < best) {
-            best = t;
-            best_inst = i;
+    int inst0 = -1, tri0 = -1;
+    const float t0 = rcNearestHit(instances, n_instances, verts, tris, order,
+                                  nodes, xforms, o, d, sp.near_clip, t_budget,
+                                  inst0, tri0);
+    if (inst0 < 0) {
+        range_out = inf_value;
+        retro_out = 0.0f;
+        return;
+    }
+
+    // Apparent reflectance of the front surface: kd·cos(α) + ks·cos(2α)⁸
+    // (see rcApparentReflectance) — the extended-Lambertian lidar equation
+    // P ∝ ρ_app/R² plus the monostatic specular lobe. Folding the angular
+    // terms in here makes the downstream signal, reflectivity byte and
+    // noise weighting all respond to oblique/glossy surfaces the way a real
+    // return does. laser_retro == 0 with no specular stays 0 and keeps its
+    // base_reflectivity fallback downstream.
+    const float tau =
+        rpmath::gzm::fmin_(rpmath::gzm::fmax_(instances[inst0].transmit, 0.0f),
+                           1.0f);
+    float rho = rcHitReflectance(instances, xforms, verts, tris,
+                                 o, d, t0, inst0, tri0) * (1.0f - tau);
+    float range = t0 + n_off;
+
+    // Transparent surface (glass): continue one segment behind it. The
+    // surface return keeps (1−τ); the behind-glass return is attenuated by
+    // τ² (the pulse crosses the pane twice); single-return mode reports the
+    // STRONGEST candidate by received power ρ/R², matching how lidar sees
+    // through windows in practice (Velas et al., arXiv:1909.12483 §III:
+    // near-normal glass returns the pane, otherwise the object behind, with
+    // weakened intensity). One continuation segment only — a second pane
+    // behind the first is treated as opaque.
+    if (tau >= kRcTransmitMin) {
+        const float seg_start = t0 + kRcSegEps;
+        const RcV3 p{o.x + d.x * seg_start, o.y + d.y * seg_start,
+                     o.z + d.z * seg_start};
+        int inst1 = -1, tri1 = -1;
+        const float t1 = rcNearestHit(instances, n_instances, verts, tris,
+                                      order, nodes, xforms, p, d, kRcSegTmin,
+                                      t_budget - seg_start, inst1, tri1);
+        if (inst1 >= 0) {
+            const float rho1 = rcHitReflectance(instances, xforms, verts,
+                                                tris, p, d, t1, inst1, tri1) *
+                               tau * tau;
+            const float range1 = seg_start + t1 + n_off;
+            if (rho1 * range * range > rho * range1 * range1) {
+                rho = rho1;
+                range = range1;
+            }
         }
     }
 
-    if (best_inst >= 0) {
-        range_out = best + n_off;
-        retro_out = instances[best_inst].retro;
-    } else {
-        range_out = inf_value;
-        retro_out = 0.0f;
+    // Mirror ghost (Velas et al., arXiv:1909.12483 §III): a strongly
+    // specular surface bounces the beam onto a third object, whose diffuse
+    // return retraces the path — the sensor, unaware, reports a point
+    // BEHIND the mirror along the original beam at the total path length
+    // t0 + t2. The pulse interacts with the mirror twice, hence the
+    // ((1−τ)·ks)² weight (glass ghosts are weak, true mirrors strong).
+    if (instances[inst0].spec >= kRcMirrorMin) {
+        const InstanceXform & x0 = xforms[inst0];
+        const RcV3 o_l = rcXformPoint(x0.r, x0.t, o);
+        const RcV3 d_l = rcRotate(x0.r, d);
+        const RcV3 p_l{o_l.x + t0 * d_l.x, o_l.y + t0 * d_l.y,
+                       o_l.z + t0 * d_l.z};
+        const RcV3 n_l = rcSurfaceNormalLocal(instances[inst0], verts, tris,
+                                              p_l, tri0);
+        const float nn = rpmath::gzm::sqrt_(rcDot(n_l, n_l));
+        if (nn > 1.0e-12f) {
+            // World-frame unit normal (x0.r is world→local; transpose maps
+            // back), then the specular reflection of d about it. The
+            // reflection is invariant to the normal's sign.
+            RcV3 n_w = rcRotateT(x0.r, n_l);
+            n_w = RcV3{n_w.x / nn, n_w.y / nn, n_w.z / nn};
+            const float dn = rcDot(d, n_w);
+            const RcV3 refl{d.x - 2.0f * dn * n_w.x,
+                            d.y - 2.0f * dn * n_w.y,
+                            d.z - 2.0f * dn * n_w.z};
+            const RcV3 hit{o.x + d.x * t0, o.y + d.y * t0, o.z + d.z * t0};
+            const RcV3 g0{hit.x + refl.x * kRcSegEps,
+                          hit.y + refl.y * kRcSegEps,
+                          hit.z + refl.z * kRcSegEps};
+            int inst2 = -1, tri2 = -1;
+            const float t2 = rcNearestHit(instances, n_instances, verts,
+                                          tris, order, nodes, xforms, g0,
+                                          refl, kRcSegTmin,
+                                          t_budget - t0 - kRcSegEps,
+                                          inst2, tri2);
+            if (inst2 >= 0) {
+                const float mirror_eff = (1.0f - tau) * instances[inst0].spec;
+                const float rho2 =
+                    rcHitReflectance(instances, xforms, verts, tris,
+                                     g0, refl, t2, inst2, tri2) *
+                    mirror_eff * mirror_eff;
+                const float range2 = t0 + kRcSegEps + t2 + n_off;
+                if (rho2 * range * range > rho * range2 * range2) {
+                    rho = rho2;
+                    range = range2;
+                }
+            }
+        }
     }
+
+    range_out = range;
+    retro_out = rho;
 }
 
 }  // namespace rc

@@ -93,7 +93,7 @@ inline bool noiseEnabled(const RayProcessParams & p)
     return p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f ||
            p.signal_noise_scale > 0.f || p.nearir_noise_scale > 0.f ||
            p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
-           p.edge_discon_threshold > 0.f;
+           p.false_alarm_rate > 0.f || p.edge_discon_threshold > 0.f;
 }
 
 /// Mix steady_clock + pid + this-pointer into a 64-bit non-deterministic

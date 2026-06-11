@@ -237,20 +237,23 @@ TEST(NoiseModel, RangeNoiseAddsVariance)
     // Expected per-sample sigma:
     //   t = depth / max_range = 50 / 120 ≈ 0.417
     //   sigma = min_std + t*(max_std - min_std) = 10 + 0.417*20 = 18.3 mm
-    //   refl_factor at retro=0.5 = min(1/0.5, 2) = 2.0
-    //   effective sigma ≈ 36.7 mm; expected variance ≈ 1346 mm²
-    //   SE of mean over N=10000 ≈ 0.37 mm
-    // Bound mean to ±5 mm (~14σ_mean) and variance to within 2× of expected.
+    //   refl_factor at retro=0.5 = min(1/sqrt(0.5), 2) ≈ 1.414  (σ ∝ 1/√ρ;
+    //   see rangeNoiseSigma)
+    //   effective sigma ≈ 25.9 mm; expected variance ≈ 671 mm²
+    //   SE of mean over N=10000 ≈ 0.26 mm
+    // Bound mean to ±5 mm (~19σ_mean) and variance to within 2× of expected.
     EXPECT_NEAR(mean, 50000.0, 5.0);
-    EXPECT_GT(var, 700.0);
-    EXPECT_LT(var, 3000.0);
+    EXPECT_GT(var, 350.0);
+    EXPECT_LT(var, 1400.0);
 }
 
 TEST(NoiseModel, DropoutsReduceValidCount)
 {
     constexpr int H = 1, W = 50000;
     const int n = H * W;
-    std::vector<float> depth(n, 100.0f);  // far range
+    // 90 m: far, but inside the retro-0.5 detection limit
+    // d_max = 120·sqrt(0.5/0.8) ≈ 94.9 m (see dropoutProbability).
+    std::vector<float> depth(n, 90.0f);
     std::vector<float> retro(n, 0.5f);
     std::vector<uint32_t> range(n);
     std::vector<uint16_t> signal(n);
@@ -270,14 +273,86 @@ TEST(NoiseModel, DropoutsReduceValidCount)
     }
     int dropped = n - valid;
 
-    // Expected drop rate: t=100/120≈0.833, p_drop = 0.833*0.10 = 0.0833;
-    // refl_factor at retro=0.5 = 2.0, clamped to ≤1.0 → effective rate
-    // ≈ 0.167. SE over N=50000 ≈ 0.0017.
-    // Bound to ±0.03 (~17σ) so a regression that doubles or zeroes the
+    // Expected drop rate: t=90/120=0.75, p_drop = 0.75*0.10 = 0.075;
+    // refl_factor at retro=0.5 = min(1/0.5, 3) = 2.0 → effective rate
+    // ≈ 0.15. SE over N=50000 ≈ 0.0016.
+    // Bound to ±0.03 (~19σ) so a regression that doubles or zeroes the
     // rate fails immediately.
     double drop_rate = static_cast<double>(dropped) / n;
-    EXPECT_GT(drop_rate, 0.137);
-    EXPECT_LT(drop_rate, 0.197);
+    EXPECT_GT(drop_rate, 0.120);
+    EXPECT_LT(drop_rate, 0.180);
+}
+
+TEST(NoiseModel, DetectionLimitDropsDarkFarTargets)
+{
+    // d_max(ρ) = max_range·sqrt(ρ/0.8): at 100 m with max_range 120,
+    // ρ = 0.5 is past its 94.9 m limit (all returns dropped) while ρ = 0.8
+    // has d_max = 120 m and survives at the ordinary dropout rate.
+    constexpr int H = 1, W = 20000;
+    const int n = H * W;
+    std::vector<float> depth(n, 100.0f);
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.dropout_rate_close = 0.0f;
+    p.dropout_rate_far = 0.10f;
+    p.max_range = 120.0f;
+
+    std::vector<float> dark(n, 0.5f);
+    processCpu(depth.data(), dark.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+    for (int i = 0; i < n; ++i) {
+        ASSERT_EQ(range[i], 0u) << "dark target beyond its detection limit "
+                                   "must drop (i=" << i << ")";
+    }
+
+    std::vector<float> bright(n, 0.8f);
+    processCpu(depth.data(), bright.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+    int valid = 0;
+    for (int i = 0; i < n; ++i) {
+        if (range[i] > 0) ++valid;
+    }
+    // Expected rate ≈ 0.833·0.10·min(1/0.8, 3) ≈ 0.104 → most survive.
+    EXPECT_GT(static_cast<double>(valid) / n, 0.85);
+}
+
+TEST(NoiseModel, FalseAlarmsInventReturnsOnMisses)
+{
+    // Solar-background false alarms (Jin et al., IET RSN 14, 2020): a
+    // no-return pixel becomes a spurious point with probability
+    // false_alarm_rate, uniformly distributed over (0, max_range], at the
+    // signal floor.
+    constexpr int H = 1, W = 50000;
+    const int n = H * W;
+    std::vector<float> depth(n, std::numeric_limits<float>::infinity());
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.false_alarm_rate = 0.02f;
+    processCpu(depth.data(), nullptr,
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+
+    const uint32_t max_mm =
+        static_cast<uint32_t>(p.max_range * 1000.0f) + 1u;
+    int invented = 0;
+    for (int i = 0; i < n; ++i) {
+        if (range[i] > 0u) {
+            ++invented;
+            EXPECT_LE(range[i], max_mm) << "i=" << i;
+            EXPECT_EQ(signal[i], 1u) << "i=" << i;  // noise-floor signal
+        }
+    }
+    // Expected 2% of 50000 = 1000; SE ≈ 31. Bound to ±0.6% (~10σ).
+    const double rate = static_cast<double>(invented) / n;
+    EXPECT_GT(rate, 0.014);
+    EXPECT_LT(rate, 0.026);
 }
 
 TEST(NoiseModel, ZeroNoiseProducesDeterministicOutput)

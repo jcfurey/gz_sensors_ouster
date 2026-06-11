@@ -159,6 +159,7 @@ __global__ void rayProcessKernel(
     float nearir_noise_scale,
     float dropout_rate_close,
     float dropout_rate_far,
+    float false_alarm_rate,
     float edge_discon_threshold,
     curandState * __restrict__   rand_states)
 {
@@ -170,6 +171,19 @@ __global__ void rayProcessKernel(
     const bool valid = isfinite(d) && d > rpmath::kValidDepthMin;
 
     if (!valid) {
+        // Solar-background false alarm: a no-return pixel may invent a
+        // spurious point uniformly over the range window (see the CPU
+        // reference in ray_processor_cpu_impl.cpp for the rationale).
+        if (false_alarm_rate > 0.f && rand_states != nullptr &&
+            curand_uniform(&rand_states[idx]) < false_alarm_rate) {
+            const float d_fa = curand_uniform(&rand_states[idx]) * max_range;
+            range_out[idx]  =
+                static_cast<uint32_t>(d_fa * rpmath::kRangeToMm);
+            signal_out[idx] = 1u;
+            refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+            nearir_out[idx] = 0u;
+            return;
+        }
         range_out[idx]  = 0u;
         signal_out[idx] = 0u;
         refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
@@ -281,6 +295,7 @@ void launchRayProcessKernel(
         p.range_noise_min_std, p.range_noise_max_std, p.max_range,
         p.signal_noise_scale, p.nearir_noise_scale,
         p.dropout_rate_close, p.dropout_rate_far,
+        p.false_alarm_rate,
         p.edge_discon_threshold,
         static_cast<curandState *>(d_rand_states));
     CUDA_CHECK(cudaGetLastError());
@@ -347,12 +362,7 @@ public:
         CUDA_CHECK(cudaMemcpyAsync(d_raw_frame_, raw_host,
             static_cast<size_t>(raw_n) * sizeof(float),
             cudaMemcpyHostToDevice, stream_));
-        CUDA_CHECK(cudaMemcpyAsync(d_beam_alt_, beam_alt_host,
-            static_cast<size_t>(rp.H) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
-        CUDA_CHECK(cudaMemcpyAsync(d_beam_az_, beam_az_host,
-            static_cast<size_t>(rp.H) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
+        uploadBeamTables(beam_alt_host, beam_az_host, rp.H);
 
         launchResampleKernel(
             static_cast<const float *>(d_raw_frame_),
@@ -442,12 +452,7 @@ public:
                     sizeof(rc::InstanceXform),
                 cudaMemcpyHostToDevice, stream_));
         }
-        CUDA_CHECK(cudaMemcpyAsync(d_beam_alt_, beam_alt_deg,
-            static_cast<size_t>(sp.H) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
-        CUDA_CHECK(cudaMemcpyAsync(d_beam_az_, beam_az_deg,
-            static_cast<size_t>(sp.H) * sizeof(float),
-            cudaMemcpyHostToDevice, stream_));
+        uploadBeamTables(beam_alt_deg, beam_az_deg, sp.H);
 
         RcCastArgs args;
         for (int i = 0; i < 9; ++i) args.sr[i] = sensor_r[i];
@@ -546,7 +551,30 @@ private:
             realloc_(d_beam_alt_, static_cast<size_t>(H) * sizeof(float));
             realloc_(d_beam_az_,  static_cast<size_t>(H) * sizeof(float));
             beam_buf_n_ = H;
+            beam_src_alt_ = nullptr;  // device buffers changed: re-upload
         }
+    }
+
+    // Beam calibration tables are constant for a sensor's lifetime (derived
+    // from the metadata JSON at construction), so cache them on the device
+    // keyed by source pointer + count instead of re-copying every frame —
+    // transfer minimisation per docs/SYSTEMS_REFERENCES.md. Assumes the
+    // caller's arrays are immutable while the backend lives, which holds for
+    // the plugin's metadata-derived tables.
+    void uploadBeamTables(const float * alt, const float * az, int H)
+    {
+        if (alt == beam_src_alt_ && az == beam_src_az_ && H == beam_src_h_) {
+            return;
+        }
+        CUDA_CHECK(cudaMemcpyAsync(d_beam_alt_, alt,
+            static_cast<size_t>(H) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(d_beam_az_, az,
+            static_cast<size_t>(H) * sizeof(float),
+            cudaMemcpyHostToDevice, stream_));
+        beam_src_alt_ = alt;
+        beam_src_az_ = az;
+        beam_src_h_ = H;
     }
 
     // Retro device buffer is only used by processDepth (the raycast mode
@@ -614,6 +642,10 @@ private:
     void * d_raw_frame_ = nullptr;
     void * d_beam_alt_  = nullptr;
     void * d_beam_az_   = nullptr;
+    // uploadBeamTables cache identity (host source pointers + count).
+    const float * beam_src_alt_ = nullptr;
+    const float * beam_src_az_  = nullptr;
+    int beam_src_h_ = 0;
 
     // Device buffers — raycast scene (cached by scene_version)
     void * d_rc_insts_  = nullptr;

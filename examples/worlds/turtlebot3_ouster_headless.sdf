@@ -105,13 +105,19 @@
       </link>
     </model>
 
-    <!-- Interior obstacles at varied ranges to exercise the depth channels. -->
+    <!-- Interior obstacles at varied ranges to exercise the depth channels.
+         laser_retro = diffuse reflectance for the raycast material model
+         (bright 0.8 / mid 0.5 / dark 0.1, so the reflectivity image shows
+         contrast); the retro_sign's laser_retro > 1 exercises the
+         calibrated reflectivity byte's retroreflective log band. -->
     <model name="box_near">
       <static>true</static>
       <pose>2 0 0.5 0 0 0</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>0.6 0.6 1</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>0.6 0.6 1</size></box></geometry>
+        <visual name="v">
+          <laser_retro>0.8</laser_retro>
+          <geometry><box><size>0.6 0.6 1</size></box></geometry>
           <material><diffuse>0.8 0.2 0.2 1</diffuse></material></visual>
       </link>
     </model>
@@ -120,7 +126,9 @@
       <pose>-1.5 2.5 0.6 0 0 0</pose>
       <link name="link">
         <collision name="c"><geometry><cylinder><radius>0.4</radius><length>1.2</length></cylinder></geometry></collision>
-        <visual name="v"><geometry><cylinder><radius>0.4</radius><length>1.2</length></cylinder></geometry>
+        <visual name="v">
+          <laser_retro>0.5</laser_retro>
+          <geometry><cylinder><radius>0.4</radius><length>1.2</length></cylinder></geometry>
           <material><diffuse>0.2 0.8 0.2 1</diffuse></material></visual>
       </link>
     </model>
@@ -129,8 +137,74 @@
       <pose>-3 -3 0.5 0 0 0.5</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>1 1 1</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>1 1 1</size></box></geometry>
+        <visual name="v">
+          <laser_retro>0.1</laser_retro>
+          <geometry><box><size>1 1 1</size></box></geometry>
           <material><diffuse>0.8 0.7 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="retro_sign">
+      <static>true</static>
+      <pose>4.2 -2 0.8 0 0 1.15</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.5 0.05 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <laser_retro>8.0</laser_retro>
+          <geometry><box><size>0.5 0.05 0.5</size></box></geometry>
+          <material><diffuse>0.95 0.95 0.95 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ── Material-model demo objects (raycast mode) ──────────────────────
+         The raycast material model (docs/MODEL_REFERENCES.md) reads each
+         visual's <laser_retro> (diffuse kd), material <specular> (ks) and
+         <transparency> (τ):
+
+         glass_pane — beams near surface-normal return the pane itself
+           (specular lobe); oblique beams see box_behind_glass through it at
+           weakened intensity (τ² double-pass), per Velas et al.,
+           arXiv:1909.12483.
+         glossy_black_box — dark glossy paint (kd 0.05, ks 0.45): a strong
+           return only when a face points at the sensor, dropout-prone
+           everywhere else — the classic black-car signature. ks stays below
+           the 0.5 mirror threshold so paint does not spawn mirror-ghost
+           bounces (only the glass pane does). -->
+    <model name="glass_pane">
+      <static>true</static>
+      <pose>0 3.5 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2 0.02 1.5</size></box></geometry></collision>
+        <visual name="v">
+          <transparency>0.9</transparency>
+          <geometry><box><size>2 0.02 1.5</size></box></geometry>
+          <material><diffuse>0.8 0.9 1.0 0.3</diffuse>
+            <specular>1.0 1.0 1.0 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="box_behind_glass">
+      <static>true</static>
+      <pose>0 4.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 0.4 1</size></box></geometry></collision>
+        <visual name="v">
+          <laser_retro>0.9</laser_retro>
+          <geometry><box><size>0.8 0.4 1</size></box></geometry>
+          <material><diffuse>0.9 0.9 0.9 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="glossy_black_box">
+      <static>true</static>
+      <pose>-2.5 -1.5 0.4 0 0 0.3</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 0.8 0.8</size></box></geometry></collision>
+        <visual name="v">
+          <laser_retro>0.05</laser_retro>
+          <geometry><box><size>0.8 0.8 0.8</size></box></geometry>
+          <material><diffuse>0.05 0.05 0.05 1</diffuse>
+            <specular>0.45 0.45 0.45 1</specular></material>
+        </visual>
       </link>
     </model>
 
