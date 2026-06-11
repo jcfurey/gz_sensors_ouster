@@ -390,7 +390,8 @@ public:
             rp, stream_);
 
         // The panel rig carries no laser_retro channel — pass null retro so
-        // the kernel uses base_reflectivity / unit intensity.
+        // the kernel uses base_reflectivity / unit intensity (and no NIR
+        // ambient plane: panels mode keeps the legacy near-IR analogue).
         launchRayProcessKernel(
             static_cast<const float *>(d_depth_),
             nullptr,
@@ -400,7 +401,8 @@ public:
             static_cast<uint16_t *>(d_nearir_),
             pp,
             need_rand ? d_rand_states_ : nullptr,
-            stream_);
+            stream_,
+            nullptr);
 
         d2hResults(range_out, signal_out, reflectivity_out, nearir_out, out_n);
         CUDA_CHECK(cudaStreamSynchronize(stream_));
