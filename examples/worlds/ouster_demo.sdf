@@ -61,13 +61,20 @@
       </link>
     </model>
 
-    <!-- Obstacles at increasing range to exercise the depth channels -->
+    <!-- Obstacles at increasing range to exercise the depth channels.
+         <laser_retro> is the diffuse reflectance the raycast material model
+         uses (signal, reflectivity byte, noise weighting and the
+         sqrt(retro/0.8) detection limit — docs/MODEL_REFERENCES.md). Panels
+         mode has no retro channel and ignores it. Values span bright (0.8),
+         mid (0.5) and dark (0.1) so the reflectivity image shows contrast. -->
     <model name="box_near">
       <static>true</static>
       <pose>4 0 0.5 0 0 0</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>1 1 1</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>1 1 1</size></box></geometry>
+        <visual name="v">
+          <laser_retro>0.8</laser_retro>
+          <geometry><box><size>1 1 1</size></box></geometry>
           <material><diffuse>0.8 0.2 0.2 1</diffuse></material></visual>
       </link>
     </model>
@@ -77,7 +84,9 @@
       <pose>0 8 1 0 0 0</pose>
       <link name="link">
         <collision name="c"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry></collision>
-        <visual name="v"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry>
+        <visual name="v">
+          <laser_retro>0.5</laser_retro>
+          <geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry>
           <material><diffuse>0.2 0.8 0.2 1</diffuse></material></visual>
       </link>
     </model>
@@ -87,7 +96,9 @@
       <pose>-12 0 1.5 0 0 0</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>0.4 8 3</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>0.4 8 3</size></box></geometry>
+        <visual name="v">
+          <laser_retro>0.5</laser_retro>
+          <geometry><box><size>0.4 8 3</size></box></geometry>
           <material><diffuse>0.3 0.3 0.8 1</diffuse></material></visual>
       </link>
     </model>
@@ -97,8 +108,25 @@
       <pose>3 -6 0.75 0 0 0.5</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>1.5 1.5 1.5</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>1.5 1.5 1.5</size></box></geometry>
+        <visual name="v">
+          <laser_retro>0.1</laser_retro>
+          <geometry><box><size>1.5 1.5 1.5</size></box></geometry>
           <material><diffuse>0.8 0.7 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Retroreflective sign post: laser_retro > 1 lands in the calibrated
+         reflectivity byte's log band (101-255, like traffic signs / retro
+         tape) and extends its detection limit past max_range. -->
+    <model name="retro_sign">
+      <static>true</static>
+      <pose>-6 6 1.2 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.6 0.05 0.6</size></box></geometry></collision>
+        <visual name="v">
+          <laser_retro>8.0</laser_retro>
+          <geometry><box><size>0.6 0.05 0.6</size></box></geometry>
+          <material><diffuse>0.95 0.95 0.95 1</diffuse></material></visual>
       </link>
     </model>
 
