@@ -476,7 +476,7 @@ All noise model parameters can be changed at runtime via
 | `lidar_hz` | 10.0 | > 0 | Scan rate in Hz. |
 | `max_range` | *auto* | >= 1 | Max sensing range in metres. Auto-derived from metadata `prod_line` if not set (OS0: 50, OS1: 120, OS2: 240). Also sets the GPU far clip plane. |
 | `visibility_mask` | 4294967295 | 0 to 4294967295 | Gazebo render visibility mask applied to the panel cameras. Use to include or exclude visuals from raycasting. |
-| `ray_mode` | `panels` | `panels` \| `raycast` | `panels` renders a perspective depth-panel rig on the GPU and resamples each beam from it. `raycast` casts every beam exactly (calibrated direction, true beam-origin parallax) against an ECM scene mirror — zero interpolation error, `laser_retro` drives reflectivity, no rendering involved (no anchor-sensor requirement). CPU/OpenMP; mirrors box/sphere/cylinder/plane/mesh visuals. |
+| `ray_mode` | `panels` | `panels` \| `raycast` | `panels` renders a perspective depth-panel rig on the GPU and resamples each beam from it. `raycast` casts every beam exactly (calibrated direction, true beam-origin parallax) against an ECM scene mirror — zero interpolation error, `laser_retro × cos(incidence)` drives reflectivity/signal (extended-Lambertian lidar equation, see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md)), no rendering involved (no anchor-sensor requirement). CPU/OpenMP; mirrors box/sphere/cylinder/plane/mesh visuals. |
 | `panel_oversample` | 2.0 | 1 to 4 | Panels mode only. Panel angular resolution as a multiple of the sensor's finest angular resolution. Higher = sharper edges, more VRAM and render time. |
 | `panel_sampling` | `bilinear` | `bilinear` \| `nearest` | `bilinear` interpolates the 4 neighbouring rendered rays (smooth surfaces, but silhouettes blend fore/background range). `nearest` takes the single closest rendered ray — a true raycast with direction quantised to the pixel grid (≤ 1/(2·oversample) of the beam spacing) and no range blending at depth edges. |
 
@@ -776,8 +776,10 @@ mirror (visual geometries extracted once, world poses refreshed per scan,
 spawn/despawn triggers a rebuild) and a worker thread that casts every
 beam exactly against it (`cuda/raycast_scene.{hpp,cpp}`: analytic
 primitives + per-mesh triangle BVH, OpenMP). The worker output is exact
-per-beam ranges plus `laser_retro` per hit, which skips the resample
-kernel and enters the pipeline at the noise stage
+per-beam ranges plus the **apparent reflectance** per hit —
+`laser_retro × cos(incidence)`, the extended-Lambertian lidar-equation
+factor (see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md)) — which
+skips the resample kernel and enters the pipeline at the noise stage
 (`RayProcessor::processDepth`). The ray origins sit on the beam-origin
 circle and the reported range follows the Ouster XYZ-LUT convention, so
 consumers reconstruct the true hit points exactly.
