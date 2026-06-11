@@ -337,7 +337,48 @@ TEST(Raycast, RetroOfNearestHit)
     const auto range = cast(scene, xf, alt, az, scanParams(1, 4), &retro);
 
     EXPECT_NEAR(range[0], 2.5f, 1e-4f);
-    EXPECT_NEAR(retro[0], 1.5f, 1e-6f);  // nearest sphere's laser_retro
+    // Nearest sphere's laser_retro; the beam hits the sphere dead-centre, so
+    // the incidence cosine is 1 and the apparent reflectance is unattenuated.
+    EXPECT_NEAR(retro[0], 1.5f, 1e-6f);
+}
+
+TEST(Raycast, RetroAttenuatedByIncidenceCosine)
+{
+    // Apparent reflectance = laser_retro × cos(incidence) — the extended-
+    // Lambertian lidar equation (see rcCosIncidence).
+    //
+    // Sphere of radius 0.5 offset 0.3 m sideways from the beam axis: the
+    // impact parameter b gives sin(α) = b/r at the first intersection, so
+    // cos(α) = sqrt(1 − (0.3/0.5)²) = 0.8, and the hit lands at
+    // x = 3 − sqrt(r² − b²) = 2.6 m.
+    rc::Scene scene;
+    const float ssize[3] = {0.5f, 0.0f, 0.0f};
+    const int si = scene.addInstance(rc::GeomType::kSphere, ssize, 1.0f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 3.0f, 0.3f, 0.0f)};
+
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> retro;
+    const auto range = cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+
+    EXPECT_NEAR(range[0], 2.6f, 1e-4f);
+    EXPECT_NEAR(retro[0], 0.8f, 1e-4f);
+}
+
+TEST(Raycast, PlaneRetroFollowsGrazingAngle)
+{
+    // Ground plane 1 m below the sensor, beam at −30° elevation:
+    // cos(incidence to the +z normal) = |sin(30°)| = 0.5, range = 1/sin30 = 2.
+    rc::Scene scene;
+    const float psize[3] = {0.0f, 0.0f, 0.0f};  // infinite plane
+    const int pi = scene.addInstance(rc::GeomType::kPlane, psize, 1.0f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, pi, 0.0f, 0.0f, -1.0f)};
+
+    const std::vector<float> alt = {-30.0f}, az = {0.0f};
+    std::vector<float> retro;
+    const auto range = cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+
+    EXPECT_NEAR(range[0], 2.0f, 1e-3f);
+    EXPECT_NEAR(retro[0], 0.5f, 1e-4f);
 }
 
 TEST(Raycast, NearClipSeesThroughCloseHit)

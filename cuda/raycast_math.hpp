@@ -70,6 +70,12 @@ constexpr int kRcBvhStack = 64;
 /// "Infinite" plane half-extent: large enough for any practical world while
 /// keeping AABB corner transforms finite.
 constexpr float kRcHugeExtent = 1.0e6f;
+/// Grazing-incidence floor for the cos(incidence) reflectance factor: keeps
+/// the effective reflectance positive (0 means "retro unset" downstream) and
+/// caps the noise-weighting blow-up at extreme angles, where the Lambertian
+/// cosine model is unreliable anyway (validated only up to ~20° incidence;
+/// Kaasalainen et al., Remote Sens. 3(10), 2011).
+constexpr float kRcMinCosInc = 0.01f;
 
 // ── Small vector helpers ─────────────────────────────────────────────────────
 
@@ -249,11 +255,12 @@ GZ_OUSTER_HD inline float rcHitPlane(RcV3 o, RcV3 d, const float size[3],
 
 /// BVH traversal over the globally rebased arrays. `root` is the mesh's
 /// root node index; `order` holds global triangle indices; `tris` holds
-/// global vertex indices.
+/// global vertex indices. `hit_tri` (optional) receives the global index of
+/// the winning triangle, for normal reconstruction.
 GZ_OUSTER_HD inline float rcHitMesh(
     const float * verts, const int * tris, const int * order,
     const MeshBvhNode * nodes, int root,
-    RcV3 o, RcV3 d, float tmin, float tmax)
+    RcV3 o, RcV3 d, float tmin, float tmax, int * hit_tri = nullptr)
 {
     if (root < 0) return -1.0f;
     float best = -1.0f;
@@ -278,6 +285,7 @@ GZ_OUSTER_HD inline float rcHitMesh(
                 if (t > 0.0f) {
                     best = t;
                     limit = t;
+                    if (hit_tri) *hit_tri = tri;
                 }
             }
         } else if (sp + 2 <= kRcBvhStack) {
@@ -291,7 +299,7 @@ GZ_OUSTER_HD inline float rcHitMesh(
 GZ_OUSTER_HD inline float rcHitInstance(const RcInstance & inst,
     const float * verts, const int * tris, const int * order,
     const MeshBvhNode * nodes,
-    RcV3 o, RcV3 d, float tmin, float tmax)
+    RcV3 o, RcV3 d, float tmin, float tmax, int * hit_tri = nullptr)
 {
     switch (inst.type) {
         case GeomType::kPlane:
@@ -305,15 +313,86 @@ GZ_OUSTER_HD inline float rcHitInstance(const RcInstance & inst,
                                  tmin, tmax);
         case GeomType::kMesh:
             return rcHitMesh(verts, tris, order, nodes, inst.root_node,
-                             o, d, tmin, tmax);
+                             o, d, tmin, tmax, hit_tri);
     }
     return -1.0f;
+}
+
+/// cos of the incidence angle between the (unit) ray direction and the
+/// surface normal at a known hit, computed in the instance-local frame.
+/// Clamped to [kRcMinCosInc, 1].
+///
+/// Used to model the incidence-angle dependence of the received return: for
+/// an extended Lambertian target the lidar equation gives
+/// P_received ∝ ρ · cos(α) / R² — an oblique surface returns less light, so
+/// its apparent reflectance is ρ·cos(α). (Kashani et al., "A Review of LIDAR
+/// Radiometric Processing", Sensors 15(11), 2015; Kaasalainen et al., Remote
+/// Sens. 3(10), 2011; same model as the HELIOS++ simulator, Winiwarter et
+/// al., Remote Sens. Environ. 269, 2022.)
+GZ_OUSTER_HD inline float rcCosIncidence(const RcInstance & inst,
+    const float * verts, const int * tris,
+    RcV3 o_l, RcV3 d_l, float t, int hit_tri)
+{
+    const RcV3 p{o_l.x + t * d_l.x, o_l.y + t * d_l.y, o_l.z + t * d_l.z};
+    RcV3 n{0.0f, 0.0f, 1.0f};
+    switch (inst.type) {
+        case GeomType::kPlane:
+            break;  // n = +z by construction
+        case GeomType::kBox: {
+            // The hit face is the axis where |p_i| reaches its half-extent
+            // first (largest normalised coordinate).
+            const float rx = rpmath::gzm::fabs_(p.x) /
+                             rpmath::gzm::fmax_(inst.size[0], 1.0e-12f);
+            const float ry = rpmath::gzm::fabs_(p.y) /
+                             rpmath::gzm::fmax_(inst.size[1], 1.0e-12f);
+            const float rz = rpmath::gzm::fabs_(p.z) /
+                             rpmath::gzm::fmax_(inst.size[2], 1.0e-12f);
+            if (rx >= ry && rx >= rz) {
+                n = RcV3{1.0f, 0.0f, 0.0f};
+            } else if (ry >= rz) {
+                n = RcV3{0.0f, 1.0f, 0.0f};
+            } else {
+                n = RcV3{0.0f, 0.0f, 1.0f};
+            }
+            break;
+        }
+        case GeomType::kSphere:
+            n = p;  // radial; normalised via |n| below
+            break;
+        case GeomType::kCylinder: {
+            // Cap if the hit sits at an end disc, else the lateral surface.
+            const float half_len = inst.size[1];
+            if (rpmath::gzm::fabs_(p.z) >= half_len * (1.0f - 1.0e-4f)) {
+                n = RcV3{0.0f, 0.0f, 1.0f};
+            } else {
+                n = RcV3{p.x, p.y, 0.0f};
+            }
+            break;
+        }
+        case GeomType::kMesh: {
+            if (hit_tri < 0) return 1.0f;
+            const int * idx = &tris[3 * hit_tri];
+            const RcV3 v0{verts[3 * idx[0]], verts[3 * idx[0] + 1],
+                          verts[3 * idx[0] + 2]};
+            const RcV3 v1{verts[3 * idx[1]], verts[3 * idx[1] + 1],
+                          verts[3 * idx[1] + 2]};
+            const RcV3 v2{verts[3 * idx[2]], verts[3 * idx[2] + 1],
+                          verts[3 * idx[2] + 2]};
+            n = rcCross(rcSub(v1, v0), rcSub(v2, v0));
+            break;
+        }
+    }
+    const float nn = rpmath::gzm::sqrt_(rcDot(n, n));
+    if (nn < 1.0e-12f) return 1.0f;  // degenerate normal: no attenuation
+    const float c = rpmath::gzm::fabs_(rcDot(d_l, n)) / nn;
+    return rpmath::gzm::fmin_(rpmath::gzm::fmax_(c, kRcMinCosInc), 1.0f);
 }
 
 /// Cast one output pixel (beam × measurement id) against the whole scene.
 /// Writes the reported Ouster range (metres; `inf_value` for a miss — the
 /// value satisfying the XYZ-LUT reconstruction, see castScan docs) and the
-/// nearest hit's laser_retro (0 on a miss).
+/// nearest hit's APPARENT reflectance: laser_retro × cos(incidence)
+/// (0 on a miss, or when laser_retro is unset).
 GZ_OUSTER_HD inline void rcCastOneRay(
     const RcInstance * instances, int n_instances,
     const float * verts, const int * tris, const int * order,
@@ -353,23 +432,37 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     const float tmin = sp.near_clip;
     float best = sp.max_range - n_off;  // current nearest hit (ray param)
     int best_inst = -1;
+    int best_tri = -1;
 
     for (int i = 0; i < n_instances; ++i) {
         const InstanceXform & x = xforms[i];
         if (!rcHitAabb(o, d, x.bmin, x.bmax, tmin, best)) continue;
         const RcV3 o_l = rcXformPoint(x.r, x.t, o);
         const RcV3 d_l = rcRotate(x.r, d);
+        int tri = -1;
         const float t = rcHitInstance(instances[i], verts, tris, order,
-                                      nodes, o_l, d_l, tmin, best);
+                                      nodes, o_l, d_l, tmin, best, &tri);
         if (t > 0.0f && t < best) {
             best = t;
             best_inst = i;
+            best_tri = tri;
         }
     }
 
     if (best_inst >= 0) {
         range_out = best + n_off;
-        retro_out = instances[best_inst].retro;
+        // Apparent reflectance = laser_retro × cos(incidence): an extended
+        // Lambertian target returns P ∝ ρ·cos(α)/R² (see rcCosIncidence), so
+        // folding the cosine in here makes the downstream signal,
+        // reflectivity byte and noise weighting all respond to oblique
+        // surfaces the way a real return does. laser_retro == 0 ("unset")
+        // stays 0 and keeps its base_reflectivity fallback downstream.
+        const InstanceXform & xb = xforms[best_inst];
+        const RcV3 o_b = rcXformPoint(xb.r, xb.t, o);
+        const RcV3 d_b = rcRotate(xb.r, d);
+        const float cos_inc = rcCosIncidence(
+            instances[best_inst], verts, tris, o_b, d_b, best, best_tri);
+        retro_out = instances[best_inst].retro * cos_inc;
     } else {
         range_out = inf_value;
         retro_out = 0.0f;
