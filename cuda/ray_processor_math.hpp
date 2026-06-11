@@ -167,6 +167,20 @@ GZ_OUSTER_HD inline int panelForDirection(const ResampleParams & rp,
     return -1;
 }
 
+/// Per-beam ray azimuth (degrees) for output column m, where m is the Ouster
+/// measurement id: m = 0 points forward (+x) and azimuth decreases with m
+/// (clockwise encoder), matching the hardware column ↔ encoder-angle
+/// convention. beam_azimuth is SUBTRACTED to match the Ouster SDK XYZ LUT
+/// (xyzlut.cpp: azimuth = -beam_azimuth_angles; direction =
+/// cos(encoder + azimuth) = cos(encoder - beam_az)); the opposite sign lands
+/// each return 2*beam_az away from where os_cloud reconstructs it, splitting
+/// every object into one arc per beam-azimuth group (4 for OS1-64).
+GZ_OUSTER_HD inline float beamRayAzimuthDeg(
+    float beam_az_deg, int m, float deg_per_col)
+{
+    return -beam_az_deg - static_cast<float>(m) * deg_per_col;
+}
+
 /// Resample one beam ray from the panel rig: bilinear on planar depth in the
 /// covering panel, then divide by the ray cosine to recover range along the
 /// beam. Returns `inf_value` for misses, clipped pixels and uncovered rays.

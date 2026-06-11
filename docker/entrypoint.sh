@@ -22,11 +22,12 @@ shift || true
 case "$cmd" in
   smoke)
     echo "[entrypoint] headless raycast smoke: launching sim..."
-    ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py \
+    # setsid makes the launch a process-group leader so the group kill below
+    # reliably reaps the whole gz/ros2 tree, however we leave.
+    setsid ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py \
       headless:=true ray_mode:=raycast rviz:=false &
     launch_pid=$!
-    # Kill the whole launch process group on exit, however we leave.
-    trap 'kill -- -'"$launch_pid"' 2>/dev/null || kill "$launch_pid" 2>/dev/null || true' EXIT
+    trap 'kill -- "-$launch_pid" 2>/dev/null || kill "$launch_pid" 2>/dev/null || true' EXIT
 
     set +e
     python3 "/ws/src/gz_sensors_ouster/docker/smoke_check.py" \
@@ -41,10 +42,10 @@ case "$cmd" in
     # Both bring up RViz by default; disable with `-e RVIZ=false` (note: docker
     # -e flags go BEFORE the image name). drive also runs teleop in the
     # foreground; gui just shows the windows.
-    ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py \
+    setsid ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py \
       headless:=false ray_mode:="${RAY_MODE:-raycast}" rviz:="${RVIZ:-true}" &
     launch_pid=$!
-    trap 'kill -- -'"$launch_pid"' 2>/dev/null || kill "$launch_pid" 2>/dev/null || true' EXIT
+    trap 'kill -- "-$launch_pid" 2>/dev/null || kill "$launch_pid" 2>/dev/null || true' EXIT
     sleep 5
     if [ "$cmd" = "drive" ]; then
       echo "[entrypoint] drive with the teleop keys."

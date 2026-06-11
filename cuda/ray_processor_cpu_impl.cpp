@@ -164,11 +164,8 @@ void processRawCpu(
         const int m    = idx % W;
 
         const float el = beam_alt_host[beam];
-        // beam_azimuth SUBTRACTED to match the Ouster XYZ LUT (azimuth =
-        // -beam_azimuth); adding it fans each object into one copy per
-        // beam-azimuth group.
-        const float az = -beam_az_host[beam] -
-            static_cast<float>(m) * deg_per_col;
+        const float az =
+            rpmath::beamRayAzimuthDeg(beam_az_host[beam], m, deg_per_col);
 
         float depth = rpmath::sampleBeamRange(raw_host, rp, el, az, kInf);
         depth = rpmath::applyBeamOrigin(depth, el, rp.beam_origin_m);

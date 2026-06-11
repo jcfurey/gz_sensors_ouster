@@ -24,7 +24,7 @@
 #
 # Only the CUDA *toolkit* (nvcc/cudart/curand) is baked in; the GPU driver comes
 # from the host at run time (nvidia-container-toolkit) — no host CUDA install
-# beyond the driver, and no dependency on the rovermax_ws image.
+# beyond the driver.
 #
 # Distros: jazzy (Harmonic), kilted (Ionic), lyrical (Jetty). Humble is NOT
 # supported (no gz_*_vendor; it ships Gazebo Fortress, not Harmonic+). CUDA is
@@ -146,11 +146,15 @@ COPY . src/gz_sensors_ouster
 # ── system deps via rosdep ────────────────────────────────────────────────────
 # `rosdep update` pulls the rosdistro index from raw.githubusercontent.com, which
 # intermittently resets the connection; retry a few times so a flaky network
-# doesn't fail the whole build.
-RUN for i in 1 2 3 4 5; do \
-      rosdep update --rosdistro=${ROS_DISTRO} && break; \
+# doesn't fail the whole build, but fail loudly once retries are exhausted
+# (falling through surfaces as confusing unresolvable-key errors from
+# rosdep install instead).
+RUN ok=""; \
+    for i in 1 2 3 4 5; do \
+      rosdep update --rosdistro=${ROS_DISTRO} && { ok=1; break; }; \
       echo "rosdep update failed (attempt $i); retrying in 10s..."; sleep 10; \
-    done \
+    done; \
+    [ -n "$ok" ] || { echo "ERROR: rosdep update failed after 5 attempts."; exit 1; } \
  && apt-get update -qq \
  && rosdep install --from-paths src --rosdistro=${ROS_DISTRO} -y --ignore-src \
  && rm -rf /var/lib/apt/lists/*
@@ -170,8 +174,7 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
  && source install/setup.bash \
  && colcon test --packages-select gz_sensors_ouster --event-handlers console_direct+ \
  && colcon test-result --verbose --all \
- && summary="$(colcon test-result --all | grep -E '^Summary:' || true)" \
- && n="$(printf '%s' "$summary" | grep -oE '[0-9]+ test' | grep -oE '[0-9]+' | head -1)" \
+ && n="$(colcon test-result --all | awk '/^Summary:/ {print $2 + 0; exit}')" \
  && { [ -n "$n" ] && [ "$n" -gt 0 ]; } || { echo "ERROR: no tests ran (BUILD_TESTING wiring broken)"; exit 1; } \
  && echo "Executed $n test(s)."
 
