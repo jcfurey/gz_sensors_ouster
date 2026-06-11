@@ -691,7 +691,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
 
     const bool raycast = (ray_mode_ == "raycast");
     const int expected_n =
-        raycast ? 2 * H * W
+        raycast ? 3 * H * W
                 : (rig_ ? rig_->resampleParams().raw_n : 0);
     if (raw_n != expected_n) {
         if (ros_->clock()) {
@@ -763,7 +763,8 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
                 signal_buf_.data(),
                 reflectivity_buf_.data(),
                 nearir_buf_.data(),
-                pp);
+                pp,
+                raw_data + 2 * static_cast<size_t>(H) * W);
         } else {
             ray_processor_->processRaw(
                 raw_data,

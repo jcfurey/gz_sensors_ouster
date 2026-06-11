@@ -12,6 +12,7 @@
 
 #include <gz/sim/components/Geometry.hh>
 #include <gz/sim/components/LaserRetro.hh>
+#include <gz/sim/components/Light.hh>
 #include <gz/sim/components/Material.hh>
 #include <gz/sim/components/Transparency.hh>
 #include <gz/sim/components/Visual.hh>
@@ -366,6 +367,33 @@ void RaycastMirror::postUpdate(
         buildColumnPoses(sim_now, col_r, col_t);
     }
 
+    // Sun for the NEAR_IR ambient model: first directional light in the
+    // world (propagation direction rotated to world frame, diffuse mean as
+    // intensity). Ouster's NEAR_IR counts ambient sunlight reflected off
+    // the scene; with no sun the channel falls back to ambient-only
+    // (nir = albedo). Weights: 0.3 ambient + 0.7·diffuse sun keeps
+    // nir ∈ [0, albedo] like the legacy analogue.
+    float sun[5] = {0.0f, 0.0f, -1.0f, 0.0f, 1.0f};
+    ecm.Each<::gz::sim::components::Light>(
+        [&](const ::gz::sim::Entity & ent,
+            const ::gz::sim::components::Light * light) -> bool {
+            if (light->Data().Type() != sdf::LightType::DIRECTIONAL) {
+                return true;
+            }
+            auto dir = ::gz::sim::worldPose(ent, ecm).Rot().RotateVector(
+                light->Data().Direction());
+            dir.Normalize();
+            const auto & c = light->Data().Diffuse();
+            const float diffuse = static_cast<float>(
+                (c.R() + c.G() + c.B()) / 3.0);
+            sun[0] = static_cast<float>(dir.X());
+            sun[1] = static_cast<float>(dir.Y());
+            sun[2] = static_cast<float>(dir.Z());
+            sun[3] = 0.7f * ((diffuse < 1.0f) ? diffuse : 1.0f);
+            sun[4] = 0.3f;
+            return false;  // first directional light wins
+        });
+
     {
         std::lock_guard<std::mutex> lk(mtx_);
         job_scene_ = scene_;
@@ -374,6 +402,7 @@ void RaycastMirror::postUpdate(
         poseToRT(sensor_pose, job_sensor_r_, job_sensor_t_);
         job_col_r_ = std::move(col_r);
         job_col_t_ = std::move(col_t);
+        std::memcpy(job_sun_, sun, sizeof(sun));
         job_ready_ = true;
     }
     cv_.notify_one();
@@ -386,7 +415,7 @@ void RaycastMirror::threadFunc()
         std::vector<rc::InstanceXform> xforms;
         std::vector<float> col_r, col_t;
         uint64_t version = 0;
-        float sr[9], st[3];
+        float sr[9], st[3], sun[5];
         {
             std::unique_lock<std::mutex> lk(mtx_);
             cv_.wait(lk, [this] {
@@ -402,11 +431,12 @@ void RaycastMirror::threadFunc()
             col_t = std::move(job_col_t_);
             std::memcpy(sr, job_sensor_r_, sizeof(sr));
             std::memcpy(st, job_sensor_t_, sizeof(st));
+            std::memcpy(sun, job_sun_, sizeof(sun));
         }
         if (!scene || !proc_) continue;
 
         const int n = params_.H * params_.W;
-        out_.resize(static_cast<size_t>(2 * n));
+        out_.resize(static_cast<size_t>(3 * n));
 
         rc::ScanParams sp;
         sp.H = params_.H;
@@ -414,6 +444,11 @@ void RaycastMirror::threadFunc()
         sp.max_range = static_cast<float>(params_.max_range);
         sp.near_clip = static_cast<float>(kNearClip);
         sp.beam_origin_m = static_cast<float>(params_.beam_origin_mm / 1000.0);
+        sp.sun_dir[0] = sun[0];
+        sp.sun_dir[1] = sun[1];
+        sp.sun_dir[2] = sun[2];
+        sp.sun_diffuse = sun[3];
+        sp.sun_ambient = sun[4];
 
         // Cast on the active backend — CUDA/HIP/SYCL kernel, or the
         // OpenMP CPU fallback (identical shared math). proc_mtx_
@@ -426,10 +461,11 @@ void RaycastMirror::threadFunc()
                             sr, st, sp,
                             out_.data(), out_.data() + n,
                             col_r.empty() ? nullptr : col_r.data(),
-                            col_t.empty() ? nullptr : col_t.data());
+                            col_t.empty() ? nullptr : col_t.data(),
+                            out_.data() + 2 * n);
         }
 
-        if (exch_->publish(out_, 2 * n)) {
+        if (exch_->publish(out_, 3 * n)) {
             RCLCPP_WARN_THROTTLE(kLogger, throttle_clock_, 5000,
                 "%s: dropped raycast frame (PostUpdate didn't drain); "
                 "total dropped=%lu", sensor_name_.c_str(),

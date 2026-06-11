@@ -65,6 +65,15 @@ struct ScanParams {
     float max_range = 120.0f;  ///< metres; hits beyond this are misses
     float near_clip = 0.3f;    ///< metres; hits closer than this are ignored
     float beam_origin_m = 0.0f;  ///< lidar-origin→beam-origin offset (metres)
+    // Ambient-illumination model for the NEAR_IR channel (Ouster NIR counts
+    // ambient sunlight reflected off the scene, not laser return):
+    // nir = albedo · (sun_ambient + sun_diffuse · max(0, n̂·(−ŝ))), where ŝ
+    // is the sun's PROPAGATION direction (gz convention) and n̂ the
+    // sensor-facing surface normal. Defaults (no directional light in the
+    // world): ambient-only, nir = albedo.
+    float sun_dir[3] = {0.0f, 0.0f, -1.0f};  ///< propagation direction (unit)
+    float sun_diffuse = 0.0f;  ///< sun term weight (0 = no sun)
+    float sun_ambient = 1.0f;  ///< ambient term weight
 };
 
 constexpr float kRcTriEps = 1.0e-8f;
@@ -514,7 +523,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     const float * sensor_r, const float * sensor_t,
     const ScanParams & sp, int idx, float inf_value,
     float & range_out, float & retro_out,
-    const float * col_r = nullptr, const float * col_t = nullptr)
+    const float * col_r = nullptr, const float * col_t = nullptr,
+    float * nir_out = nullptr)
 {
     const int beam = idx / sp.W;
     const int m = idx % sp.W;
@@ -558,8 +568,15 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     if (inst0 < 0) {
         range_out = inf_value;
         retro_out = 0.0f;
+        if (nir_out) *nir_out = 0.0f;
         return;
     }
+
+    // Winning candidate's hit data, for the NEAR_IR ambient model below
+    // (surface candidate adopts first; transmission/ghost override on win).
+    int w_inst = inst0, w_tri = tri0;
+    RcV3 w_o = o, w_d = d;
+    float w_t = t0;
 
     // Apparent reflectance of the front surface: kd·cos(α) + ks·cos(2α)⁸
     // (see rcApparentReflectance) — the extended-Lambertian lidar equation
@@ -599,6 +616,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
             if (rho1 * range * range > rho * range1 * range1) {
                 rho = rho1;
                 range = range1;
+                w_inst = inst1; w_tri = tri1;
+                w_o = p; w_d = d; w_t = t1;
             }
         }
     }
@@ -648,6 +667,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                 if (rho2 * range * range > rho * range2 * range2) {
                     rho = rho2;
                     range = range2;
+                    w_inst = inst2; w_tri = tri2;
+                    w_o = g0; w_d = refl; w_t = t2;
                 }
             }
         }
@@ -655,6 +676,35 @@ GZ_OUSTER_HD inline void rcCastOneRay(
 
     range_out = range;
     retro_out = rho;
+
+    // NEAR_IR ambient factor at the winning hit: albedo × Lambert sun term
+    // (view-independent — ambient radiance off a Lambertian surface does not
+    // depend on the sensor's incidence angle, unlike the laser return; see
+    // ScanParams sun fields and docs/MODEL_REFERENCES.md §6).
+    if (nir_out) {
+        const InstanceXform & xw = xforms[w_inst];
+        const RcV3 o_l = rcXformPoint(xw.r, xw.t, w_o);
+        const RcV3 d_l = rcRotate(xw.r, w_d);
+        const RcV3 p_l{o_l.x + w_t * d_l.x, o_l.y + w_t * d_l.y,
+                       o_l.z + w_t * d_l.z};
+        const RcV3 n_l = rcSurfaceNormalLocal(instances[w_inst], verts, tris,
+                                              p_l, w_tri);
+        float illum = sp.sun_ambient;
+        const float nn = rpmath::gzm::sqrt_(rcDot(n_l, n_l));
+        if (sp.sun_diffuse > 0.0f && nn > 1.0e-12f) {
+            RcV3 n_w = rcRotateT(xw.r, n_l);
+            n_w = RcV3{n_w.x / nn, n_w.y / nn, n_w.z / nn};
+            // Orient the normal toward the sensor (the visible side).
+            if (rcDot(n_w, w_d) > 0.0f) {
+                n_w = RcV3{-n_w.x, -n_w.y, -n_w.z};
+            }
+            const float lambert = -(n_w.x * sp.sun_dir[0] +
+                                    n_w.y * sp.sun_dir[1] +
+                                    n_w.z * sp.sun_dir[2]);
+            illum += sp.sun_diffuse * rpmath::gzm::fmax_(lambert, 0.0f);
+        }
+        *nir_out = instances[w_inst].retro * illum;
+    }
 }
 
 }  // namespace rc

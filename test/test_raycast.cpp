@@ -497,6 +497,43 @@ TEST(Raycast, NearClipSeesThroughCloseHit)
     EXPECT_NEAR(range[0], 9.0f, 1e-4f);
 }
 
+TEST(Raycast, SunDrivenNearIrFactor)
+{
+    // NEAR_IR ambient model: nir = albedo·(ambient + diffuse·max(0, n̂·(−ŝ)))
+    // with ŝ the sun's propagation direction. Ground plane 1 m below the
+    // sensor (normal +z), beam at −30° elevation, albedo 1.
+    rc::Scene scene;
+    const float psize[3] = {0.0f, 0.0f, 0.0f};
+    const int pi = scene.addInstance(rc::GeomType::kPlane, psize, 1.0f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, pi, 0.0f, 0.0f, -1.0f)};
+
+    const std::vector<float> alt = {-30.0f}, az = {0.0f};
+    std::vector<float> range(4), nir(4);
+
+    // Sun straight down (ŝ = −z): Lambert term 1 → nir = 0.3 + 0.7 = 1.
+    auto sp = scanParams(1, 4);
+    sp.sun_dir[0] = 0.0f; sp.sun_dir[1] = 0.0f; sp.sun_dir[2] = -1.0f;
+    sp.sun_diffuse = 0.7f;
+    sp.sun_ambient = 0.3f;
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, sp, range.data(), nullptr,
+                 nullptr, nullptr, nir.data());
+    EXPECT_NEAR(nir[0], 1.0f, 1e-4f);
+
+    // Sun on the horizon (ŝ = +x): Lambert term 0 → ambient only, 0.3.
+    sp.sun_dir[0] = 1.0f; sp.sun_dir[1] = 0.0f; sp.sun_dir[2] = 0.0f;
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, sp, range.data(), nullptr,
+                 nullptr, nullptr, nir.data());
+    EXPECT_NEAR(nir[0], 0.3f, 1e-4f);
+
+    // Default ScanParams (no sun configured): ambient-only, nir = albedo.
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, scanParams(1, 4), range.data(), nullptr,
+                 nullptr, nullptr, nir.data());
+    EXPECT_NEAR(nir[0], 1.0f, 1e-4f);
+}
+
 TEST(Raycast, MotionDistortionPerColumnPoses)
 {
     // Rolling-shutter motion distortion: each column casts from its own

@@ -51,7 +51,8 @@ public:
         uint16_t *    signal_out,
         uint8_t *     reflectivity_out,
         uint16_t *    nearir_out,
-        const RayProcessParams & pp) = 0;
+        const RayProcessParams & pp,
+        const float * nir_host) = 0;
 
     /// Full per-beam raycast: cast every Ouster beam exactly against the
     /// flat scene (shared rcCastOneRay — identical math on every backend).
@@ -73,7 +74,8 @@ public:
         float * range_out,
         float * retro_out,
         const float * col_r,
-        const float * col_t) = 0;
+        const float * col_t,
+        float * nir_out) = 0;
 
     /// Short identifier: "cuda", "hip", "sycl", or "cpu".
     virtual const char * name() const = 0;

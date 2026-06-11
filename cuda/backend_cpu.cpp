@@ -41,11 +41,12 @@ public:
         uint16_t *    signal_out,
         uint8_t *     reflectivity_out,
         uint16_t *    nearir_out,
-        const RayProcessParams & pp) override
+        const RayProcessParams & pp,
+        const float * nir_host) override
     {
         processCpu(depth_host, retro_host,
                    range_out, signal_out, reflectivity_out, nearir_out,
-                   pp, seed_);
+                   pp, seed_, nir_host);
     }
 
     void castScan(
@@ -60,12 +61,13 @@ public:
         float * range_out,
         float * retro_out,
         const float * col_r,
-        const float * col_t) override
+        const float * col_t,
+        float * nir_out) override
     {
         // OpenMP-parallel reference implementation; no upload, no cache.
         rc::castScan(scene, xforms, beam_alt_deg, beam_az_deg,
                      sensor_r, sensor_t, sp, range_out, retro_out,
-                     col_r, col_t);
+                     col_r, col_t, nir_out);
     }
 
     const char * name() const override { return "cpu"; }

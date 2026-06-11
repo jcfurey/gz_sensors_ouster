@@ -133,8 +133,14 @@ percent for diffuse targets, compressed band for retroreflectors):
 
 ### 6. Near-IR channel semantics
 
-**Model:** `near_ir = ρ · kNearIrScale`, range-independent, in the backend
-noise stage.
+**Model (raycast mode):** `near_ir = albedo · (a + d·max(0, n̂·(−ŝ)))
+· kNearIrScale` — the surface's diffuse albedo (`laser_retro`) under a
+Lambert sun term, where ŝ is the world's first directional light
+(propagation direction, diffuse mean as intensity; weights a = 0.3,
+d = 0.7·intensity). No directional light → ambient-only `albedo·1`.
+Computed per hit at cast time (the normal is available there) and carried
+as a third frame plane into the noise stage. Panels mode keeps the legacy
+`ρ·kNearIrScale` analogue. Range-independent in both cases.
 
 Ouster's NEAR_IR channel counts **ambient** near-infrared photons (sunlight
 reflected off the scene — "the camera in the lidar"), not laser return. Two
@@ -147,11 +153,11 @@ with range** — hence deliberately no 1/R² here:
 - Ouster blog — *Lidar as a camera*.
   <https://ouster.com/insights/blog/the-camera-is-in-the-lidar>
 
-Unmodeled: actual sun illumination/shadowing (a sim sun model would be
-needed); the sensor-incidence cosine folded into ρ_app in raycast mode is a
-slight mis-model for this one channel (ambient Lambertian radiance does not
-depend on the *viewing* angle), accepted to keep one reflectance value per
-return.
+The dedicated albedo factor also removes the earlier caveat of the
+sensor-incidence cosine leaking into this channel via ρ_app: ambient
+Lambertian radiance is view-independent, and the NIR plane now uses the raw
+albedo with only the sun-incidence Lambert term. Unmodeled: shadows (no
+occlusion ray toward the sun) and sky background on misses.
 
 ### 7. IMU noise — white noise density + bias random walk
 
@@ -273,7 +279,7 @@ Ordered roughly by expected impact on downstream perception realism.
 | Multi-return / full waveform | Second returns through vegetation, edge splits. | Winiwarter et al. 2022 |
 | Incidence angle in panels mode | Depth-image normals (from gradients) could approximate cos(α); currently panels mode applies no incidence factor. | §1 references |
 | Retroreflective BRDF | Retroreflectors (ρ > 1) are *angle-insensitive* (corner cubes return along the incident path); §8's diffuse+specular split still attenuates them by cos(α). | Kashani et al. 2015 |
-| Sun model for NEAR_IR | Scene illumination, shadows, sky background. | §6 references |
+| NEAR_IR shadows / sky | §6 models the sun's Lambert term but casts no shadow ray (surfaces in shadow still read lit) and misses report 0 instead of sky background. | §6 references |
 | Range walk | Amplitude-dependent timing bias (strong returns trigger earlier). | Hu et al. 2018 |
 
 ## Further reading — the lidar-simulation landscape

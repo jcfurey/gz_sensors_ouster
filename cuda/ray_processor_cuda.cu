@@ -118,18 +118,21 @@ __global__ void castScanKernel(
     float * __restrict__ range_out,
     float * __restrict__ retro_out,
     const float * __restrict__ col_r,   // per-column poses (motion
-    const float * __restrict__ col_t)   // distortion); may be nullptr
+    const float * __restrict__ col_t,   // distortion); may be nullptr
+    float * __restrict__ nir_out)       // NEAR_IR ambient; may be nullptr
 {
     const int n = args.sp.H * args.sp.W;
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
 
-    float range, retro;
+    float range, retro, nirv;
     rc::rcCastOneRay(instances, args.n_instances, verts, tris, order, nodes,
                      xforms, beam_alt, beam_az, args.sr, args.st, args.sp,
-                     idx, CUDART_INF_F, range, retro, col_r, col_t);
+                     idx, CUDART_INF_F, range, retro, col_r, col_t,
+                     nir_out ? &nirv : nullptr);
     range_out[idx] = range;
     retro_out[idx] = retro;
+    if (nir_out) nir_out[idx] = nirv;
 }
 
 /// Process depth + retro → range_mm, signal, reflectivity.
@@ -163,6 +166,7 @@ __global__ void rayProcessKernel(
     float dropout_rate_far,
     float false_alarm_rate,
     float edge_discon_threshold,
+    const float * __restrict__   nir_in,  // NEAR_IR ambient; may be nullptr
     curandState * __restrict__   rand_states)
 {
     const int n = H * W;
@@ -265,9 +269,16 @@ __global__ void rayProcessKernel(
         refl_out[idx] = static_cast<uint8_t>(base_reflectivity);
     }
 
-    // ── Near-IR: retro → uint16 photon-count analogue with Poisson noise ────
-    float nir = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
-        ? retro[idx] * rpmath::kNearIrScale : 0.f;
+    // ── Near-IR: ambient factor (or legacy retro) → uint16 photon-count
+    //    analogue with Poisson noise ─────────────────────────────────────────
+    float nir;
+    if (nir_in != nullptr) {
+        nir = (isfinite(nir_in[idx]) && nir_in[idx] > 0.f)
+            ? nir_in[idx] * rpmath::kNearIrScale : 0.f;
+    } else {
+        nir = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
+            ? retro[idx] * rpmath::kNearIrScale : 0.f;
+    }
     if (rs != nullptr && nearir_noise_scale > 0.f && nir > 0.f) {
         float sigma_nir = sqrtf(fmaxf(nir, 0.f)) * nearir_noise_scale;
         nir = fmaxf(nir + curand_normal(rs) * sigma_nir, 0.f);
@@ -286,7 +297,8 @@ void launchRayProcessKernel(
     uint16_t *    d_nearir,
     const RayProcessParams & p,
     void *        d_rand_states,
-    void *        stream)
+    void *        stream,
+    const float * d_nir_in)
 {
     const int n = p.H * p.W;
     const int grid = (n + kBlock - 1) / kBlock;
@@ -299,6 +311,7 @@ void launchRayProcessKernel(
         p.dropout_rate_close, p.dropout_rate_far,
         p.false_alarm_rate,
         p.edge_discon_threshold,
+        d_nir_in,
         static_cast<curandState *>(d_rand_states));
     CUDA_CHECK(cudaGetLastError());
 }
@@ -329,6 +342,7 @@ public:
         if (d_refl_)        cudaFree(d_refl_);
         if (d_nearir_)      cudaFree(d_nearir_);
         if (d_raw_frame_)   cudaFree(d_raw_frame_);
+        if (d_nir_f_)       cudaFree(d_nir_f_);
         if (d_col_r_)       cudaFree(d_col_r_);
         if (d_col_t_)       cudaFree(d_col_t_);
         if (d_beam_alt_)    cudaFree(d_beam_alt_);
@@ -399,7 +413,8 @@ public:
         uint16_t *    signal_out,
         uint8_t *     reflectivity_out,
         uint16_t *    nearir_out,
-        const RayProcessParams & pp) override
+        const RayProcessParams & pp,
+        const float * nir_host) override
     {
         const int out_n = pp.H * pp.W;
         ensureBuffers(out_n);
@@ -416,6 +431,12 @@ public:
                 static_cast<size_t>(out_n) * sizeof(float),
                 cudaMemcpyHostToDevice, stream_));
         }
+        if (nir_host) {
+            ensureNirBuffer(out_n);
+            CUDA_CHECK(cudaMemcpyAsync(d_nir_f_, nir_host,
+                static_cast<size_t>(out_n) * sizeof(float),
+                cudaMemcpyHostToDevice, stream_));
+        }
 
         launchRayProcessKernel(
             static_cast<const float *>(d_depth_),
@@ -426,7 +447,8 @@ public:
             static_cast<uint16_t *>(d_nearir_),
             pp,
             need_rand ? d_rand_states_ : nullptr,
-            stream_);
+            stream_,
+            nir_host ? static_cast<const float *>(d_nir_f_) : nullptr);
 
         d2hResults(range_out, signal_out, reflectivity_out, nearir_out, out_n);
         CUDA_CHECK(cudaStreamSynchronize(stream_));
@@ -444,9 +466,11 @@ public:
         float * range_out,
         float * retro_out,
         const float * col_r,
-        const float * col_t) override
+        const float * col_t,
+        float * nir_out) override
     {
         const int out_n = sp.H * sp.W;
+        if (nir_out) ensureNirBuffer(out_n);
         ensureBuffers(out_n);
         ensureRetroBuffer(out_n);
         ensureSceneBuffers(scene, scene_version);
@@ -492,7 +516,8 @@ public:
             static_cast<float *>(d_depth_),
             static_cast<float *>(d_retro_),
             have_cols ? static_cast<const float *>(d_col_r_) : nullptr,
-            have_cols ? static_cast<const float *>(d_col_t_) : nullptr);
+            have_cols ? static_cast<const float *>(d_col_t_) : nullptr,
+            nir_out ? static_cast<float *>(d_nir_f_) : nullptr);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cudaMemcpyAsync(range_out, d_depth_,
@@ -501,6 +526,11 @@ public:
         CUDA_CHECK(cudaMemcpyAsync(retro_out, d_retro_,
             static_cast<size_t>(out_n) * sizeof(float),
             cudaMemcpyDeviceToHost, stream_));
+        if (nir_out) {
+            CUDA_CHECK(cudaMemcpyAsync(nir_out, d_nir_f_,
+                static_cast<size_t>(out_n) * sizeof(float),
+                cudaMemcpyDeviceToHost, stream_));
+        }
         CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 
@@ -607,6 +637,14 @@ private:
         retro_n_ = n;
     }
 
+    // NEAR_IR ambient-factor plane (float, in and out); lazy.
+    void ensureNirBuffer(int n)
+    {
+        if (n <= nir_f_n_) return;
+        realloc_(d_nir_f_, static_cast<size_t>(n) * sizeof(float));
+        nir_f_n_ = n;
+    }
+
     // Per-column pose tables (motion distortion); lazy — the static-pose
     // path pays nothing for them.
     void ensureColPoseBuffers(int W)
@@ -675,6 +713,8 @@ private:
     void * d_col_r_ = nullptr;   // per-column pose tables (motion distortion)
     void * d_col_t_ = nullptr;
     int col_pose_n_ = 0;
+    void * d_nir_f_ = nullptr;   // NEAR_IR ambient plane (float)
+    int nir_f_n_ = 0;
     // uploadBeamTables cache identity (host source pointers + count).
     const float * beam_src_alt_ = nullptr;
     const float * beam_src_az_  = nullptr;

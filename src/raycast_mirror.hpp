@@ -121,6 +121,10 @@ private:
     float job_sensor_t_[3] = {0, 0, 0};
     std::vector<float> job_col_r_;   // per-column poses (motion distortion;
     std::vector<float> job_col_t_;   // empty = static snapshot pose)
+    // Sun illumination for the NEAR_IR ambient model: world-frame
+    // propagation direction + diffuse/ambient weights (no directional light
+    // in the world → ambient-only, nir = albedo).
+    float job_sun_[5] = {0.0f, 0.0f, -1.0f, 0.0f, 1.0f};
     std::vector<float> out_;         // worker-local depth+retro
 
     // Standalone clock for throttled logs (no ROS node dependency).

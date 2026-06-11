@@ -25,7 +25,8 @@ void launchRayProcessKernel(
     uint16_t *    d_nearir,
     const RayProcessParams & p,
     void *        d_rand_states,
-    void *        stream);
+    void *        stream,
+    const float * d_nir_in);
 
 void launchInitRandKernel(
     void * d_states, unsigned long seed, int n, void * stream);

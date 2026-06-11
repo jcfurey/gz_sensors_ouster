@@ -22,7 +22,8 @@ void processCpu(
     uint8_t *     reflectivity_out,
     uint16_t *    nearir_out,
     const RayProcessParams & p,
-    uint64_t      seed)
+    uint64_t      seed,
+    const float * nir_host)
 {
     const int H = p.H;
     const int W = p.W;
@@ -142,9 +143,18 @@ void processCpu(
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
         }
 
-        // Near-IR with Poisson shot noise
-        float nir = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f)
-            ? retro_host[idx] * rpmath::kNearIrScale : 0.0f;
+        // Near-IR with Poisson shot noise. With a raycaster-provided
+        // ambient factor (albedo × sun illumination, view-independent) use
+        // it; otherwise the legacy retro-based analogue.
+        float nir;
+        if (nir_host != nullptr) {
+            const float f = nir_host[idx];
+            nir = (std::isfinite(f) && f > 0.0f)
+                ? f * rpmath::kNearIrScale : 0.0f;
+        } else {
+            nir = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f)
+                ? retro_host[idx] * rpmath::kNearIrScale : 0.0f;
+        }
         if (has_noise && p.nearir_noise_scale > 0.f && nir > 0.f) {
             float sigma_nir = std::sqrt(std::max(nir, 0.0f)) * p.nearir_noise_scale;
             nir = std::max(nir + norm(rng) * sigma_nir, 0.0f);
