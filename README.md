@@ -768,8 +768,10 @@ noise params to 0 falls back to the ouster_ros default literals
    back the drain up. Note the timing semantics: packet/column **timestamps
    are sim time** and describe an idealised rotation across the scan period;
    the underlying data is a single instantaneous snapshot per scan (no
-   rolling-shutter geometry), and wall-clock spacing exists only to avoid
-   bursting consumers.
+   rolling-shutter geometry — see the gaps table in
+   [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) for what a
+   motion-distortion model would add), and wall-clock spacing exists only
+   to avoid bursting consumers.
 
 With `<ray_mode>raycast</ray_mode>` steps 2-3 are replaced by an ECM scene
 mirror (visual geometries extracted once, world poses refreshed per scan,

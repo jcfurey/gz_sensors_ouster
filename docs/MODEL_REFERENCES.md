@@ -156,12 +156,62 @@ sections. Verified in-tree by `test_raycast.BeamOriginParallaxMatchesXyzLut`.
 
 ## Known gaps (deliberately not modeled)
 
+Ordered roughly by expected impact on downstream perception realism.
+
 | Effect | What a full model adds | Reference |
 |---|---|---|
-| Beam divergence / footprint | Finite-footprint returns: edge mixing, multi-return, footprint-averaged ranges on oblique/rough surfaces. HELIOS++ subsamples the beam cone. | Winiwarter et al. 2022 |
-| Atmospheric attenuation | `P_r ∝ e^(−2ζR)`; ζ from rain rate / fog visibility via Mie scattering. Hooks cleanly into `signalFromRange` if weather sim is ever needed. | Rasshofer et al., *Influences of weather phenomena on automotive laser radar systems*, Adv. Radio Sci. 9, 2011; MDPI Sensors 23(15):6891, 2023 |
+| **Motion distortion (rolling shutter)** | A spinning lidar sweeps its columns over ~1/`lidar_hz`; ego/agent motion during the sweep warps the cloud. This plugin snapshots the whole scan at one instant (README, Architecture §) — the dominant unmodeled effect for a moving platform. LiDARsim and CARLA both simulate per-column poses; correction methods quantify the magnitude. | Manivasagam et al. (LiDARsim), CVPR 2020; *Lidar with Velocity*, arXiv:2111.09497; UTIAS Motion-Distorted Lidar Simulation Dataset, <https://asrl.utias.utoronto.ca/datasets/mdlidar/> |
+| Beam divergence / footprint | Finite-footprint returns: edge mixing, multi-return, footprint-averaged ranges on oblique/rough surfaces; energy is ~2-D Gaussian over the footprint. HELIOS++ subsamples the beam cone. | Winiwarter et al. 2022 |
+| Specular / transparent surfaces | Smooth surfaces (glass, glossy/black paint, wet roads) reflect specularly: missing points, mirror ghost returns, partial passthrough on glass. The Lambertian cos(α) model cannot produce these; a low `laser_retro` only approximates the dropout half of the story. | *Investigation of Automotive LiDAR Vision in Rain from Material and Optical Perspectives*, Sensors 24(10), 2024 (PMC11124791); Velas et al., *Detection and Utilization of Reflection in 3D Lidar Scans*, arXiv:1909.12483 |
+| Retroreflector blooming / crosstalk | Very strong returns (signs, plates) saturate detectors and scatter into neighbouring channels — halo points, range bias. This plugin encodes ρ > 1 in the reflectivity byte but produces no artifacts. | *LiDAR Blooming Artifacts Estimation … with Synthetic Data Modeling*, IEEE (10.1109/10774004), 2024 |
+| Atmospheric attenuation | `P_r ∝ e^(−2ζR)`; ζ from rain rate / fog visibility via Mie scattering. Hooks cleanly into `signalFromRange` if weather sim is ever needed. | Rasshofer et al., Adv. Radio Sci. 9, 2011; MDPI Sensors 23(15):6891, 2023 |
+| Weather scatterers (rain/fog/snow) | Backscatter returns *off the weather itself* (early false hits), not just attenuation. Physics-based augmentation is a mature line of work and a good template. | Hahner et al., *Fog Simulation on Real LiDAR Point Clouds*, ICCV 2021 (arXiv:2108.05249); Kilic et al., *LISA*, arXiv:2107.07004; Hahner et al., *LiDAR Snowfall Simulation*, CVPR 2022 |
+| Solar background false alarms | Daytime background photons add a false-alarm floor (spurious returns), strongest for SPAD receivers; detection follows Neyman–Pearson statistics. The plugin only drops returns — it never invents them. | Jin et al., *Receiver performance and detection statistics of single photon lidar*, IET Radar Sonar Navig. 14, 2020 |
 | Multi-return / full waveform | Second returns through vegetation, edge splits. | Winiwarter et al. 2022 |
 | Incidence angle in panels mode | Depth-image normals (from gradients) could approximate cos(α); currently panels mode applies no incidence factor. | §1 references |
 | Specular / retroreflective BRDF | cos(α) assumes Lambertian; retroreflectors (ρ > 1) physically return *more* at normal incidence and are angle-insensitive. | Kashani et al. 2015 |
 | Sun model for NEAR_IR | Scene illumination, shadows, sky background. | §6 references |
 | Range walk | Amplitude-dependent timing bias (strong returns trigger earlier). | Hu et al. 2018 |
+
+## Further reading — the lidar-simulation landscape
+
+Context for where this plugin's approach (analytic geometry + parametric
+noise) sits among published alternatives.
+
+**Physics-/geometry-based simulators** (this plugin's family):
+
+- Winiwarter et al. — *HELIOS++*, RSE 269, 2022. Ray tracing + full waveform,
+  beam-cone subsampling; the academic reference simulator.
+  <https://arxiv.org/abs/2101.09154>
+- *Physical LiDAR Simulation in Real-Time Engine*, arXiv:2208.10295 — game-
+  engine lidar with physically based intensity, closest in spirit to the
+  panels/raycast split here.
+- Haider et al. — *Development of High-Fidelity Automotive LiDAR Sensor Model
+  with Standardized Interfaces*, Sensors 22(19), 2022 (PMC9572647). Models the
+  full receive chain (optics, APD, amplifier, sun noise) and reports
+  validation metrics (signal MAPE 1.7%, point count 8.5%, mean intensity
+  9.3%) — a useful benchmark for "how good is good" if this model is ever
+  validated against a real OS1.
+- CARLA (<https://carla.org>) — raycast lidar with linear-in-distance
+  intensity attenuation and stochastic raydrop; the de-facto AV research
+  baseline, less physical than this plugin's model.
+
+**Data-driven / learned sensor models** (complementary approach: learn the
+residual realism a parametric model misses):
+
+- Manivasagam et al. — *LiDARsim*, CVPR 2020. Real-world assets + raycasting +
+  a learned raydrop network; demonstrated sim-trained perception transferring
+  to real data.
+- Guillard et al. — *Learning to Simulate Realistic LiDARs*, arXiv:2209.10986.
+  Learns raydrop + intensity from paired camera/lidar data.
+- Huang et al. — *Neural LiDAR Fields for Novel View Synthesis*, ICCV 2023.
+  Neural-field lidar rendering with beam divergence and two-return modeling.
+- Hamdi et al. — *Data-driven Camera and Lidar Simulation Models for
+  Autonomous Driving: A Review*, arXiv:2402.10079. Survey covering the
+  generative end (R2DM, RangeLDM, LiDM) of the spectrum.
+
+**Why it matters**: studies across this literature consistently find raydrop
+(which returns go missing) and intensity fidelity to be the two largest
+contributors to the lidar sim-to-real gap — which is why this plugin's
+dropout/reflectance modeling (§§1–3) carries most of the realism weight, and
+why motion distortion and specular dropout top the gaps table above.
