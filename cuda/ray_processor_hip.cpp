@@ -103,18 +103,23 @@ __global__ void castScanKernelHip(
     // passed by value — the device cannot dereference a host reference.
     RcCastArgsHip args,
     float * __restrict__ range_out,
-    float * __restrict__ retro_out)
+    float * __restrict__ retro_out,
+    const float * __restrict__ col_r,   // per-column poses (motion
+    const float * __restrict__ col_t,   // distortion); may be nullptr
+    float * __restrict__ nir_out)       // NEAR_IR ambient; may be nullptr
 {
     const int n = args.sp.H * args.sp.W;
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
 
-    float range, retro;
+    float range, retro, nirv;
     rc::rcCastOneRay(instances, args.n_instances, verts, tris, order, nodes,
                      xforms, beam_alt, beam_az, args.sr, args.st, args.sp,
-                     idx, __int_as_float(0x7f800000), range, retro);
+                     idx, __int_as_float(0x7f800000), range, retro,
+                     col_r, col_t, nir_out ? &nirv : nullptr);
     range_out[idx] = range;
     retro_out[idx] = retro;
+    if (nir_out) nir_out[idx] = nirv;
 }
 
 __global__ void rayProcessKernelHip(
@@ -136,6 +141,7 @@ __global__ void rayProcessKernelHip(
     float dropout_rate_far,
     float false_alarm_rate,
     float edge_discon_threshold,
+    const float * __restrict__ nir_in,  // NEAR_IR ambient; may be nullptr
     hiprandState * __restrict__ rand_states)
 {
     const int n = H * W;
@@ -220,8 +226,14 @@ __global__ void rayProcessKernelHip(
         refl_out[idx] = static_cast<uint8_t>(base_reflectivity);
     }
 
-    float nir = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
-        ? retro[idx] * rpmath::kNearIrScale : 0.f;
+    float nir;
+    if (nir_in != nullptr) {
+        nir = (isfinite(nir_in[idx]) && nir_in[idx] > 0.f)
+            ? nir_in[idx] * rpmath::kNearIrScale : 0.f;
+    } else {
+        nir = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
+            ? retro[idx] * rpmath::kNearIrScale : 0.f;
+    }
     if (rs != nullptr && nearir_noise_scale > 0.f && nir > 0.f) {
         float sigma_nir = sqrtf(fmaxf(nir, 0.f)) * nearir_noise_scale;
         nir = fmaxf(nir + hiprand_normal(rs) * sigma_nir, 0.f);
@@ -246,6 +258,9 @@ public:
         maybeFree(d_refl_);
         maybeFree(d_nearir_);
         maybeFree(d_raw_frame_);
+        maybeFree(d_nir_f_);
+        maybeFree(d_col_r_);
+        maybeFree(d_col_t_);
         maybeFree(d_beam_alt_);
         maybeFree(d_beam_az_);
         maybeFree(d_rc_insts_);
@@ -306,6 +321,7 @@ public:
             pp.dropout_rate_close, pp.dropout_rate_far,
             pp.false_alarm_rate,
             pp.edge_discon_threshold,
+            static_cast<const float *>(nullptr),
             need_rand ? static_cast<hiprandState *>(d_rand_states_) : nullptr);
         HIP_CHECK(hipGetLastError());
 
@@ -320,7 +336,8 @@ public:
         uint16_t *    signal_out,
         uint8_t *     reflectivity_out,
         uint16_t *    nearir_out,
-        const RayProcessParams & pp) override
+        const RayProcessParams & pp,
+        const float * nir_host) override
     {
         const int out_n = pp.H * pp.W;
         ensureBuffers(out_n);
@@ -332,6 +349,11 @@ public:
         if (retro_host) {
             ensureRetroBuffer(out_n);
             h2d(d_retro_, retro_host,
+                static_cast<size_t>(out_n) * sizeof(float));
+        }
+        if (nir_host) {
+            ensureNirBuffer(out_n);
+            h2d(d_nir_f_, nir_host,
                 static_cast<size_t>(out_n) * sizeof(float));
         }
 
@@ -350,6 +372,7 @@ public:
             pp.dropout_rate_close, pp.dropout_rate_far,
             pp.false_alarm_rate,
             pp.edge_discon_threshold,
+            nir_host ? static_cast<const float *>(d_nir_f_) : nullptr,
             need_rand ? static_cast<hiprandState *>(d_rand_states_) : nullptr);
         HIP_CHECK(hipGetLastError());
 
@@ -367,13 +390,25 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out) override
+        float * retro_out,
+        const float * col_r,
+        const float * col_t,
+        float * nir_out) override
     {
         const int out_n = sp.H * sp.W;
         ensureBuffers(out_n);
         ensureRetroBuffer(out_n);
+        if (nir_out) ensureNirBuffer(out_n);
         ensureSceneBuffers(scene, scene_version);
         ensureResampleBuffers(0, sp.H);  // beam-angle buffers only
+
+        // Per-column sensor poses (motion distortion): upload per scan.
+        const bool have_cols = (col_r != nullptr && col_t != nullptr);
+        if (have_cols) {
+            ensureColPoseBuffers(sp.W);
+            h2d(d_col_r_, col_r, static_cast<size_t>(sp.W) * 9 * sizeof(float));
+            h2d(d_col_t_, col_t, static_cast<size_t>(sp.W) * 3 * sizeof(float));
+        }
 
         if (scene.n_instances > 0) {
             h2d(d_rc_xforms_, xforms,
@@ -400,11 +435,18 @@ public:
             static_cast<const float *>(d_beam_az_),
             args,
             static_cast<float *>(d_depth_),
-            static_cast<float *>(d_retro_));
+            static_cast<float *>(d_retro_),
+            have_cols ? static_cast<const float *>(d_col_r_) : nullptr,
+            have_cols ? static_cast<const float *>(d_col_t_) : nullptr,
+            nir_out ? static_cast<float *>(d_nir_f_) : nullptr);
         HIP_CHECK(hipGetLastError());
 
         d2h(range_out, d_depth_, static_cast<size_t>(out_n) * sizeof(float));
         d2h(retro_out, d_retro_, static_cast<size_t>(out_n) * sizeof(float));
+        if (nir_out) {
+            d2h(nir_out, d_nir_f_,
+                static_cast<size_t>(out_n) * sizeof(float));
+        }
         HIP_CHECK(hipStreamSynchronize(stream_));
     }
 
@@ -525,6 +567,23 @@ private:
         beam_src_h_ = H;
     }
 
+    // NEAR_IR ambient-factor plane (float, in and out); lazy.
+    void ensureNirBuffer(int n)
+    {
+        if (n <= nir_f_n_) return;
+        allocDev(d_nir_f_, static_cast<size_t>(n) * sizeof(float));
+        nir_f_n_ = n;
+    }
+
+    // Per-column pose tables (motion distortion); lazy.
+    void ensureColPoseBuffers(int W)
+    {
+        if (W <= col_pose_n_) return;
+        allocDev(d_col_r_, static_cast<size_t>(W) * 9 * sizeof(float));
+        allocDev(d_col_t_, static_cast<size_t>(W) * 3 * sizeof(float));
+        col_pose_n_ = W;
+    }
+
     // Retro device buffer is only used by processDepth (raycast mode);
     // allocated lazily so the panels path pays nothing for it.
     void ensureRetroBuffer(int n)
@@ -577,6 +636,11 @@ private:
     void * d_rand_states_ = nullptr;
     void * d_raw_frame_ = nullptr;
     void * d_beam_alt_ = nullptr;
+    void * d_col_r_ = nullptr;   // per-column pose tables (motion distortion)
+    void * d_col_t_ = nullptr;
+    int col_pose_n_ = 0;
+    void * d_nir_f_ = nullptr;   // NEAR_IR ambient plane (float)
+    int nir_f_n_ = 0;
     // uploadBeamTables cache identity (host source pointers + count).
     const float * beam_src_alt_ = nullptr;
     const float * beam_src_az_  = nullptr;

@@ -172,6 +172,9 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("false_alarm_rate")) {
         false_alarm_rate_ = sdf->Get<double>("false_alarm_rate");
     }
+    if (sdf->HasElement("motion_distortion")) {
+        motion_distortion_ = sdf->Get<bool>("motion_distortion");
+    }
     if (sdf->HasElement("edge_discon_threshold")) {
         edge_discon_threshold_ = sdf->Get<double>("edge_discon_threshold");
     }
@@ -444,6 +447,7 @@ void GzGpuOusterLidarSystem::Configure(
         mp.max_range = max_range_;
         mp.lidar_hz = lidar_hz_;
         mp.beam_origin_mm = meta_->beam_origin_mm;
+        mp.motion_distortion = motion_distortion_;
         mp.beam_alt_f = &meta_->beam_alt_f;
         mp.beam_az_f = &meta_->beam_az_f;
         mirror_->start(mp, ray_processor_.get(), &processor_mtx_,
@@ -687,7 +691,7 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
 
     const bool raycast = (ray_mode_ == "raycast");
     const int expected_n =
-        raycast ? 2 * H * W
+        raycast ? 3 * H * W
                 : (rig_ ? rig_->resampleParams().raw_n : 0);
     if (raw_n != expected_n) {
         if (ros_->clock()) {
@@ -759,7 +763,8 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
                 signal_buf_.data(),
                 reflectivity_buf_.data(),
                 nearir_buf_.data(),
-                pp);
+                pp,
+                raw_data + 2 * static_cast<size_t>(H) * W);
         } else {
             ray_processor_->processRaw(
                 raw_data,

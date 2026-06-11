@@ -12,6 +12,7 @@
 
 #include <gz/sim/components/Geometry.hh>
 #include <gz/sim/components/LaserRetro.hh>
+#include <gz/sim/components/Light.hh>
 #include <gz/sim/components/Material.hh>
 #include <gz/sim/components/Transparency.hh>
 #include <gz/sim/components/Visual.hh>
@@ -249,11 +250,80 @@ void RaycastMirror::rebuildScene(
         visual_count);
 }
 
+void RaycastMirror::buildColumnPoses(std::chrono::nanoseconds scan_end,
+                                     std::vector<float> & col_r,
+                                     std::vector<float> & col_t) const
+{
+    // Column m of a spinning lidar is acquired at
+    //   t_m = scan_end − T + (m+1)·T/W
+    // (measurement ids are in acquisition order; the last column is the
+    // freshest, coinciding with the scan trigger). Interpolate the sensor
+    // pose at each t_m from the per-tick history: linear position +
+    // quaternion SLERP between the bracketing samples — the standard
+    // pose-interpolation treatment for rolling-shutter sensors (Lovegrove
+    // et al., BMVC 2013; Furgale et al., ICRA 2012 — full splines are for
+    // estimation; playback of known sim poses only needs interpolation).
+    const int W = params_.W;
+    const auto T = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(1.0 / params_.lidar_hz));
+    col_r.resize(static_cast<size_t>(9 * W));
+    col_t.resize(static_cast<size_t>(3 * W));
+
+    size_t hint = 0;  // history is time-sorted; t_m is increasing in m
+    for (int m = 0; m < W; ++m) {
+        const auto t_m = scan_end - T + (T * (m + 1)) / W;
+
+        // Find the first history sample at/after t_m, starting from hint.
+        while (hint < pose_history_.size() &&
+               pose_history_[hint].first < t_m) {
+            ++hint;
+        }
+        ::gz::math::Pose3d pose;
+        if (hint == 0) {
+            pose = pose_history_.front().second;   // before history: clamp
+        } else if (hint >= pose_history_.size()) {
+            pose = pose_history_.back().second;    // after history: clamp
+        } else {
+            const auto & [tb, pb] = pose_history_[hint];
+            const auto & [ta, pa] = pose_history_[hint - 1];
+            const double span =
+                static_cast<double>((tb - ta).count());
+            const double a = (span > 0.0)
+                ? static_cast<double>((t_m - ta).count()) / span : 1.0;
+            pose.Pos() = pa.Pos() + (pb.Pos() - pa.Pos()) * a;
+            pose.Rot() = ::gz::math::Quaterniond::Slerp(
+                a, pa.Rot(), pb.Rot(), true);
+        }
+
+        float r[9], t[3];
+        poseToRT(pose, r, t);
+        std::memcpy(&col_r[static_cast<size_t>(9 * m)], r, sizeof(r));
+        std::memcpy(&col_t[static_cast<size_t>(3 * m)], t, sizeof(t));
+    }
+}
+
 void RaycastMirror::postUpdate(
     const ::gz::sim::UpdateInfo & info,
     const ::gz::sim::EntityComponentManager & ecm,
     const ::gz::math::Pose3d & sensor_pose)
 {
+    // Record the sensor pose every tick (cheap) so per-column poses can be
+    // interpolated over the scan period; trim history older than one period
+    // plus margin.
+    if (params_.motion_distortion) {
+        const auto now =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+        if (pose_history_.empty() || pose_history_.back().first < now) {
+            pose_history_.emplace_back(now, sensor_pose);
+        }
+        const auto keep = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double>(1.2 / params_.lidar_hz));
+        while (pose_history_.size() > 2 &&
+               now - pose_history_.front().first > keep) {
+            pose_history_.pop_front();
+        }
+    }
+
     // Rebuild the geometry mirror when the visual population changes
     // (spawn/despawn). Pure pose changes are handled per scan below.
     size_t visual_count = 0;
@@ -290,12 +360,50 @@ void RaycastMirror::postUpdate(
         scene_->computeXform(static_cast<int>(i), r, t, xforms[i]);
     }
 
+    // Per-column poses for motion distortion (needs ≥ 2 history samples to
+    // interpolate; falls back to the snapshot pose otherwise).
+    std::vector<float> col_r, col_t;
+    if (params_.motion_distortion && pose_history_.size() >= 2) {
+        buildColumnPoses(sim_now, col_r, col_t);
+    }
+
+    // Sun for the NEAR_IR ambient model: first directional light in the
+    // world (propagation direction rotated to world frame, diffuse mean as
+    // intensity). Ouster's NEAR_IR counts ambient sunlight reflected off
+    // the scene; with no sun the channel falls back to ambient-only
+    // (nir = albedo). Weights: 0.3 ambient + 0.7·diffuse sun keeps
+    // hit values in [0.3·albedo, albedo] (full Lambert shadow → facing the
+    // sun), capped at the legacy analogue's albedo ceiling; misses stay 0.
+    float sun[5] = {0.0f, 0.0f, -1.0f, 0.0f, 1.0f};
+    ecm.Each<::gz::sim::components::Light>(
+        [&](const ::gz::sim::Entity & ent,
+            const ::gz::sim::components::Light * light) -> bool {
+            if (light->Data().Type() != sdf::LightType::DIRECTIONAL) {
+                return true;
+            }
+            auto dir = ::gz::sim::worldPose(ent, ecm).Rot().RotateVector(
+                light->Data().Direction());
+            dir.Normalize();
+            const auto & c = light->Data().Diffuse();
+            const float diffuse = static_cast<float>(
+                (c.R() + c.G() + c.B()) / 3.0);
+            sun[0] = static_cast<float>(dir.X());
+            sun[1] = static_cast<float>(dir.Y());
+            sun[2] = static_cast<float>(dir.Z());
+            sun[3] = 0.7f * ((diffuse < 1.0f) ? diffuse : 1.0f);
+            sun[4] = 0.3f;
+            return false;  // first directional light wins
+        });
+
     {
         std::lock_guard<std::mutex> lk(mtx_);
         job_scene_ = scene_;
         job_scene_version_ = scene_version_;
         job_xforms_ = std::move(xforms);
         poseToRT(sensor_pose, job_sensor_r_, job_sensor_t_);
+        job_col_r_ = std::move(col_r);
+        job_col_t_ = std::move(col_t);
+        std::memcpy(job_sun_, sun, sizeof(sun));
         job_ready_ = true;
     }
     cv_.notify_one();
@@ -306,8 +414,9 @@ void RaycastMirror::threadFunc()
     while (!shutdown_.load(std::memory_order_acquire)) {
         std::shared_ptr<const rc::Scene> scene;
         std::vector<rc::InstanceXform> xforms;
+        std::vector<float> col_r, col_t;
         uint64_t version = 0;
-        float sr[9], st[3];
+        float sr[9], st[3], sun[5];
         {
             std::unique_lock<std::mutex> lk(mtx_);
             cv_.wait(lk, [this] {
@@ -319,13 +428,16 @@ void RaycastMirror::threadFunc()
             scene = job_scene_;
             version = job_scene_version_;
             xforms = std::move(job_xforms_);
+            col_r = std::move(job_col_r_);
+            col_t = std::move(job_col_t_);
             std::memcpy(sr, job_sensor_r_, sizeof(sr));
             std::memcpy(st, job_sensor_t_, sizeof(st));
+            std::memcpy(sun, job_sun_, sizeof(sun));
         }
         if (!scene || !proc_) continue;
 
         const int n = params_.H * params_.W;
-        out_.resize(static_cast<size_t>(2 * n));
+        out_.resize(static_cast<size_t>(3 * n));
 
         rc::ScanParams sp;
         sp.H = params_.H;
@@ -333,6 +445,11 @@ void RaycastMirror::threadFunc()
         sp.max_range = static_cast<float>(params_.max_range);
         sp.near_clip = static_cast<float>(kNearClip);
         sp.beam_origin_m = static_cast<float>(params_.beam_origin_mm / 1000.0);
+        sp.sun_dir[0] = sun[0];
+        sp.sun_dir[1] = sun[1];
+        sp.sun_dir[2] = sun[2];
+        sp.sun_diffuse = sun[3];
+        sp.sun_ambient = sun[4];
 
         // Cast on the active backend — CUDA/HIP/SYCL kernel, or the
         // OpenMP CPU fallback (identical shared math). proc_mtx_
@@ -343,10 +460,13 @@ void RaycastMirror::threadFunc()
                             params_.beam_alt_f->data(),
                             params_.beam_az_f->data(),
                             sr, st, sp,
-                            out_.data(), out_.data() + n);
+                            out_.data(), out_.data() + n,
+                            col_r.empty() ? nullptr : col_r.data(),
+                            col_t.empty() ? nullptr : col_t.data(),
+                            out_.data() + 2 * n);
         }
 
-        if (exch_->publish(out_, 2 * n)) {
+        if (exch_->publish(out_, 3 * n)) {
             RCLCPP_WARN_THROTTLE(kLogger, throttle_clock_, 5000,
                 "%s: dropped raycast frame (PostUpdate didn't drain); "
                 "total dropped=%lu", sensor_name_.c_str(),

@@ -25,7 +25,8 @@ void processCpu(
     uint8_t *     reflectivity_out,
     uint16_t *    nearir_out,
     const RayProcessParams & p,
-    uint64_t      seed = 0);
+    uint64_t      seed = 0,
+    const float * nir_host = nullptr);
 
 void processRawCpu(
     const float * raw_host,

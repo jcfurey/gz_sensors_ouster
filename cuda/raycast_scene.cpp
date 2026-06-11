@@ -245,7 +245,9 @@ void castScan(const SceneView & scene,
               const float * beam_az_deg,
               const float sensor_r[9], const float sensor_t[3],
               const ScanParams & sp,
-              float * range_out, float * retro_out)
+              float * range_out, float * retro_out,
+              const float * col_r, const float * col_t,
+              float * nir_out)
 {
     const int n = sp.H * sp.W;
 
@@ -255,7 +257,9 @@ void castScan(const SceneView & scene,
         rcCastOneRay(scene.instances, scene.n_instances,
                      scene.verts, scene.tris, scene.order, scene.nodes,
                      xforms, beam_alt_deg, beam_az_deg,
-                     sensor_r, sensor_t, sp, idx, kInf, range, retro);
+                     sensor_r, sensor_t, sp, idx, kInf, range, retro,
+                     col_r, col_t,
+                     nir_out ? &nir_out[idx] : nullptr);
         range_out[idx] = range;
         if (retro_out) retro_out[idx] = retro;
     }

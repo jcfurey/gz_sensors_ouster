@@ -520,6 +520,7 @@ targets produce weaker returns.
 | `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
 | `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at max_range. Returns past the reflectance-dependent detection limit `max_range·√(ρ/0.8)` always drop. |
 | `false_alarm_rate` | 0.0 | 0-1 | probability | Solar-background false alarms: each no-return pixel becomes a spurious point (uniform range, noise-floor signal) with this probability per frame. 0 = off. Try 0.0005-0.002 for bright daylight. |
+| `motion_distortion` | false | bool | -- | Raycast mode only. Rolling-shutter sweep: each column casts from the sensor pose at its acquisition time (interpolated per sim tick), skewing the cloud by the platform's motion over one scan — as a real spinning lidar does (see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9). Ego motion only; default off preserves the instantaneous snapshot. |
 | `edge_discon_threshold` | 0.15 | >= 0 | m | Depth-discontinuity suppression threshold (1ns echo delay convention). 0 = off. |
 
 ### IMU (optional)
@@ -774,11 +775,11 @@ noise params to 0 falls back to the ouster_ros default literals
    the nominal 1/lidar_hz) so running the sim faster than real time doesn't
    back the drain up. Note the timing semantics: packet/column **timestamps
    are sim time** and describe an idealised rotation across the scan period;
-   the underlying data is a single instantaneous snapshot per scan (no
-   rolling-shutter geometry — see the gaps table in
-   [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) for what a
-   motion-distortion model would add), and wall-clock spacing exists only
-   to avoid bursting consumers.
+   the underlying data is a single instantaneous snapshot per scan by
+   default; in raycast mode, `<motion_distortion>true</motion_distortion>`
+   casts each column from its acquisition-time sensor pose instead
+   (rolling-shutter sweep — [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md)
+   §9). Wall-clock spacing exists only to avoid bursting consumers.
 
 With `<ray_mode>raycast</ray_mode>` steps 2-3 are replaced by an ECM scene
 mirror (visual geometries extracted once, world poses refreshed per scan,

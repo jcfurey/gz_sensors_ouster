@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <random>
 #include <utility>
@@ -494,6 +495,85 @@ TEST(Raycast, NearClipSeesThroughCloseHit)
     const std::vector<float> alt = {0.0f}, az = {0.0f};
     const auto range = cast(scene, xf, alt, az, scanParams(1, 4));
     EXPECT_NEAR(range[0], 9.0f, 1e-4f);
+}
+
+TEST(Raycast, SunDrivenNearIrFactor)
+{
+    // NEAR_IR ambient model: nir = albedo·(ambient + diffuse·max(0, n̂·(−ŝ)))
+    // with ŝ the sun's propagation direction. Ground plane 1 m below the
+    // sensor (normal +z), beam at −30° elevation, albedo 1.
+    rc::Scene scene;
+    const float psize[3] = {0.0f, 0.0f, 0.0f};
+    const int pi = scene.addInstance(rc::GeomType::kPlane, psize, 1.0f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, pi, 0.0f, 0.0f, -1.0f)};
+
+    const std::vector<float> alt = {-30.0f}, az = {0.0f};
+    std::vector<float> range(4), nir(4);
+
+    // Sun straight down (ŝ = −z): Lambert term 1 → nir = 0.3 + 0.7 = 1.
+    auto sp = scanParams(1, 4);
+    sp.sun_dir[0] = 0.0f; sp.sun_dir[1] = 0.0f; sp.sun_dir[2] = -1.0f;
+    sp.sun_diffuse = 0.7f;
+    sp.sun_ambient = 0.3f;
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, sp, range.data(), nullptr,
+                 nullptr, nullptr, nir.data());
+    EXPECT_NEAR(nir[0], 1.0f, 1e-4f);
+
+    // Sun on the horizon (ŝ = +x): Lambert term 0 → ambient only, 0.3.
+    sp.sun_dir[0] = 1.0f; sp.sun_dir[1] = 0.0f; sp.sun_dir[2] = 0.0f;
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, sp, range.data(), nullptr,
+                 nullptr, nullptr, nir.data());
+    EXPECT_NEAR(nir[0], 0.3f, 1e-4f);
+
+    // Default ScanParams (no sun configured): ambient-only, nir = albedo.
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, scanParams(1, 4), range.data(), nullptr,
+                 nullptr, nullptr, nir.data());
+    EXPECT_NEAR(nir[0], 1.0f, 1e-4f);
+}
+
+TEST(Raycast, MotionDistortionPerColumnPoses)
+{
+    // Rolling-shutter motion distortion: each column casts from its own
+    // sensor pose. Sensor translating +x inside a radius-50 shell centred
+    // at the origin; column m at x_m = 0.5·m. Analytic ranges
+    // (|p + t·d| = 50, columns at az_enc = −90°·m):
+    //   m=0  d=(+1,0,0), x=0   → 50
+    //   m=1  d=(0,−1,0), x=0.5 → sqrt(2500 − 0.25)  ≈ 49.9975
+    //   m=2  d=(−1,0,0), x=1.0 → 51
+    //   m=3  d=(0,+1,0), x=1.5 → sqrt(2500 − 2.25)  ≈ 49.97749
+    constexpr int W = 4;
+    rc::Scene scene;
+    const float shell_size[3] = {50.0f, 0.0f, 0.0f};
+    const int si = scene.addInstance(rc::GeomType::kSphere, shell_size, 0.0f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 0.0f, 0.0f, 0.0f)};
+
+    std::vector<float> col_r(9 * W), col_t(3 * W, 0.0f);
+    for (int m = 0; m < W; ++m) {
+        std::memcpy(&col_r[static_cast<size_t>(9 * m)], kIdentityR,
+                    9 * sizeof(float));
+        col_t[static_cast<size_t>(3 * m)] = 0.5f * static_cast<float>(m);
+    }
+
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> range(W);
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, scanParams(1, W), range.data(), nullptr,
+                 col_r.data(), col_t.data());
+
+    EXPECT_NEAR(range[0], 50.0f, 1e-3f);
+    EXPECT_NEAR(range[1], 49.9975f, 1e-3f);
+    EXPECT_NEAR(range[2], 51.0f, 1e-3f);
+    EXPECT_NEAR(range[3], 49.97749f, 1e-3f);
+
+    // Static path (null tables) is unchanged: every column reads 50.
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, scanParams(1, W), range.data(), nullptr);
+    for (int m = 0; m < W; ++m) {
+        EXPECT_NEAR(range[m], 50.0f, 1e-4f) << "column " << m;
+    }
 }
 
 TEST(Raycast, UniformShellExactRange)

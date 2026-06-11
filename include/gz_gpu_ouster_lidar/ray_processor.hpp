@@ -138,6 +138,9 @@ public:
     /// per-beam ranges (the full-raycast mode). depth_host is H×W metres
     /// (+inf for a miss); retro_host is an optional H×W laser_retro array
     /// (nullptr → base_reflectivity / unit intensity).
+    /// `nir_host` (optional): per-pixel NEAR_IR ambient factor from the
+    /// raycaster (albedo × sun illumination); nullptr keeps the legacy
+    /// retro-based near-IR.
     void processDepth(
         const float * depth_host,
         const float * retro_host,
@@ -145,7 +148,8 @@ public:
         uint16_t *    signal_out,
         uint8_t *     reflectivity_out,
         uint16_t *    nearir_out,
-        const RayProcessParams & pp);
+        const RayProcessParams & pp,
+        const float * nir_host = nullptr);
 
     /// Full per-beam raycast on the active backend (CUDA/HIP/SYCL kernel,
     /// or the OpenMP CPU fallback — identical shared math either way).
@@ -163,7 +167,10 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out);
+        float * retro_out,
+        const float * col_r = nullptr,
+        const float * col_t = nullptr,
+        float * nir_out = nullptr);
 
     /// Returns true when the active backend is the CPU fallback (no GPU
     /// path is compiled in, or all GPU probes failed at construction).

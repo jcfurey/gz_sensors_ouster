@@ -119,11 +119,12 @@ void RayProcessor::processDepth(
     uint16_t *    signal_out,
     uint8_t *     reflectivity_out,
     uint16_t *    nearir_out,
-    const RayProcessParams & pp)
+    const RayProcessParams & pp,
+    const float * nir_host)
 {
     backend_->processDepth(depth_host, retro_host,
                            range_out, signal_out, reflectivity_out,
-                           nearir_out, pp);
+                           nearir_out, pp, nir_host);
 }
 
 void RayProcessor::castScan(
@@ -136,11 +137,14 @@ void RayProcessor::castScan(
     const float sensor_t[3],
     const rc::ScanParams & sp,
     float * range_out,
-    float * retro_out)
+    float * retro_out,
+    const float * col_r,
+    const float * col_t,
+    float * nir_out)
 {
     backend_->castScan(scene, scene_version, xforms,
                        beam_alt_deg, beam_az_deg, sensor_r, sensor_t,
-                       sp, range_out, retro_out);
+                       sp, range_out, retro_out, col_r, col_t, nir_out);
 }
 
 bool RayProcessor::usesCpuFallback() const

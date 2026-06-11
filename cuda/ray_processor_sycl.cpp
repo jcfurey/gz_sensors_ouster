@@ -97,6 +97,9 @@ public:
         maybeFree(u_refl_);
         maybeFree(u_nearir_);
         maybeFree(u_raw_frame_);
+        maybeFree(u_nir_f_);
+        maybeFree(u_col_r_);
+        maybeFree(u_col_t_);
         maybeFree(u_beam_alt_);
         maybeFree(u_beam_az_);
         maybeFree(u_rc_insts_);
@@ -148,7 +151,8 @@ public:
         uint16_t *    signal_out,
         uint8_t *     reflectivity_out,
         uint16_t *    nearir_out,
-        const RayProcessParams & pp) override
+        const RayProcessParams & pp,
+        const float * nir_host) override
     {
         const int out_n = pp.H * pp.W;
         ensureBuffers(out_n);
@@ -160,10 +164,16 @@ public:
             std::memcpy(u_retro_, retro_host,
                         static_cast<size_t>(out_n) * sizeof(float));
         }
+        if (nir_host) {
+            ensureNirBuffer(out_n);
+            std::memcpy(u_nir_f_, nir_host,
+                        static_cast<size_t>(out_n) * sizeof(float));
+        }
 
         launchRayKernel(
             u_depth_, retro_host ? u_retro_ : nullptr,
-            u_range_, u_signal_, u_refl_, u_nearir_, pp, out_n);
+            u_range_, u_signal_, u_refl_, u_nearir_, pp, out_n,
+            nir_host ? u_nir_f_ : nullptr);
         q_.wait();
 
         std::memcpy(range_out,        u_range_,  static_cast<size_t>(out_n) * sizeof(uint32_t));
@@ -182,13 +192,31 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out) override
+        float * retro_out,
+        const float * col_r,
+        const float * col_t,
+        float * nir_out) override
     {
         const int out_n = sp.H * sp.W;
         ensureBuffers(out_n);
         ensureRetroBuffer(out_n);
+        if (nir_out) ensureNirBuffer(out_n);
         ensureSceneBuffers(scene, scene_version);
         ensureResampleBuffers(0, sp.H);  // beam-angle buffers only
+
+        // Per-column sensor poses (motion distortion): copy into USM.
+        const bool have_cols = (col_r != nullptr && col_t != nullptr);
+        if (have_cols) {
+            if (sp.W > col_pose_n_) {
+                allocShared(u_col_r_, static_cast<size_t>(sp.W) * 9);
+                allocShared(u_col_t_, static_cast<size_t>(sp.W) * 3);
+                col_pose_n_ = sp.W;
+            }
+            std::memcpy(u_col_r_, col_r,
+                        static_cast<size_t>(sp.W) * 9 * sizeof(float));
+            std::memcpy(u_col_t_, col_t,
+                        static_cast<size_t>(sp.W) * 3 * sizeof(float));
+        }
 
         if (scene.n_instances > 0) {
             std::memcpy(u_rc_xforms_, xforms,
@@ -219,16 +247,21 @@ public:
         SrSt pose{};
         std::memcpy(pose.sr, sr, sizeof(sr));
         std::memcpy(pose.st, st, sizeof(st));
+        const float * cols_r = have_cols ? u_col_r_ : nullptr;
+        const float * cols_t = have_cols ? u_col_t_ : nullptr;
+        float * d_nir = nir_out ? u_nir_f_ : nullptr;
 
         q_.parallel_for(sycl::range<1>{static_cast<size_t>(out_n)},
             [=](sycl::id<1> it) {
                 const int idx = static_cast<int>(it[0]);
-                float range, retro;
+                float range, retro, nirv;
                 rc::rcCastOneRay(insts, n_inst, verts, tris, order, nodes,
                                  xf, alt, az, pose.sr, pose.st, sp_copy,
-                                 idx, kInf, range, retro);
+                                 idx, kInf, range, retro, cols_r, cols_t,
+                                 d_nir ? &nirv : nullptr);
                 d_range[idx] = range;
                 d_retro[idx] = retro;
+                if (d_nir) d_nir[idx] = nirv;
             });
         q_.wait();
 
@@ -236,6 +269,10 @@ public:
                     static_cast<size_t>(out_n) * sizeof(float));
         std::memcpy(retro_out, u_retro_,
                     static_cast<size_t>(out_n) * sizeof(float));
+        if (nir_out) {
+            std::memcpy(nir_out, u_nir_f_,
+                        static_cast<size_t>(out_n) * sizeof(float));
+        }
     }
 
     const char * name() const override { return integrated_ ? "sycl-igpu" : "sycl"; }
@@ -274,7 +311,8 @@ private:
         const float * depth, const float * retro,
         uint32_t * range_out, uint16_t * signal_out,
         uint8_t * refl_out, uint16_t * nearir_out,
-        const RayProcessParams & p, int n)
+        const RayProcessParams & p, int n,
+        const float * nir_in = nullptr)
     {
         // Mix a per-launch counter into the seed: the device RNG is
         // stateless (counter restarts at 0 for every pixel every frame), so
@@ -381,9 +419,15 @@ private:
                     refl_out[idx] = static_cast<uint8_t>(base_refl);
                 }
 
-                // Near-IR
-                float nir = (retro && sycl::isfinite(retro[idx]) && retro[idx] > 0.f)
-                    ? retro[idx] * rpmath::kNearIrScale : 0.f;
+                // Near-IR: ambient factor (or legacy retro analogue).
+                float nir;
+                if (nir_in != nullptr) {
+                    nir = (sycl::isfinite(nir_in[idx]) && nir_in[idx] > 0.f)
+                        ? nir_in[idx] * rpmath::kNearIrScale : 0.f;
+                } else {
+                    nir = (retro && sycl::isfinite(retro[idx]) && retro[idx] > 0.f)
+                        ? retro[idx] * rpmath::kNearIrScale : 0.f;
+                }
                 if (nir_scale > 0.f && nir > 0.f) {
                     float sigma_nir = sycl::sqrt(sycl::fmax(nir, 0.f)) * nir_scale;
                     nir = sycl::fmax(nir + normal01(counter, seed, idx) * sigma_nir, 0.f);
@@ -448,6 +492,14 @@ private:
         retro_n_ = n;
     }
 
+    // NEAR_IR ambient-factor plane (float, in and out); lazy.
+    void ensureNirBuffer(int n)
+    {
+        if (n <= nir_f_n_) return;
+        allocShared(u_nir_f_, static_cast<size_t>(n));
+        nir_f_n_ = n;
+    }
+
     void ensureResampleBuffers(int raw_n, int H)
     {
         if (raw_n > raw_buf_n_) {
@@ -492,6 +544,11 @@ private:
     float *    u_raw_frame_ = nullptr;
     float *    u_beam_alt_  = nullptr;
     float *    u_beam_az_   = nullptr;
+    float *    u_col_r_     = nullptr;  // per-column pose tables
+    float *    u_col_t_     = nullptr;  // (motion distortion)
+    int        col_pose_n_  = 0;
+    float *    u_nir_f_     = nullptr;  // NEAR_IR ambient plane (float)
+    int        nir_f_n_     = 0;
     // uploadBeamTables cache identity (host source pointers + count).
     const float * beam_src_alt_ = nullptr;
     const float * beam_src_az_  = nullptr;
