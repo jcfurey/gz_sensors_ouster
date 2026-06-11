@@ -117,7 +117,9 @@
 
     <!-- Retroreflective sign post: laser_retro > 1 lands in the calibrated
          reflectivity byte's log band (101-255, like traffic signs / retro
-         tape) and extends its detection limit past max_range. -->
+         tape) and never triggers the reflectance-dependent forced drop
+         within the configured range window (max_range itself still caps
+         the sensor's range). -->
     <model name="retro_sign">
       <static>true</static>
       <pose>-6 6 1.2 0 0 0</pose>
