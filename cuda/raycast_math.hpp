@@ -513,7 +513,7 @@ GZ_OUSTER_HD inline float rcHitReflectance(
 /// instead of the single sensor_r/sensor_t pose, modelling the rolling-
 /// shutter sweep of a spinning lidar (a scan's columns are acquired over a
 /// full period; ego motion during it skews the cloud by roughly the
-/// distance travelled — see docs/MODEL_REFERENCES.md §10).
+/// distance travelled — see docs/MODEL_REFERENCES.md §9).
 GZ_OUSTER_HD inline void rcCastOneRay(
     const RcInstance * instances, int n_instances,
     const float * verts, const int * tris, const int * order,

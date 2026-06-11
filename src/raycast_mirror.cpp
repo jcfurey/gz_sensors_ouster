@@ -372,7 +372,8 @@ void RaycastMirror::postUpdate(
     // intensity). Ouster's NEAR_IR counts ambient sunlight reflected off
     // the scene; with no sun the channel falls back to ambient-only
     // (nir = albedo). Weights: 0.3 ambient + 0.7·diffuse sun keeps
-    // nir ∈ [0, albedo] like the legacy analogue.
+    // hit values in [0.3·albedo, albedo] (full Lambert shadow → facing the
+    // sun), capped at the legacy analogue's albedo ceiling; misses stay 0.
     float sun[5] = {0.0f, 0.0f, -1.0f, 0.0f, 1.0f};
     ecm.Each<::gz::sim::components::Light>(
         [&](const ::gz::sim::Entity & ent,

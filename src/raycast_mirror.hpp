@@ -6,7 +6,7 @@
 // worker via shared_ptr snapshots so a rebuild never races an in-flight
 // cast), refreshes per-instance transforms every scan, and runs a worker
 // thread that casts the scan on the active backend and hands the
-// depth+retro frame through the FrameExchange.
+// [depth|retro|nir] frame through the FrameExchange.
 
 #pragma once
 
@@ -125,7 +125,7 @@ private:
     // propagation direction + diffuse/ambient weights (no directional light
     // in the world → ambient-only, nir = albedo).
     float job_sun_[5] = {0.0f, 0.0f, -1.0f, 0.0f, 1.0f};
-    std::vector<float> out_;         // worker-local depth+retro
+    std::vector<float> out_;         // worker-local [depth|retro|nir] planes
 
     // Standalone clock for throttled logs (no ROS node dependency).
     rclcpp::Clock throttle_clock_;
