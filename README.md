@@ -32,15 +32,22 @@ For example, with `<sensor_name>/sensor/lidar/lidar0</sensor_name>`:
 |-------|------|------|-------------|
 | `.../lidar_packets` | `ouster_sensor_msgs/PacketMsg` | lidar_hz | Native Ouster lidar packets |
 | `.../metadata` | `std_msgs/String` | Latched | Ouster calibration JSON |
-| `.../range_image` | `sensor_msgs/Image` | lidar_hz | Range in mm (mono16) |
-| `.../signal_image` | `sensor_msgs/Image` | lidar_hz | Signal photon counts (mono16) |
-| `.../reflec_image` | `sensor_msgs/Image` | lidar_hz | Reflectivity (mono16) |
-| `.../nearir_image` | `sensor_msgs/Image` | lidar_hz | Near-IR (mono16) |
-| `.../camera_info` | `sensor_msgs/CameraInfo` | lidar_hz | Range-image camera metadata (H×W, frame_id). `distortion_model` is the non-standard string `equirectangular`: u is linear in azimuth, v linear in elevation; fx/fy in K are pixels-per-radian. Standard pinhole/fisheye consumers must not reproject with it. |
+| `.../range_image` | `sensor_msgs/Image` | lidar_hz | Range in mm (mono16). Native; off unless `publish_native_images` (see below) |
+| `.../signal_image` | `sensor_msgs/Image` | lidar_hz | Signal photon counts (mono16). Native; off unless `publish_native_images` |
+| `.../reflec_image` | `sensor_msgs/Image` | lidar_hz | Reflectivity (mono16). Native; off unless `publish_native_images` |
+| `.../nearir_image` | `sensor_msgs/Image` | lidar_hz | Near-IR (mono16). Native; off unless `publish_native_images` |
+| `.../camera_info` | `sensor_msgs/CameraInfo` | lidar_hz | Range-image camera metadata (H×W, frame_id). Native; off unless `publish_native_images`. `distortion_model` is the non-standard string `equirectangular`: u is linear in azimuth, v linear in elevation; fx/fy in K are pixels-per-radian. Standard pinhole/fisheye consumers must not reproject with it. |
 | `.../imu_packets` | `ouster_sensor_msgs/PacketMsg` | imu_hz | Native Ouster IMU packets (if IMU enabled) |
 | `.../imu` | `sensor_msgs/Imu` | imu_hz | Standard ROS IMU message (if IMU enabled) |
 
-Image, CameraInfo, and IMU topics are only published when subscribers are present.
+The native image + CameraInfo topics are **off by default** (`publish_native_images=false`):
+in sim the ouster_ros `os_image` node is the single image source, driven by the same
+`lidar_packets` + `metadata` it consumes on hardware, so what you see in sim matches the
+real driver (auto-exposure, beam-uniformity, destaggering). The plugin's native renditions
+are raw (no auto-exposure) and draw noise independently, so running both would publish two
+divergent versions of each topic. Set `publish_native_images=true` only to A/B the native
+images. When enabled, image/CameraInfo and IMU topics are still published lazily — only when
+a subscriber is present.
 
 ## Supported ROS 2 / Gazebo versions
 
@@ -490,7 +497,8 @@ exactly (neither BEST_EFFORT-pub-to-RELIABLE-sub nor the reverse work).
 
 | Parameter | Default | Accepted values | Affects |
 |-----------|---------|-----------------|---------|
-| `image_qos` | `reliable` | `reliable` \| `best_effort` \| `sensor_data` | range/signal/reflec/nearir image + camera_info |
+| `publish_native_images` | `false` | `true` \| `false` | enables the native range/signal/reflec/nearir image + camera_info pubs (off: os_image is the image source in sim) |
+| `image_qos` | `reliable` | `reliable` \| `best_effort` \| `sensor_data` | range/signal/reflec/nearir image + camera_info (when `publish_native_images`) |
 | `imu_qos`   | `sensor_data` | `reliable` \| `best_effort` \| `sensor_data` | imu + imu_packets |
 
 Defaults match the most common consumers: `reliable` for images

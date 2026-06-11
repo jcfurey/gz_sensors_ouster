@@ -149,6 +149,9 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("imu_qos")) {
         imu_qos_ = sdf->Get<std::string>("imu_qos");
     }
+    if (sdf->HasElement("publish_native_images")) {
+        publish_native_images_ = sdf->Get<bool>("publish_native_images");
+    }
 
     // Noise model SDF parameters (all optional, with sensible Ouster defaults)
     if (sdf->HasElement("range_noise_min_std")) {
@@ -375,6 +378,7 @@ void GzGpuOusterLidarSystem::Configure(
         cfg.sensor_name = sensor_name_;
         cfg.image_qos = image_qos_;
         cfg.imu_qos = imu_qos_;
+        cfg.publish_native_images = publish_native_images_;
         cfg.image_frame_id = image_frame_id_;
         cfg.imu_frame_id = imu_frame_id_;
         cfg.metadata_str = meta_->metadata_str;

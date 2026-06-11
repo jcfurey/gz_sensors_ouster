@@ -14,20 +14,37 @@ Visualization Manager:
       Name: TF
       Enabled: true
       Show Names: true
+    # os_image publishes the images on SensorDataQoS (BEST_EFFORT), matching
+    # the real ouster_ros driver — so the Image displays must subscribe Best
+    # Effort or RViz drops every frame on a QoS-incompatibility.
     - Class: rviz_default_plugins/Image
       Name: RangeImage
       Enabled: true
       Topic:
         Value: /sensor/lidar/lidar0/range_image
         Depth: 5
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
     - Class: rviz_default_plugins/Image
       Name: SignalImage
       Enabled: true
       Topic:
         Value: /sensor/lidar/lidar0/signal_image
         Depth: 5
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/Image
+      Name: ReflecImage
+      Enabled: true
+      Topic:
+        Value: /sensor/lidar/lidar0/reflec_image
+        Depth: 5
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/Image
+      Name: NearIrImage
+      Enabled: true
+      Topic:
+        Value: /sensor/lidar/lidar0/nearir_image
+        Depth: 5
+        Reliability Policy: Best Effort
     - Class: rviz_default_plugins/PointCloud2
       Name: PointCloud
       Enabled: true

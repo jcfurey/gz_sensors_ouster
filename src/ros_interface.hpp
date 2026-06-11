@@ -46,6 +46,13 @@ struct RosInterfaceConfig {
     double imu_hz = 100.0;
     bool imu_enabled = false;
     bool publish_imu_msg = true;
+    /// Publish the range/signal/reflec/nearir images + camera_info directly
+    /// from the plugin. Default false: in sim the ouster_ros os_image node is
+    /// the single image source (driven by lidar_packets + metadata, same as on
+    /// hardware), so the plugin's native renditions — which differ (no
+    /// auto-exposure, independent noise draws) — would otherwise be a second,
+    /// divergent source. Enable only to A/B the native images for debugging.
+    bool publish_native_images = false;
 };
 
 class RosInterface {

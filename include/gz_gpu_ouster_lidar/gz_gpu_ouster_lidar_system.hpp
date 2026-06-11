@@ -82,6 +82,7 @@ private:
     std::string panel_sampling_ = "bilinear";  // "bilinear" | "nearest"
     std::string image_qos_ = "reliable";
     std::string imu_qos_ = "sensor_data";
+    bool publish_native_images_ = false;     // os_image is the sim image source
     double max_range_ = 120.0;               // metres, default OS1
     bool max_range_explicit_ = false;        // set via SDF (don't auto-derive)
 

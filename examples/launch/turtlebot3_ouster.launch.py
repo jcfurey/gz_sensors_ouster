@@ -164,6 +164,26 @@ def generate_launch_description():
             }],
         ),
 
+        # ouster_ros os_image: decodes the same lidar_packets + metadata into
+        # the range/signal/reflec/nearir images + camera_info — the SINGLE image
+        # source in sim, identical to hardware (it bakes in the Ouster azimuth
+        # flip + pixel_shift_by_row destagger; see os_image_node.cpp). The
+        # plugin's own native image pubs are off by default
+        # (publish_native_images=false) so there is exactly one rendition.
+        Node(
+            package='ouster_ros',
+            executable='os_image',
+            name='os_image',
+            namespace='/sensor/lidar/lidar0',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'timestamp_mode': 'TIME_FROM_ROS_TIME',
+                # frame_id intentionally left at the os_image default, matching
+                # the hardware bringup os_image node.
+            }],
+        ),
+
         Node(
             package='rviz2',
             executable='rviz2',

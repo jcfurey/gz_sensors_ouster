@@ -86,10 +86,12 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
     pkt_pub_ = node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
         abs_prefix + "/lidar_packets", pkt_qos);
 
-    // Image + camera_info: configurable via <image_qos> SDF tag, defaults
-    // RELIABLE KEEP_LAST(5) to match RViz / rqt_image_view / image_transport
-    // default subscribers. Override to "best_effort" if your consumer is
-    // Foxglove configured for sensor data.
+    // Image + camera_info: native renditions, OFF by default. In sim the
+    // ouster_ros os_image node is the single image source (see
+    // publish_native_images doc). When enabled, QoS is configurable via the
+    // <image_qos> SDF tag, defaulting RELIABLE KEEP_LAST(5) to match RViz /
+    // rqt_image_view / image_transport default subscribers.
+    if (cfg_.publish_native_images) {
     const auto image_qos = qos_from_string(cfg_.image_qos, 5);
     range_image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>(
         abs_prefix + "/range_image", image_qos);
@@ -150,6 +152,7 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
         camera_info_msg_.p = {fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0,
                               1.0, 0.0};
     }
+    }  // if (cfg_.publish_native_images)
 
     // IMU publishers (only if imu_name was provided in SDF). QoS is
     // configurable via <imu_qos>; defaults to sensor_data to match the
@@ -322,6 +325,11 @@ void RosInterface::publishImages(int64_t stamp_ns,
                                  const uint8_t * refl,
                                  const uint16_t * nearir)
 {
+    // Native image pubs are off by default (os_image is the sim image source);
+    // the publishers are never created in that case, so bail before touching
+    // them.
+    if (!cfg_.publish_native_images) return;
+
     const auto n = static_cast<size_t>(cfg_.H) * cfg_.W;
     const uint32_t h = static_cast<uint32_t>(cfg_.H);
     const uint32_t w = static_cast<uint32_t>(cfg_.W);
