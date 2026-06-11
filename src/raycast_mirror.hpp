@@ -24,10 +24,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace gz_gpu_ouster_lidar {
@@ -45,6 +47,10 @@ public:
         double max_range = 120.0;
         double lidar_hz = 10.0;
         double beam_origin_mm = 0.0;
+        /// Rolling-shutter motion distortion: cast each column from the
+        /// sensor pose at its acquisition time (interpolated from the
+        /// per-tick pose history) instead of one snapshot pose.
+        bool motion_distortion = false;
         const std::vector<float> * beam_alt_f = nullptr;
         const std::vector<float> * beam_az_f = nullptr;
     };
@@ -90,6 +96,18 @@ private:
     size_t visual_count_ = 0;        // rebuild trigger
     std::chrono::nanoseconds last_scan_time_{-1};
 
+    // Sensor pose history (sim time, sensor→world pose), recorded every
+    // PostUpdate tick; spans at least one scan period so per-column poses
+    // can be interpolated for motion distortion.
+    std::deque<std::pair<std::chrono::nanoseconds, ::gz::math::Pose3d>>
+        pose_history_;
+    /// Build per-column pose tables (9W + 3W floats) for the scan ending at
+    /// `scan_end`: column m's pose is SLERP/lerp-interpolated from the
+    /// history at t_m = scan_end − T + (m+1)·T/W.
+    void buildColumnPoses(std::chrono::nanoseconds scan_end,
+                          std::vector<float> & col_r,
+                          std::vector<float> & col_t) const;
+
     // Worker thread + job slot.
     std::thread thread_;
     std::mutex mtx_;
@@ -101,6 +119,8 @@ private:
     std::vector<rc::InstanceXform> job_xforms_;
     float job_sensor_r_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     float job_sensor_t_[3] = {0, 0, 0};
+    std::vector<float> job_col_r_;   // per-column poses (motion distortion;
+    std::vector<float> job_col_t_;   // empty = static snapshot pose)
     std::vector<float> out_;         // worker-local depth+retro
 
     // Standalone clock for throttled logs (no ROS node dependency).

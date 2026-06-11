@@ -213,7 +213,41 @@ mirrors strong), exactly the artifact Velas et al. detect and exploit. SDF
 has no roughness channel, so `ks = 0.5` is the gloss/mirror discriminator:
 keep paint below it, mirrors and glass near 1.
 
-### 9. Beam geometry — XYZ-LUT conventions
+### 9. Motion distortion — rolling-shutter sweep (raycast mode)
+
+**Model:** with `<motion_distortion>true</motion_distortion>` (default off),
+column m is cast from the sensor pose at its acquisition time
+`t_m = t_scan − T + (m+1)·T/W`, interpolated (linear position + quaternion
+SLERP) from a per-sim-tick pose history. Implemented in
+`RaycastMirror::buildColumnPoses` (`src/raycast_mirror.cpp`) with per-column
+pose tables threaded through `castScan` on all four backends
+(`rcCastOneRay` selects `col_r[9m]/col_t[3m]`).
+
+A spinning lidar acquires its W columns over a full period; platform motion
+during the sweep skews the cloud by roughly the distance travelled per scan
+(decimetres at walking speed, metres in vehicles — deskewing improves
+mapping accuracy by up to ~3 m at speed):
+
+- Zhao et al. — *Registration-based point cloud deskewing and dynamic lidar
+  simulation*, The Photogrammetric Record 39, 2024.
+- Manivasagam et al. — *LiDARsim*, CVPR 2020 (simulates per-ray sensor
+  poses); UTIAS Motion-Distorted Lidar Simulation Dataset.
+- Lovegrove et al. — *Spline Fusion*, BMVC 2013 / Furgale et al., ICRA 2012
+  — the continuous-time pose treatment for rolling-shutter sensors; sim
+  playback of known poses needs only the interpolation, not the spline
+  estimation machinery.
+
+Conventions and caveats: relative intra-scan timing matches the packet
+encoder exactly (its per-column timestamps are spaced `T/W` apart), so
+IMU-based de-skew pipelines see consistent data. The encoder stamps the
+scan window starting at the trigger, while the simulated acquisition times
+end at it — absolute timestamps lead the geometry by one period, which only
+matters for TF-lookup-based de-skew against sim ground truth. Ego motion
+only: other agents' poses stay at the scan-trigger snapshot (the dominant
+term; per-agent sweep interpolation is LiDARsim-style future work). Panels
+mode renders one snapshot and cannot apply this.
+
+### 10. Beam geometry — XYZ-LUT conventions
 
 **Model:** azimuth `enc − beam_azimuth` (`rpmath::beamRayAzimuthDeg`),
 beam-origin parallax (ray origins on the beam-origin circle; range reported
@@ -231,7 +265,7 @@ Ordered roughly by expected impact on downstream perception realism.
 
 | Effect | What a full model adds | Reference |
 |---|---|---|
-| **Motion distortion (rolling shutter)** | A spinning lidar sweeps its columns over ~1/`lidar_hz`; ego/agent motion during the sweep warps the cloud. This plugin snapshots the whole scan at one instant (README, Architecture §) — the dominant unmodeled effect for a moving platform. LiDARsim and CARLA both simulate per-column poses; correction methods quantify the magnitude. | Manivasagam et al. (LiDARsim), CVPR 2020; *Lidar with Velocity*, arXiv:2111.09497; UTIAS Motion-Distorted Lidar Simulation Dataset, <https://asrl.utias.utoronto.ca/datasets/mdlidar/> |
+| Agent motion during sweep | §9 distorts for EGO motion; other agents' poses stay at the scan-trigger snapshot. Fast crossing traffic also smears in reality (LiDARsim interpolates per-agent poses too). | *Lidar with Velocity*, arXiv:2111.09497; HiMo, arXiv:2503.00803 |
 | Beam divergence / footprint | Finite-footprint returns: edge mixing, multi-return, footprint-averaged ranges on oblique/rough surfaces; energy is ~2-D Gaussian over the footprint. HELIOS++ subsamples the beam cone. | Winiwarter et al. 2022 |
 | Retroreflector blooming / crosstalk | Very strong returns (signs, plates) saturate detectors and scatter into neighbouring channels — halo points, range bias. This plugin encodes ρ > 1 in the reflectivity byte but produces no artifacts. | *LiDAR Blooming Artifacts Estimation … with Synthetic Data Modeling*, IEEE (10.1109/10774004), 2024 |
 | Atmospheric attenuation | `P_r ∝ e^(−2ζR)`; ζ from rain rate / fog visibility via Mie scattering. Hooks cleanly into `signalFromRange` if weather sim is ever needed. | Rasshofer et al., Adv. Radio Sci. 9, 2011; MDPI Sensors 23(15):6891, 2023 |

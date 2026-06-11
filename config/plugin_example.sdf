@@ -113,6 +113,13 @@
        where a neighbor differs by more than this threshold (metres). 0 = off. -->
   <!-- <edge_discon_threshold>0.15</edge_discon_threshold> -->
 
+  <!-- Rolling-shutter motion distortion (raycast mode only): cast each
+       column from the sensor pose at its acquisition time, skewing the
+       cloud by the platform's motion over one scan period like a real
+       spinning lidar (docs/MODEL_REFERENCES.md §9). Default false =
+       instantaneous snapshot. -->
+  <!-- <motion_distortion>true</motion_distortion> -->
+
   <!-- ─── IMU (optional) ──────────────────────────────────────────── -->
   <!-- Publishes: .../imu_packets (Ouster PacketMsg) and .../imu (sensor_msgs/Imu).
        Requires gz-sim-imu-system plugin loaded in your world SDF:

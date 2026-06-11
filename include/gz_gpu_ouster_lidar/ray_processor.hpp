@@ -163,7 +163,9 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out);
+        float * retro_out,
+        const float * col_r = nullptr,
+        const float * col_t = nullptr);
 
     /// Returns true when the active backend is the CPU fallback (no GPU
     /// path is compiled in, or all GPU probes failed at construction).

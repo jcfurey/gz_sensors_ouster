@@ -113,7 +113,8 @@ void castScan(const SceneView & scene,
               const float * beam_az_deg,
               const float sensor_r[9], const float sensor_t[3],
               const ScanParams & sp,
-              float * range_out, float * retro_out);
+              float * range_out, float * retro_out,
+              const float * col_r = nullptr, const float * col_t = nullptr);
 
 }  // namespace rc
 }  // namespace gz_gpu_ouster_lidar

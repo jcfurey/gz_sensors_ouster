@@ -116,7 +116,9 @@ __global__ void castScanKernel(
     // passed by value — the device cannot dereference a host reference.
     RcCastArgs args,
     float * __restrict__ range_out,
-    float * __restrict__ retro_out)
+    float * __restrict__ retro_out,
+    const float * __restrict__ col_r,   // per-column poses (motion
+    const float * __restrict__ col_t)   // distortion); may be nullptr
 {
     const int n = args.sp.H * args.sp.W;
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -125,7 +127,7 @@ __global__ void castScanKernel(
     float range, retro;
     rc::rcCastOneRay(instances, args.n_instances, verts, tris, order, nodes,
                      xforms, beam_alt, beam_az, args.sr, args.st, args.sp,
-                     idx, CUDART_INF_F, range, retro);
+                     idx, CUDART_INF_F, range, retro, col_r, col_t);
     range_out[idx] = range;
     retro_out[idx] = retro;
 }
@@ -327,6 +329,8 @@ public:
         if (d_refl_)        cudaFree(d_refl_);
         if (d_nearir_)      cudaFree(d_nearir_);
         if (d_raw_frame_)   cudaFree(d_raw_frame_);
+        if (d_col_r_)       cudaFree(d_col_r_);
+        if (d_col_t_)       cudaFree(d_col_t_);
         if (d_beam_alt_)    cudaFree(d_beam_alt_);
         if (d_beam_az_)     cudaFree(d_beam_az_);
         if (d_rc_insts_)    cudaFree(d_rc_insts_);
@@ -438,13 +442,27 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out) override
+        float * retro_out,
+        const float * col_r,
+        const float * col_t) override
     {
         const int out_n = sp.H * sp.W;
         ensureBuffers(out_n);
         ensureRetroBuffer(out_n);
         ensureSceneBuffers(scene, scene_version);
         ensureResampleBuffers(0, sp.H);  // beam-angle buffers only
+
+        // Per-column sensor poses (motion distortion): upload per scan.
+        const bool have_cols = (col_r != nullptr && col_t != nullptr);
+        if (have_cols) {
+            ensureColPoseBuffers(sp.W);
+            CUDA_CHECK(cudaMemcpyAsync(d_col_r_, col_r,
+                static_cast<size_t>(sp.W) * 9 * sizeof(float),
+                cudaMemcpyHostToDevice, stream_));
+            CUDA_CHECK(cudaMemcpyAsync(d_col_t_, col_t,
+                static_cast<size_t>(sp.W) * 3 * sizeof(float),
+                cudaMemcpyHostToDevice, stream_));
+        }
 
         if (scene.n_instances > 0) {
             CUDA_CHECK(cudaMemcpyAsync(d_rc_xforms_, xforms,
@@ -472,7 +490,9 @@ public:
             static_cast<const float *>(d_beam_az_),
             args,
             static_cast<float *>(d_depth_),
-            static_cast<float *>(d_retro_));
+            static_cast<float *>(d_retro_),
+            have_cols ? static_cast<const float *>(d_col_r_) : nullptr,
+            have_cols ? static_cast<const float *>(d_col_t_) : nullptr);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cudaMemcpyAsync(range_out, d_depth_,
@@ -587,6 +607,16 @@ private:
         retro_n_ = n;
     }
 
+    // Per-column pose tables (motion distortion); lazy — the static-pose
+    // path pays nothing for them.
+    void ensureColPoseBuffers(int W)
+    {
+        if (W <= col_pose_n_) return;
+        realloc_(d_col_r_, static_cast<size_t>(W) * 9 * sizeof(float));
+        realloc_(d_col_t_, static_cast<size_t>(W) * 3 * sizeof(float));
+        col_pose_n_ = W;
+    }
+
     void ensureRandStates(int n)
     {
         if (n <= rand_n_) return;
@@ -642,6 +672,9 @@ private:
     void * d_raw_frame_ = nullptr;
     void * d_beam_alt_  = nullptr;
     void * d_beam_az_   = nullptr;
+    void * d_col_r_ = nullptr;   // per-column pose tables (motion distortion)
+    void * d_col_t_ = nullptr;
+    int col_pose_n_ = 0;
     // uploadBeamTables cache identity (host source pointers + count).
     const float * beam_src_alt_ = nullptr;
     const float * beam_src_az_  = nullptr;

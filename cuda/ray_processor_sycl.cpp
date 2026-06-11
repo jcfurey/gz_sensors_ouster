@@ -97,6 +97,8 @@ public:
         maybeFree(u_refl_);
         maybeFree(u_nearir_);
         maybeFree(u_raw_frame_);
+        maybeFree(u_col_r_);
+        maybeFree(u_col_t_);
         maybeFree(u_beam_alt_);
         maybeFree(u_beam_az_);
         maybeFree(u_rc_insts_);
@@ -182,13 +184,29 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out) override
+        float * retro_out,
+        const float * col_r,
+        const float * col_t) override
     {
         const int out_n = sp.H * sp.W;
         ensureBuffers(out_n);
         ensureRetroBuffer(out_n);
         ensureSceneBuffers(scene, scene_version);
         ensureResampleBuffers(0, sp.H);  // beam-angle buffers only
+
+        // Per-column sensor poses (motion distortion): copy into USM.
+        const bool have_cols = (col_r != nullptr && col_t != nullptr);
+        if (have_cols) {
+            if (sp.W > col_pose_n_) {
+                allocShared(u_col_r_, static_cast<size_t>(sp.W) * 9);
+                allocShared(u_col_t_, static_cast<size_t>(sp.W) * 3);
+                col_pose_n_ = sp.W;
+            }
+            std::memcpy(u_col_r_, col_r,
+                        static_cast<size_t>(sp.W) * 9 * sizeof(float));
+            std::memcpy(u_col_t_, col_t,
+                        static_cast<size_t>(sp.W) * 3 * sizeof(float));
+        }
 
         if (scene.n_instances > 0) {
             std::memcpy(u_rc_xforms_, xforms,
@@ -219,6 +237,8 @@ public:
         SrSt pose{};
         std::memcpy(pose.sr, sr, sizeof(sr));
         std::memcpy(pose.st, st, sizeof(st));
+        const float * cols_r = have_cols ? u_col_r_ : nullptr;
+        const float * cols_t = have_cols ? u_col_t_ : nullptr;
 
         q_.parallel_for(sycl::range<1>{static_cast<size_t>(out_n)},
             [=](sycl::id<1> it) {
@@ -226,7 +246,7 @@ public:
                 float range, retro;
                 rc::rcCastOneRay(insts, n_inst, verts, tris, order, nodes,
                                  xf, alt, az, pose.sr, pose.st, sp_copy,
-                                 idx, kInf, range, retro);
+                                 idx, kInf, range, retro, cols_r, cols_t);
                 d_range[idx] = range;
                 d_retro[idx] = retro;
             });
@@ -492,6 +512,9 @@ private:
     float *    u_raw_frame_ = nullptr;
     float *    u_beam_alt_  = nullptr;
     float *    u_beam_az_   = nullptr;
+    float *    u_col_r_     = nullptr;  // per-column pose tables
+    float *    u_col_t_     = nullptr;  // (motion distortion)
+    int        col_pose_n_  = 0;
     // uploadBeamTables cache identity (host source pointers + count).
     const float * beam_src_alt_ = nullptr;
     const float * beam_src_az_  = nullptr;

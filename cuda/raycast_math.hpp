@@ -498,6 +498,13 @@ GZ_OUSTER_HD inline float rcHitReflectance(
 /// value satisfying the XYZ-LUT reconstruction, see castScan docs) and the
 /// nearest hit's APPARENT reflectance: laser_retro × cos(incidence)
 /// (0 on a miss, or when laser_retro is unset).
+///
+/// `col_r`/`col_t` (optional, both or neither): per-COLUMN sensor→world
+/// poses for motion distortion — column m casts from col_r[9m..]/col_t[3m..]
+/// instead of the single sensor_r/sensor_t pose, modelling the rolling-
+/// shutter sweep of a spinning lidar (a scan's columns are acquired over a
+/// full period; ego motion during it skews the cloud by roughly the
+/// distance travelled — see docs/MODEL_REFERENCES.md §10).
 GZ_OUSTER_HD inline void rcCastOneRay(
     const RcInstance * instances, int n_instances,
     const float * verts, const int * tris, const int * order,
@@ -506,12 +513,20 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     const float * beam_alt_deg, const float * beam_az_deg,
     const float * sensor_r, const float * sensor_t,
     const ScanParams & sp, int idx, float inf_value,
-    float & range_out, float & retro_out)
+    float & range_out, float & retro_out,
+    const float * col_r = nullptr, const float * col_t = nullptr)
 {
     const int beam = idx / sp.W;
     const int m = idx % sp.W;
     const float deg_per_col = 360.0f / static_cast<float>(sp.W);
     const float n_off = sp.beam_origin_m;
+
+    const float * sr = sensor_r;
+    const float * st = sensor_t;
+    if (col_r != nullptr && col_t != nullptr) {
+        sr = col_r + 9 * m;
+        st = col_t + 3 * m;
+    }
 
     // Encoder azimuth (column) and full beam azimuth (with calibration
     // offset; sign convention in rpmath::beamRayAzimuthDeg). The ray origin
@@ -531,8 +546,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     const RcV3 o_s{n_off * rpmath::gzm::cos_(az_enc),
                    n_off * rpmath::gzm::sin_(az_enc), 0.0f};
 
-    const RcV3 o = rcXformPoint(sensor_r, sensor_t, o_s);
-    const RcV3 d = rcRotate(sensor_r, d_s);
+    const RcV3 o = rcXformPoint(sr, st, o_s);
+    const RcV3 d = rcRotate(sr, d_s);
 
     const float t_budget = sp.max_range - n_off;
 

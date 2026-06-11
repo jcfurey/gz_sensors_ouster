@@ -75,6 +75,9 @@ private:
     double lidar_hz_ = 10.0;
     uint32_t visibility_mask_ = 0xFFFFFFFFu;
     std::string ray_mode_ = "panels";        // "panels" | "raycast"
+    // Rolling-shutter motion distortion (raycast mode only): cast each
+    // column from the sensor pose at its acquisition time.
+    bool motion_distortion_ = false;
     double panel_oversample_ = 2.0;          // clamped 1..4
     std::string panel_sampling_ = "bilinear";  // "bilinear" | "nearest"
     std::string image_qos_ = "reliable";

@@ -71,7 +71,9 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out) = 0;
+        float * retro_out,
+        const float * col_r,
+        const float * col_t) = 0;
 
     /// Short identifier: "cuda", "hip", "sycl", or "cpu".
     virtual const char * name() const = 0;

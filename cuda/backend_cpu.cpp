@@ -58,11 +58,14 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out) override
+        float * retro_out,
+        const float * col_r,
+        const float * col_t) override
     {
         // OpenMP-parallel reference implementation; no upload, no cache.
         rc::castScan(scene, xforms, beam_alt_deg, beam_az_deg,
-                     sensor_r, sensor_t, sp, range_out, retro_out);
+                     sensor_r, sensor_t, sp, range_out, retro_out,
+                     col_r, col_t);
     }
 
     const char * name() const override { return "cpu"; }

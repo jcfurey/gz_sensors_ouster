@@ -172,6 +172,9 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("false_alarm_rate")) {
         false_alarm_rate_ = sdf->Get<double>("false_alarm_rate");
     }
+    if (sdf->HasElement("motion_distortion")) {
+        motion_distortion_ = sdf->Get<bool>("motion_distortion");
+    }
     if (sdf->HasElement("edge_discon_threshold")) {
         edge_discon_threshold_ = sdf->Get<double>("edge_discon_threshold");
     }
@@ -444,6 +447,7 @@ void GzGpuOusterLidarSystem::Configure(
         mp.max_range = max_range_;
         mp.lidar_hz = lidar_hz_;
         mp.beam_origin_mm = meta_->beam_origin_mm;
+        mp.motion_distortion = motion_distortion_;
         mp.beam_alt_f = &meta_->beam_alt_f;
         mp.beam_az_f = &meta_->beam_az_f;
         mirror_->start(mp, ray_processor_.get(), &processor_mtx_,

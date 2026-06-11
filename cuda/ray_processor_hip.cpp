@@ -103,7 +103,9 @@ __global__ void castScanKernelHip(
     // passed by value — the device cannot dereference a host reference.
     RcCastArgsHip args,
     float * __restrict__ range_out,
-    float * __restrict__ retro_out)
+    float * __restrict__ retro_out,
+    const float * __restrict__ col_r,   // per-column poses (motion
+    const float * __restrict__ col_t)   // distortion); may be nullptr
 {
     const int n = args.sp.H * args.sp.W;
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -112,7 +114,8 @@ __global__ void castScanKernelHip(
     float range, retro;
     rc::rcCastOneRay(instances, args.n_instances, verts, tris, order, nodes,
                      xforms, beam_alt, beam_az, args.sr, args.st, args.sp,
-                     idx, __int_as_float(0x7f800000), range, retro);
+                     idx, __int_as_float(0x7f800000), range, retro,
+                     col_r, col_t);
     range_out[idx] = range;
     retro_out[idx] = retro;
 }
@@ -246,6 +249,8 @@ public:
         maybeFree(d_refl_);
         maybeFree(d_nearir_);
         maybeFree(d_raw_frame_);
+        maybeFree(d_col_r_);
+        maybeFree(d_col_t_);
         maybeFree(d_beam_alt_);
         maybeFree(d_beam_az_);
         maybeFree(d_rc_insts_);
@@ -367,13 +372,23 @@ public:
         const float sensor_t[3],
         const rc::ScanParams & sp,
         float * range_out,
-        float * retro_out) override
+        float * retro_out,
+        const float * col_r,
+        const float * col_t) override
     {
         const int out_n = sp.H * sp.W;
         ensureBuffers(out_n);
         ensureRetroBuffer(out_n);
         ensureSceneBuffers(scene, scene_version);
         ensureResampleBuffers(0, sp.H);  // beam-angle buffers only
+
+        // Per-column sensor poses (motion distortion): upload per scan.
+        const bool have_cols = (col_r != nullptr && col_t != nullptr);
+        if (have_cols) {
+            ensureColPoseBuffers(sp.W);
+            h2d(d_col_r_, col_r, static_cast<size_t>(sp.W) * 9 * sizeof(float));
+            h2d(d_col_t_, col_t, static_cast<size_t>(sp.W) * 3 * sizeof(float));
+        }
 
         if (scene.n_instances > 0) {
             h2d(d_rc_xforms_, xforms,
@@ -400,7 +415,9 @@ public:
             static_cast<const float *>(d_beam_az_),
             args,
             static_cast<float *>(d_depth_),
-            static_cast<float *>(d_retro_));
+            static_cast<float *>(d_retro_),
+            have_cols ? static_cast<const float *>(d_col_r_) : nullptr,
+            have_cols ? static_cast<const float *>(d_col_t_) : nullptr);
         HIP_CHECK(hipGetLastError());
 
         d2h(range_out, d_depth_, static_cast<size_t>(out_n) * sizeof(float));
@@ -525,6 +542,15 @@ private:
         beam_src_h_ = H;
     }
 
+    // Per-column pose tables (motion distortion); lazy.
+    void ensureColPoseBuffers(int W)
+    {
+        if (W <= col_pose_n_) return;
+        allocDev(d_col_r_, static_cast<size_t>(W) * 9 * sizeof(float));
+        allocDev(d_col_t_, static_cast<size_t>(W) * 3 * sizeof(float));
+        col_pose_n_ = W;
+    }
+
     // Retro device buffer is only used by processDepth (raycast mode);
     // allocated lazily so the panels path pays nothing for it.
     void ensureRetroBuffer(int n)
@@ -577,6 +603,9 @@ private:
     void * d_rand_states_ = nullptr;
     void * d_raw_frame_ = nullptr;
     void * d_beam_alt_ = nullptr;
+    void * d_col_r_ = nullptr;   // per-column pose tables (motion distortion)
+    void * d_col_t_ = nullptr;
+    int col_pose_n_ = 0;
     // uploadBeamTables cache identity (host source pointers + count).
     const float * beam_src_alt_ = nullptr;
     const float * beam_src_az_  = nullptr;
