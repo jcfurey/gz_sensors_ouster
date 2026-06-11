@@ -237,13 +237,14 @@ TEST(NoiseModel, RangeNoiseAddsVariance)
     // Expected per-sample sigma:
     //   t = depth / max_range = 50 / 120 ≈ 0.417
     //   sigma = min_std + t*(max_std - min_std) = 10 + 0.417*20 = 18.3 mm
-    //   refl_factor at retro=0.5 = min(1/0.5, 2) = 2.0
-    //   effective sigma ≈ 36.7 mm; expected variance ≈ 1346 mm²
-    //   SE of mean over N=10000 ≈ 0.37 mm
-    // Bound mean to ±5 mm (~14σ_mean) and variance to within 2× of expected.
+    //   refl_factor at retro=0.5 = min(1/sqrt(0.5), 2) ≈ 1.414  (σ ∝ 1/√ρ;
+    //   see rangeNoiseSigma)
+    //   effective sigma ≈ 25.9 mm; expected variance ≈ 671 mm²
+    //   SE of mean over N=10000 ≈ 0.26 mm
+    // Bound mean to ±5 mm (~19σ_mean) and variance to within 2× of expected.
     EXPECT_NEAR(mean, 50000.0, 5.0);
-    EXPECT_GT(var, 700.0);
-    EXPECT_LT(var, 3000.0);
+    EXPECT_GT(var, 350.0);
+    EXPECT_LT(var, 1400.0);
 }
 
 TEST(NoiseModel, DropoutsReduceValidCount)
