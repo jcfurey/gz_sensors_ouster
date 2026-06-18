@@ -39,6 +39,15 @@ case "$cmd" in
 
   drive|gui)
     echo "[entrypoint] interactive sim (raycast)."
+    # Warn early if no display is available so the user gets actionable guidance
+    # instead of a cryptic Qt/xcb crash from deep inside gz sim.
+    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+      echo "[entrypoint] WARNING: no display detected (DISPLAY and WAYLAND_DISPLAY are unset)."
+      echo "[entrypoint]   X11 (Linux/WSLg):  docker run -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix ... gzouster $cmd"
+      echo "[entrypoint]   X11 (WSL+VcXsrv):  docker run -e DISPLAY=<windows-ip>:0.0 ... gzouster $cmd"
+      echo "[entrypoint]   Wayland:            docker run -e WAYLAND_DISPLAY -e XDG_RUNTIME_DIR -v \$XDG_RUNTIME_DIR:\$XDG_RUNTIME_DIR ... gzouster $cmd"
+      echo "[entrypoint]   No display needed:  docker run --rm gzouster smoke"
+    fi
     # Both bring up RViz by default; disable with `-e RVIZ=false` (note: docker
     # -e flags go BEFORE the image name). drive also runs teleop in the
     # foreground; gui just shows the windows.

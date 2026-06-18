@@ -672,4 +672,40 @@ TEST(Raycast, ProcessDepthThroughRayProcessor)
     }
 }
 
+TEST(Raycast, ApparentReflectanceCombinedKdKs)
+{
+    // Dead-centre hit: cos_inc=1, c2=1, lobe=1^8=1.
+    // rcApparentReflectance = retro*1 + spec*1 = 0.8 + 0.4 = 1.2.
+    rc::Scene scene;
+    const float ssize[3] = {1.0f, 0.0f, 0.0f};
+    const int si = scene.addInstance(rc::GeomType::kSphere, ssize,
+                                     /*retro=*/0.8f, -1, /*spec=*/0.4f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 3.0f, 0.0f, 0.0f)};
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> retro;
+    const auto range = cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+
+    EXPECT_NEAR(range[0], 2.0f, 1e-4f);
+    EXPECT_NEAR(retro[0], 1.2f, 1e-4f);
+}
+
+TEST(Raycast, ApparentReflectanceSpecularLobeZeroAtFortyFive)
+{
+    // Impact parameter b = r*sin(45°) = r*√2/2 → cos_inc = √2/2.
+    // c2 = 2*(√2/2)²−1 = 0 → specular lobe branch not entered.
+    // rcApparentReflectance = retro*(√2/2) + 0 ≈ 0.8*0.70711 ≈ 0.5657.
+    rc::Scene scene;
+    const float ssize[3] = {0.5f, 0.0f, 0.0f};
+    const int si = scene.addInstance(rc::GeomType::kSphere, ssize,
+                                     /*retro=*/0.8f, -1, /*spec=*/1.0f);
+    const float offset_y = 0.5f * 0.70710678f;  // r * sin(45°) = √2/4
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 3.0f, offset_y, 0.0f)};
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> retro;
+    const auto range = cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+
+    EXPECT_NEAR(range[0], 3.0f - 0.35355f, 1e-3f);  // 3 - √(r²−b²) = 3 - r/√2
+    EXPECT_NEAR(retro[0], 0.8f * 0.70711f, 1e-3f);  // no specular contribution
+}
+
 }  // namespace gz_gpu_ouster_lidar

@@ -17,7 +17,7 @@
   ray_mode defaults to *raycast*: the plugin casts every beam on the CPU against
   an ECM-mirrored scene, so NO render engine / GPU is needed — the headless smoke
   runs anywhere. (Pass ray_mode:=panels for the GpuRays path, which needs a
-  rendering world such as ouster_demo.sdf.)
+  rendering world such as ouster_demo_panels.sdf.)
 
   Spawn via examples/launch/turtlebot3_ouster.launch.py, which passes an ABSOLUTE
   metadata path (relative paths resolve against an on-disk SDF dir, which does not

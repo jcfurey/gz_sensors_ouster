@@ -89,12 +89,14 @@ For IMU simulation, your world SDF must also load the Gazebo IMU system:
 <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
 ```
 
-### World requirements (read this if no point cloud is published)
+### World requirements
 
-This plugin does **not** register a `<sensor type="gpu_lidar">`. It creates its
-own rig of perspective depth cameras inside the ogre2 scene that
-`gz-sim-sensors-system` owns, and it is
-driven by that system's `events::Render` event. Therefore the world must:
+The default `raycast` mode casts beams against the ECM scene mirror with no
+render engine. The only world requirement is `gz-sim-physics-system` (pose
+updates). The bundled examples also load `gz-sim-altimeter-system` so the
+non-rendering `altimeter` pose anchor is handled without Gazebo warnings.
+
+**`panels` mode** adds two requirements:
 
 1. Load the Sensors system with the ogre2 engine:
    ```xml
@@ -102,26 +104,50 @@ driven by that system's `events::Render` event. Therefore the world must:
      <render_engine>ogre2</render_engine>
    </plugin>
    ```
-> **Exception:** with `<ray_mode>raycast</ray_mode>` neither requirement
-> applies — the raycast mode never touches the renderer. The two points
-> below concern the default `panels` mode only.
 
 2. Contain **at least one rendering sensor** (`camera`, `gpu_lidar`,
    `depth_camera`, …). On Gazebo Harmonic the Sensors system only initialises
    rendering — building the scene and emitting `events::Render` — once such a
-   sensor exists in the ECM. With **only** non-rendering sensors (e.g. an
+   sensor exists in the ECM. With only non-rendering sensors (e.g. an
    `altimeter` pose anchor plus an `imu`), the Sensors system never starts
    rendering, `OnRender()` never fires, the panel rig is never created, and **no
-   point cloud is produced**.
+   point cloud is produced**. The plugin logs a one-shot error after ~2 s of
+   sim time: *"events::Render has not fired … add a rendering sensor"*.
 
-The bundled examples satisfy (2) by defaulting the pose-anchor sensor to a tiny
-**`camera`** (see `examples/urdf/ouster_macro.xacro`, `anchor_type:=camera`) —
-the cheapest renderer, which bootstraps the scene **without** adding a second
-lidar. Use `anchor_type:=gpu_lidar` if you also want a native gz scan on
-`<sensor_name>/gz_native_scan` (note: that is a second lidar raycast source and
-will show as an extra cloud if visualised). If this requirement is unmet the
-plugin logs a one-shot error after ~2 s of sim time: *"events::Render has not
-fired … add a rendering sensor"*.
+The bundled `ouster_demo_panels.sdf` world is the panels-mode (rendering)
+counterpart of `ouster_demo.sdf`. The example launches select it automatically:
+
+```bash
+ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
+```
+
+Passing `ray_mode:=panels` loads `ouster_demo_panels.sdf` and derives
+`anchor_type:=camera` automatically — no separate flag needed. Panels needs a
+render-capable host (ogre2/GPU); on broken-render hosts use the default
+`ray_mode:=raycast` instead.
+
+## Workspace setup
+
+`ouster-ros` is not available at the required API version via apt, so both
+packages must be source-built. The provided `gz_sensors_ouster.repos` file
+pins the exact commits used by CI:
+
+```bash
+mkdir -p ~/ros2_ws/src && cd ~/ros2_ws
+vcs import src < /path/to/gz_sensors_ouster.repos   # or after cloning:
+# vcs import src < src/gz_sensors_ouster/gz_sensors_ouster.repos
+
+# Install system dependencies (Gazebo vendor packages, Eigen, etc.)
+rosdep update && rosdep install --from-paths src --rosdistro=jazzy -y --ignore-src
+
+source /opt/ros/jazzy/setup.bash
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+```
+
+> **Note:** `ouster-ros` is pinned to an exact commit SHA in
+> `gz_sensors_ouster.repos`.  To advance the dependency, update the SHA there
+> and in the three other places that mirror it: `ci.yaml`,
+> `Dockerfile`, and `.claude/hooks/session-start.sh`.
 
 ## Build
 
@@ -249,7 +275,8 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `urdf/ouster_standalone.urdf.xacro` | Single OS1-64 + IMU on a pedestal |
 | `urdf/sensor_stack.urdf.xacro` | Platform with front OS1-64+IMU and rear OS0-128 |
 | `urdf/turtlebot3_ouster.urdf.xacro` | A drivable TurtleBot3 waffle carrying the Ouster (used by the Docker test) |
-| `worlds/ouster_demo.sdf` | Demo world (physics + sensors + IMU systems, ground + obstacles) |
+| `worlds/ouster_demo.sdf` | Demo world (physics + altimeter + IMU systems, ground + obstacles). GPU-free: raycast mode, no rendering Sensors system |
+| `worlds/ouster_demo_panels.sdf` | Panels-mode counterpart of `ouster_demo.sdf` (loads gz-sim-sensors-system/ogre2). Selected automatically by example launches when `ray_mode:=panels` |
 | `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
@@ -259,8 +286,10 @@ Run (after `colcon build` + `source install/setup.bash`):
 
 ```bash
 ros2 launch gz_sensors_ouster ouster_standalone.launch.py
-# multi-sensor: ros2 launch gz_sensors_ouster sensor_stack.launch.py
-# with RViz:    ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
+# multi-sensor:  ros2 launch gz_sensors_ouster sensor_stack.launch.py
+# with RViz:     ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
+# panels mode:   ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
+# WSL/headless:  ros2 launch gz_sensors_ouster ouster_standalone.launch.py headless:=true
 ```
 
 Each launch starts Gazebo with the demo world, runs
@@ -274,9 +303,13 @@ plugin via `rclcpp`, so they need no bridge).
 `lidar_packets` are assembled into a `PointCloud2` on
 `/sensor/lidar/lidar0/points`, exactly as for a real Ouster — verify with
 `ros2 topic hz /sensor/lidar/lidar0/points`. `os_cloud` is configured with
-`point_cloud_frame:=lidar0/lidar_frame` and `pub_static_tf:=false` so the
-cloud lands in the `robot_state_publisher` TF tree (RViz fixed frame
-`base_footprint`) without a duplicate static-transform broadcaster. The
+`point_cloud_frame:=lidar0/lidar_frame` and `pub_static_tf:=true`, so it
+broadcasts the sensor's own static TF subtree
+(`lidar0/lidar_frame → lidar0/os_lidar`/`os_imu`) and the cloud lands in the
+`robot_state_publisher` TF tree (RViz fixed frame `base_footprint`). A small
+`static_transform_publisher` redundantly mirrors the URDF mount joint
+(`base_link → lidar0/lidar_frame`) so the cloud still reaches `base_link`
+even when `robot_state_publisher` is not running. The
 RViz config includes a `PointCloud` display for that topic.
 
 ### How the URDF wires to the plugin
@@ -289,15 +322,14 @@ rather than using a gz `<sensor type="gpu_lidar">`. The macro takes a
   `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up to read its
   world pose (the ray-cast origin). What it must be depends on `ray_mode`:
   - **`raycast`** (default) — beams are cast on the CPU against an ECM scene
-    mirror, with no render engine, so a non-rendering **`altimeter`** anchor is
-    enough and the world needs no GPU. Pass `anchor_type:=altimeter`.
+    mirror, with no render engine. A non-rendering **`altimeter`** anchor is
+    sufficient; the world needs no GPU. This is the anchor default.
   - **`panels`** — the plugin drives a GpuRays rig off `events::Render`, so the
     anchor must be a *rendering* sensor and the world must load
-    `gz-sim-sensors-system` (see [World
-    requirements](#world-requirements-read-this-if-no-point-cloud-is-published)).
-    It defaults to a minimal **`camera`** (cheapest renderer, not a lidar, so no
-    second scan); `anchor_type:=gpu_lidar` also emits a native gz scan on
-    `<sensor_name>/gz_native_scan`.
+    `gz-sim-sensors-system` (see [World requirements](#world-requirements)).
+    The example URDFs derive `anchor_type:=camera` automatically when
+    `ray_mode:=panels`; the example launches switch to `ouster_demo_panels.sdf`
+    automatically. No separate `anchor_type` flag needed for the bundled examples.
 - An optional real **`<sensor type="imu">`** (name contains `imu`) when
   `enable_imu` is set. This requires `gz-sim-imu-system` in the world
   (the demo world loads it) — the plugin reads the IMU components that
@@ -367,8 +399,9 @@ docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster   # CUDA
 # 2) Re-run the gtest suite.
 docker run --rm gzouster test
 
-# 3) Interactive: gz GUI + RViz + teleop_twist_keyboard on /cmd_vel (needs a
-#    display; --gpus all only if you want the GUI to render on the NVIDIA card).
+# 3) Interactive: gz GUI + RViz + teleop_twist_keyboard on /cmd_vel.
+#    Needs a display. On Linux with a normal X11/Wayland session, -e DISPLAY
+#    and the X11 socket volume are usually sufficient:
 docker run --rm -it --gpus all \
   -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix gzouster drive
 
@@ -383,6 +416,53 @@ with `-e RVIZ=false`, and switch ray modes with `-e RAY_MODE=panels` (needs a
 GPU). Docker `-e` flags must come **before** the image name, e.g.
 `docker run ... -e RVIZ=false ... gzouster drive` — flags placed after the image
 name are passed to the entrypoint as arguments, not env vars.
+
+### WSL & headless Linux
+
+The default **raycast** mode and the **smoke** docker target run without any
+display — they work identically on bare metal, in CI, and inside WSL.
+
+**WSL2 + Windows 11 (WSLg)** — WSLg automatically sets `DISPLAY` and creates
+`/tmp/.X11-unix`. The interactive docker commands above work as-is; no extra
+setup needed. For panels mode, add `--gpus all` (requires
+[nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+and WSL2 GPU passthrough).
+
+**WSL2 + Windows 10 / WSL1** — No built-in display. Two options:
+
+1. *Headless (no display needed)* — use `headless:=true` to suppress the GUI
+   client; the simulation and point cloud still run:
+
+   ```bash
+   ros2 launch gz_sensors_ouster ouster_standalone.launch.py headless:=true
+   ros2 launch gz_sensors_ouster sensor_stack.launch.py      headless:=true
+   # or the docker equivalent — smoke always runs headless:
+   docker run --rm gzouster
+   ```
+
+2. *With a Windows X server* (VcXsrv, GWSL, MobaXterm) — start the X server on
+   Windows (allow connections from WSL), then:
+
+   ```bash
+   export DISPLAY=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}'):0.0
+   docker run --rm -it -e DISPLAY gzouster drive
+   ```
+
+**Wayland-native desktop** — If `DISPLAY` is unset but `WAYLAND_DISPLAY` is set,
+Qt6 (used by gz sim and RViz) can run natively with `QT_QPA_PLATFORM=wayland`, or
+fall back to XWayland with `QT_QPA_PLATFORM=xcb`. Pass the variable through docker:
+
+```bash
+docker run --rm -it \
+  -e WAYLAND_DISPLAY -e XDG_RUNTIME_DIR \
+  -v "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY":/tmp/wayland-0 \
+  -e QT_QPA_PLATFORM=wayland \
+  gzouster gui
+```
+
+**SSH / headless GPU server** — `headless:=true` also works with `ray_mode:=panels`
+if the host has a GPU: gz runs server-only and ogre2 initialises via EGL without a
+display, so the point cloud is produced even without a GUI client.
 
 ### Using the host GPU (CUDA backend)
 
@@ -741,12 +821,13 @@ counter is per-sensor and lifetime-of-process.
 
 ```
 events::Render has not fired after 2.0s of sim time — gz-sim's Sensors system
-has not started rendering. ... Add a rendering sensor (the example URDF's
-anchor_type defaults to a camera) ...
+has not started rendering. ... Add a rendering sensor (pass anchor_type:=camera
+in xacro, or switch to the default ray_mode:=raycast which needs no renderer) ...
 ```
-The world has no rendering sensor, so `gz-sim-sensors-system` never built the
-ogre2 scene this plugin attaches to. See
-[World requirements](#world-requirements-read-this-if-no-point-cloud-is-published).
+You are using `panels` mode but the world has no rendering sensor, so
+`gz-sim-sensors-system` never built the ogre2 scene. Either add a rendering
+anchor (`anchor_type:=camera`) or switch to `ray_mode:=raycast` (the default),
+which needs no render engine at all. See [World requirements](#world-requirements).
 
 ### `/imu` covariance
 

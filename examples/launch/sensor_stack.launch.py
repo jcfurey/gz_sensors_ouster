@@ -4,6 +4,14 @@
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py rviz:=true
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py lidar_profile:=legacy
+#   ros2 launch gz_sensors_ouster sensor_stack.launch.py ray_mode:=panels
+#   ros2 launch gz_sensors_ouster sensor_stack.launch.py headless:=true
+#
+# Default ray_mode is *raycast* (GPU-free). Pass ray_mode:=panels for the GpuRays
+# path; the launch switches to ouster_demo_panels.sdf automatically and derives the
+# anchor type from ray_mode. Panels needs a render-capable host (ogre2/GPU).
+# Pass headless:=true to run gz server-only (no GUI client) — required on WSL,
+# SSH sessions, and any headless host without a display.
 #
 # Two GzGpuOusterLidarSystem instances run on one spawned model, publishing under
 # /sensor/lidar/front/... and /sensor/lidar/rear/... . Only /clock is bridged;
@@ -89,13 +97,18 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('gz_sensors_ouster')
     pkg_lib = os.path.join(get_package_prefix('gz_sensors_ouster'), 'lib')
 
-    world = os.path.join(pkg_share, 'examples', 'worlds', 'ouster_demo.sdf')
     urdf = os.path.join(pkg_share, 'examples', 'urdf', 'sensor_stack.urdf.xacro')
     bridge_cfg = os.path.join(pkg_share, 'examples', 'config', 'ouster_bridge.yaml')
     rviz_cfg = os.path.join(pkg_share, 'examples', 'rviz', 'sensor_stack.rviz')
 
-    anchor_type = LaunchConfiguration('anchor_type')
     lidar_profile = LaunchConfiguration('lidar_profile')
+    ray_mode = LaunchConfiguration('ray_mode')
+    headless = LaunchConfiguration('headless')
+
+    world_name = PythonExpression(
+        ["'ouster_demo_panels.sdf' if '", ray_mode,
+         "' == 'panels' else 'ouster_demo.sdf'"])
+    world = PathJoinSubstitution([pkg_share, 'examples', 'worlds', world_name])
 
     # ABSOLUTE metadata paths (see ouster_standalone.launch.py for rationale).
     # lidar_profile selects the modern (RNG19, FW v3.2.0) or legacy (LEGACY
@@ -108,7 +121,7 @@ def generate_launch_description():
             'xacro ', urdf,
             ' metadata_front:=', metadata_front,
             ' metadata_rear:=', metadata_rear,
-            ' anchor_type:=', anchor_type,
+            ' ray_mode:=', ray_mode,
         ]),
         value_type=str,
     )
@@ -118,22 +131,22 @@ def generate_launch_description():
             PathJoinSubstitution([FindPackageShare('ros_gz_sim'),
                                   'launch', 'gz_sim.launch.py'])
         ),
-        launch_arguments={'gz_args': [world, ' -r -v 3']}.items(),
+        launch_arguments={'gz_args': [world, PythonExpression(
+            ["' -s -r -v 3' if '", headless, "' == 'true' else ' -r -v 3'"])]}.items(),
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('anchor_type', default_value='camera',
-                              description='Render-bootstrap / pose-anchor sensor type: '
-                                          'camera | gpu_lidar | altimeter. Default camera is '
-                                          'the cheapest renderer and adds no second lidar. '
-                                          'gpu_lidar also emits a native gz scan '
-                                          '(<ns>/gz_native_scan, a 2nd lidar source). '
-                                          'altimeter is non-rendering — only if the world '
-                                          'already has another camera/gpu_lidar.'),
+        DeclareLaunchArgument('ray_mode', default_value='raycast',
+                              description='Ray generation mode: raycast (default, GPU-free) '
+                                          'or panels (GpuRays, needs ogre2/GPU). The launch '
+                                          'auto-selects the world and anchor type from this.'),
         DeclareLaunchArgument('lidar_profile', default_value='modern',
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '
                                           'legacy (LEGACY profile). Applies to both sensors.'),
+        DeclareLaunchArgument('headless', default_value='false',
+                              description='Run gz server-only (no GUI client). '
+                                          'Use on WSL, SSH, and any headless host.'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config'),
 

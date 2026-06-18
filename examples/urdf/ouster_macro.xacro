@@ -4,23 +4,24 @@
   gz_sensors_ouster system plugin (gz_gpu_ouster_lidar::GzGpuOusterLidarSystem).
 
   The plugin is a Gazebo *system* plugin attached to the model. It does NOT use
-  a gz <sensor type="gpu_lidar"> for ray casting; it creates its own GpuRays
-  directly in the ogre2 scene. It only needs two things from the model:
+  a gz <sensor type="gpu_lidar"> for ray casting. It only needs two things from
+  the model:
 
     1. A gz <sensor> entity whose NAME equals the last path segment of
        <sensor_name> (e.g. "lidar0"). The plugin looks that entity up to read
        its world pose (the ray-cast origin).
 
-       IMPORTANT: this anchor MUST be a *rendering* sensor type (default
-       gpu_lidar). On Gazebo Harmonic the gz-sim-sensors-system only builds the
-       ogre2 scene and emits the events::Render event — which is what drives
-       this plugin's GpuRays — when the world contains at least one rendering
-       sensor (camera / gpu_lidar / depth_camera ...). With only non-rendering
-       sensors present (altimeter, imu) the Sensors system never starts
-       rendering and the plugin produces no point cloud. Only set
-       anchor_type:=altimeter if the world already contains another rendering
-       sensor to bootstrap the scene. The gpu_lidar anchor also publishes a
-       native gz scan on ${ns}/gz_native_scan.
+       The anchor type depends on ray_mode (default raycast):
+         raycast (default) — no rendering involved. A non-rendering
+           `altimeter` anchor is sufficient; the world needs no GPU, no
+           display, and gz-sim-sensors-system is not required. This is the
+           anchor_type default.
+         panels — the plugin drives a GpuRays rig off events::Render (ogre2).
+           The anchor MUST be a *rendering* sensor (camera / gpu_lidar /
+           depth_camera) to make gz-sim-sensors-system build the ogre2 scene.
+           Pass anchor_type:=camera (cheapest, no second lidar) or
+           anchor_type:=gpu_lidar (also emits a native gz scan on
+           ${ns}/gz_native_scan).
 
     2. (Optional) A real <sensor type="imu"> whose name contains "imu", on the
        same model. The plugin reads the AngularVelocity / LinearAcceleration
@@ -40,7 +41,7 @@
             lidar_hz:=10.0
             enable_imu:=false imu_hz:=100.0
             ray_mode:=raycast
-            anchor_type:=camera">
+            anchor_type:=altimeter">
 
     <!-- ROS topic prefix == <sensor_name>. Its last segment must equal `name`
          so the plugin's gz-sensor lookup succeeds. -->
@@ -72,16 +73,15 @@
 
     <!-- Pose-anchor sensor. NAME must equal `name` (plugin lookup). What it
          must be depends on ray_mode:
-           panels  — the plugin drives its own GpuRays off events::Render, so the
-                     anchor MUST be a *rendering* sensor (camera/gpu_lidar) to make
-                     gz-sim-sensors-system build the ogre2 scene + emit Render.
-                     Default `camera` is the cheapest renderer and is NOT a lidar,
-                     so it bootstraps rendering + supplies the pose without adding a
-                     second lidar source. `gpu_lidar` also works but additionally
-                     emits a native gz scan on <ns>/gz_native_scan.
-           raycast — no rendering involved, so a non-rendering `altimeter` anchor
-                     (handled by gz-sim-altimeter-system) is enough to supply the
-                     pose, and the world needs no render engine / GPU at all.
+           raycast (default) — no rendering involved. A non-rendering
+                     `altimeter` anchor is enough to supply the pose; the world
+                     needs no render engine or GPU. This is the anchor default.
+           panels  — the plugin drives a GpuRays rig off events::Render, so the
+                     anchor MUST be a *rendering* sensor (camera/gpu_lidar) to
+                     make gz-sim-sensors-system build the ogre2 scene + emit
+                     Render. `camera` is the cheapest (no second lidar source);
+                     `gpu_lidar` additionally emits a native gz scan on
+                     <ns>/gz_native_scan.
          `altimeter` with panels is only valid if the world already has another
          camera/gpu_lidar to bootstrap rendering. -->
     <gazebo reference="${name}/lidar_frame">
