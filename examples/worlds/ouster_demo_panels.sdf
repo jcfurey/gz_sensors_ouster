@@ -75,11 +75,11 @@
     </model>
 
     <!-- Obstacles at increasing range to exercise the depth channels.
-         <laser_retro> is the diffuse reflectance the raycast material model
-         uses (signal, reflectivity byte, noise weighting and the
-         sqrt(retro/0.8) detection limit — docs/MODEL_REFERENCES.md). Panels
-         mode has no retro channel and ignores it. Values span bright (0.8),
-         mid (0.5) and dark (0.1) so the reflectivity image shows contrast. -->
+         Geometry is byte-identical to ouster_demo.sdf so the two worlds stay
+         in sync; the <laser_retro> tags are inert here because panels mode
+         derives signal/reflectivity from the GPU depth render, not from
+         laser_retro (which only the raycast material model reads). They are
+         kept solely to mirror the raycast world. -->
     <model name="box_near">
       <static>true</static>
       <pose>4 0 0.5 0 0 0</pose>

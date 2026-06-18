@@ -4,6 +4,7 @@
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py headless:=true
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py rviz:=true
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py ray_mode:=panels
+#   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py lidar_profile:=legacy
 #
 # Brings up: gz sim + robot_state_publisher (waffle+Ouster URDF) +
 # `ros_gz_sim create` (spawns the model, loading the system plugin) +
