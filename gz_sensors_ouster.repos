@@ -1,0 +1,16 @@
+repositories:
+  gz_sensors_ouster:
+    type: git
+    url: https://github.com/jcfurey/gz_sensors_ouster.git
+    version: main
+  # ouster-ros carries an in-tree ouster-sdk submodule at v0.16.2+.
+  # The apt ros-<distro>-ouster-ros lags (currently 0.14.1) and exposes an
+  # older PacketWriter API that gz_sensors_ouster no longer targets.
+  # Pinned to an exact commit for reproducibility; bump to the new tip SHA
+  # of jcfurey/ouster-ros@ros2 when intentionally moving forward
+  # (also update the matching pin in ci.yaml, Dockerfile, and
+  # .claude/hooks/session-start.sh).
+  ouster-ros:
+    type: git
+    url: https://github.com/jcfurey/ouster-ros.git
+    version: 6ab9402c1a8275f600945c3d8dfd5a73b40585c8

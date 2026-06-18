@@ -123,6 +123,29 @@ will show as an extra cloud if visualised). If this requirement is unmet the
 plugin logs a one-shot error after ~2 s of sim time: *"events::Render has not
 fired … add a rendering sensor"*.
 
+## Workspace setup
+
+`ouster-ros` is not available at the required API version via apt, so both
+packages must be source-built. The provided `gz_sensors_ouster.repos` file
+pins the exact commits used by CI:
+
+```bash
+mkdir -p ~/ros2_ws/src && cd ~/ros2_ws
+vcs import src < /path/to/gz_sensors_ouster.repos   # or after cloning:
+# vcs import src < src/gz_sensors_ouster/gz_sensors_ouster.repos
+
+# Install system dependencies (Gazebo vendor packages, Eigen, etc.)
+rosdep update && rosdep install --from-paths src --rosdistro=jazzy -y --ignore-src
+
+source /opt/ros/jazzy/setup.bash
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+```
+
+> **Note:** `ouster-ros` is pinned to an exact commit SHA in
+> `gz_sensors_ouster.repos`.  To advance the dependency, update the SHA there
+> and in the three other places that mirror it: `ci.yaml`,
+> `Dockerfile`, and `.claude/hooks/session-start.sh`.
+
 ## Build
 
 ```bash
