@@ -1,17 +1,24 @@
 <?xml version="1.0"?>
 <!--
-  Demo world for the gz_sensors_ouster examples.
+  Panels-mode (rendering) counterpart of ouster_demo.sdf.
 
-  This world runs the plugin in its default *raycast* mode: beams are cast on
-  the CPU against a scene mirrored from the ECM, so NO render engine is needed.
-  It deliberately does NOT load gz-sim-sensors-system (the system that spins up
-  the ogre2 render engine), which means it runs headless on any machine — no
-  GPU, no display, and unaffected by a broken/software mesa or Vulkan stack.
+  Selected automatically by the example launches when ray_mode:=panels:
+    ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
 
-  Loads the systems raycast mode needs:
+  This world loads gz-sim-sensors-system (ogre2), which the plugin's *panels*
+  path needs to fire events::Render and run its depth-camera rig. It does NOT
+  load gz-sim-altimeter-system — the URDF derives anchor_type:=camera when
+  ray_mode==panels, so an altimeter anchor is not present.
+
+  Keep the geometry (ground + obstacles) in sync with ouster_demo.sdf. The only
+  difference between the two files is the system set:
+    ouster_demo.sdf        → gz-sim-altimeter-system  (raycast, GPU-free, default)
+    ouster_demo_panels.sdf → gz-sim-sensors-system    (panels, needs ogre2/GPU)
+
+  Loads:
     * Physics            - steps the sim.
-    * Altimeter          - activates the non-rendering `altimeter` pose anchor
-                           the raycast plugin looks up for its ray origin.
+    * Sensors (ogre2)    - spins up the render engine; fires events::Render so
+                           the panels plugin path can run its depth-camera rig.
     * SceneBroadcaster   - GUI / state.
     * UserCommands       - lets `ros_gz_sim create` spawn the URDF at runtime.
     * Imu                - populates AngularVelocity/LinearAcceleration on imu
@@ -19,13 +26,9 @@
 
   Ground + a ring of obstacles at varied ranges so the LiDAR returns are
   non-empty.
-
-  Panels mode (ray_mode:=panels) is an advanced opt-in that needs a render engine.
-  Use ouster_demo_panels.sdf instead, or pass ray_mode:=panels to any example
-  launch — it selects that world and the required anchor type automatically.
 -->
 <sdf version="1.9">
-  <world name="ouster_demo">
+  <world name="ouster_demo_panels">
 
     <physics name="default" type="ignored">
       <max_step_size>0.004</max_step_size>
@@ -34,8 +37,10 @@
 
     <plugin filename="gz-sim-physics-system"
             name="gz::sim::systems::Physics"/>
-    <plugin filename="gz-sim-altimeter-system"
-            name="gz::sim::systems::Altimeter"/>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
     <plugin filename="gz-sim-scene-broadcaster-system"
             name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-user-commands-system"

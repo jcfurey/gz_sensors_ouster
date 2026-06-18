@@ -4,6 +4,11 @@
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py rviz:=true
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py lidar_profile:=legacy
+#   ros2 launch gz_sensors_ouster sensor_stack.launch.py ray_mode:=panels
+#
+# Default ray_mode is *raycast* (GPU-free). Pass ray_mode:=panels for the GpuRays
+# path; the launch switches to ouster_demo_panels.sdf automatically and derives the
+# anchor type from ray_mode. Panels needs a render-capable host (ogre2/GPU).
 #
 # Two GzGpuOusterLidarSystem instances run on one spawned model, publishing under
 # /sensor/lidar/front/... and /sensor/lidar/rear/... . Only /clock is bridged;
@@ -89,14 +94,17 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('gz_sensors_ouster')
     pkg_lib = os.path.join(get_package_prefix('gz_sensors_ouster'), 'lib')
 
-    world = os.path.join(pkg_share, 'examples', 'worlds', 'ouster_demo.sdf')
     urdf = os.path.join(pkg_share, 'examples', 'urdf', 'sensor_stack.urdf.xacro')
     bridge_cfg = os.path.join(pkg_share, 'examples', 'config', 'ouster_bridge.yaml')
     rviz_cfg = os.path.join(pkg_share, 'examples', 'rviz', 'sensor_stack.rviz')
 
-    anchor_type = LaunchConfiguration('anchor_type')
     lidar_profile = LaunchConfiguration('lidar_profile')
     ray_mode = LaunchConfiguration('ray_mode')
+
+    world_name = PythonExpression(
+        ["'ouster_demo_panels.sdf' if '", ray_mode,
+         "' == 'panels' else 'ouster_demo.sdf'"])
+    world = PathJoinSubstitution([pkg_share, 'examples', 'worlds', world_name])
 
     # ABSOLUTE metadata paths (see ouster_standalone.launch.py for rationale).
     # lidar_profile selects the modern (RNG19, FW v3.2.0) or legacy (LEGACY
@@ -109,7 +117,6 @@ def generate_launch_description():
             'xacro ', urdf,
             ' metadata_front:=', metadata_front,
             ' metadata_rear:=', metadata_rear,
-            ' anchor_type:=', anchor_type,
             ' ray_mode:=', ray_mode,
         ]),
         value_type=str,
@@ -125,16 +132,9 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('ray_mode', default_value='raycast',
-                              description='Ray generation mode: raycast (default, no '
-                                          'GPU/display needed; the demo world is raycast). '
-                                          'panels needs a rendering world you supply '
-                                          '(see README).'),
-        DeclareLaunchArgument('anchor_type', default_value='altimeter',
-                              description='Pose-anchor sensor type: altimeter (default, '
-                                          'non-rendering, for raycast). For panels with a '
-                                          'rendering world use camera (cheapest) or '
-                                          'gpu_lidar (also emits a native gz scan on '
-                                          '<ns>/gz_native_scan).'),
+                              description='Ray generation mode: raycast (default, GPU-free) '
+                                          'or panels (GpuRays, needs ogre2/GPU). The launch '
+                                          'auto-selects the world and anchor type from this.'),
         DeclareLaunchArgument('lidar_profile', default_value='modern',
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '

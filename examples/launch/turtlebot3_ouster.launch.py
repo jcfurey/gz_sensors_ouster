@@ -3,6 +3,7 @@
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py headless:=true
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py rviz:=true
+#   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py ray_mode:=panels
 #
 # Brings up: gz sim + robot_state_publisher (waffle+Ouster URDF) +
 # `ros_gz_sim create` (spawns the model, loading the system plugin) +
@@ -51,11 +52,12 @@ def generate_launch_description():
     lidar_profile = LaunchConfiguration('lidar_profile')
     headless = LaunchConfiguration('headless')
 
-    # The bundled world is raycast (GPU-free, no rendering Sensors system), like
-    # all the example worlds. Panels mode would need a rendering world you supply
-    # (gz-sim-sensors-system + a rendering anchor); see the README.
-    world = PathJoinSubstitution(
-        [pkg_share, 'examples', 'worlds', 'turtlebot3_ouster_headless.sdf'])
+    # raycast (default) uses the GPU-free headless world; panels switches to the
+    # rendering world that loads gz-sim-sensors-system (ogre2).
+    world_name = PythonExpression(
+        ["'ouster_demo_panels.sdf' if '", ray_mode,
+         "' == 'panels' else 'turtlebot3_ouster_headless.sdf'"])
+    world = PathJoinSubstitution([pkg_share, 'examples', 'worlds', world_name])
 
     # ABSOLUTE metadata path — a model spawned from the robot_description topic
     # has no on-disk SDF dir to resolve a relative path against.
@@ -87,9 +89,10 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('ray_mode', default_value='raycast',
-                              description='raycast (CPU, no GPU; default). The bundled '
-                                          'world is raycast-only; panels needs a rendering '
-                                          'world you supply (see README).'),
+                              description='raycast (GPU-free, default) or panels (GpuRays, '
+                                          'needs ogre2/GPU). The launch auto-selects the '
+                                          'world from this: turtlebot3_ouster_headless.sdf '
+                                          'for raycast, ouster_demo_panels.sdf for panels.'),
         DeclareLaunchArgument('lidar_profile', default_value='modern',
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16) | legacy.'),

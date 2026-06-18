@@ -114,11 +114,17 @@ non-rendering `altimeter` pose anchor is handled without Gazebo warnings.
    point cloud is produced**. The plugin logs a one-shot error after ~2 s of
    sim time: *"events::Render has not fired … add a rendering sensor"*.
 
-All bundled example worlds are raycast (no Sensors system), so panels mode needs
-a rendering world you supply: add the two plugins above to a copy of a demo
-world. For the rendering anchor pass `anchor_type:=camera` (cheapest renderer, no
-second lidar) or `anchor_type:=gpu_lidar` (also emits a native gz scan on
-`<sensor_name>/gz_native_scan`).
+The bundled `ouster_demo_panels.sdf` world is the panels-mode (rendering)
+counterpart of `ouster_demo.sdf`. The example launches select it automatically:
+
+```bash
+ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
+```
+
+Passing `ray_mode:=panels` loads `ouster_demo_panels.sdf` and derives
+`anchor_type:=camera` automatically — no separate flag needed. Panels needs a
+render-capable host (ogre2/GPU); on broken-render hosts use the default
+`ray_mode:=raycast` instead.
 
 ## Workspace setup
 
@@ -270,6 +276,7 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `urdf/sensor_stack.urdf.xacro` | Platform with front OS1-64+IMU and rear OS0-128 |
 | `urdf/turtlebot3_ouster.urdf.xacro` | A drivable TurtleBot3 waffle carrying the Ouster (used by the Docker test) |
 | `worlds/ouster_demo.sdf` | Demo world (physics + altimeter + IMU systems, ground + obstacles). GPU-free: raycast mode, no rendering Sensors system |
+| `worlds/ouster_demo_panels.sdf` | Panels-mode counterpart of `ouster_demo.sdf` (loads gz-sim-sensors-system/ogre2). Selected automatically by example launches when `ray_mode:=panels` |
 | `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
@@ -281,6 +288,7 @@ Run (after `colcon build` + `source install/setup.bash`):
 ros2 launch gz_sensors_ouster ouster_standalone.launch.py
 # multi-sensor: ros2 launch gz_sensors_ouster sensor_stack.launch.py
 # with RViz:    ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
+# panels mode:  ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
 ```
 
 Each launch starts Gazebo with the demo world, runs
@@ -314,9 +322,9 @@ rather than using a gz `<sensor type="gpu_lidar">`. The macro takes a
   - **`panels`** — the plugin drives a GpuRays rig off `events::Render`, so the
     anchor must be a *rendering* sensor and the world must load
     `gz-sim-sensors-system` (see [World requirements](#world-requirements)).
-    Pass `anchor_type:=camera` (cheapest renderer, no second lidar) or
-    `anchor_type:=gpu_lidar` (also emits a native gz scan on
-    `<sensor_name>/gz_native_scan`).
+    The example URDFs derive `anchor_type:=camera` automatically when
+    `ray_mode:=panels`; the example launches switch to `ouster_demo_panels.sdf`
+    automatically. No separate `anchor_type` flag needed for the bundled examples.
 - An optional real **`<sensor type="imu">`** (name contains `imu`) when
   `enable_imu` is set. This requires `gz-sim-imu-system` in the world
   (the demo world loads it) — the plugin reads the IMU components that
