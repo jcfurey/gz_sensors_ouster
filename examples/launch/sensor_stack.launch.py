@@ -5,10 +5,13 @@
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py rviz:=true
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py lidar_profile:=legacy
 #   ros2 launch gz_sensors_ouster sensor_stack.launch.py ray_mode:=panels
+#   ros2 launch gz_sensors_ouster sensor_stack.launch.py headless:=true
 #
 # Default ray_mode is *raycast* (GPU-free). Pass ray_mode:=panels for the GpuRays
 # path; the launch switches to ouster_demo_panels.sdf automatically and derives the
 # anchor type from ray_mode. Panels needs a render-capable host (ogre2/GPU).
+# Pass headless:=true to run gz server-only (no GUI client) — required on WSL,
+# SSH sessions, and any headless host without a display.
 #
 # Two GzGpuOusterLidarSystem instances run on one spawned model, publishing under
 # /sensor/lidar/front/... and /sensor/lidar/rear/... . Only /clock is bridged;
@@ -100,6 +103,7 @@ def generate_launch_description():
 
     lidar_profile = LaunchConfiguration('lidar_profile')
     ray_mode = LaunchConfiguration('ray_mode')
+    headless = LaunchConfiguration('headless')
 
     world_name = PythonExpression(
         ["'ouster_demo_panels.sdf' if '", ray_mode,
@@ -127,7 +131,8 @@ def generate_launch_description():
             PathJoinSubstitution([FindPackageShare('ros_gz_sim'),
                                   'launch', 'gz_sim.launch.py'])
         ),
-        launch_arguments={'gz_args': [world, ' -r -v 3']}.items(),
+        launch_arguments={'gz_args': [world, PythonExpression(
+            ["' -s -r -v 3' if '", headless, "' == 'true' else ' -r -v 3'"])]}.items(),
     )
 
     return LaunchDescription([
@@ -139,6 +144,9 @@ def generate_launch_description():
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '
                                           'legacy (LEGACY profile). Applies to both sensors.'),
+        DeclareLaunchArgument('headless', default_value='false',
+                              description='Run gz server-only (no GUI client). '
+                                          'Use on WSL, SSH, and any headless host.'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config'),
 

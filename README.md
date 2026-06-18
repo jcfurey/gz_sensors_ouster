@@ -286,9 +286,10 @@ Run (after `colcon build` + `source install/setup.bash`):
 
 ```bash
 ros2 launch gz_sensors_ouster ouster_standalone.launch.py
-# multi-sensor: ros2 launch gz_sensors_ouster sensor_stack.launch.py
-# with RViz:    ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
-# panels mode:  ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
+# multi-sensor:  ros2 launch gz_sensors_ouster sensor_stack.launch.py
+# with RViz:     ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
+# panels mode:   ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
+# WSL/headless:  ros2 launch gz_sensors_ouster ouster_standalone.launch.py headless:=true
 ```
 
 Each launch starts Gazebo with the demo world, runs
@@ -394,8 +395,9 @@ docker run --rm --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all gzouster   # CUDA
 # 2) Re-run the gtest suite.
 docker run --rm gzouster test
 
-# 3) Interactive: gz GUI + RViz + teleop_twist_keyboard on /cmd_vel (needs a
-#    display; --gpus all only if you want the GUI to render on the NVIDIA card).
+# 3) Interactive: gz GUI + RViz + teleop_twist_keyboard on /cmd_vel.
+#    Needs a display. On Linux with a normal X11/Wayland session, -e DISPLAY
+#    and the X11 socket volume are usually sufficient:
 docker run --rm -it --gpus all \
   -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix gzouster drive
 
@@ -410,6 +412,53 @@ with `-e RVIZ=false`, and switch ray modes with `-e RAY_MODE=panels` (needs a
 GPU). Docker `-e` flags must come **before** the image name, e.g.
 `docker run ... -e RVIZ=false ... gzouster drive` — flags placed after the image
 name are passed to the entrypoint as arguments, not env vars.
+
+### WSL & headless Linux
+
+The default **raycast** mode and the **smoke** docker target run without any
+display — they work identically on bare metal, in CI, and inside WSL.
+
+**WSL2 + Windows 11 (WSLg)** — WSLg automatically sets `DISPLAY` and creates
+`/tmp/.X11-unix`. The interactive docker commands above work as-is; no extra
+setup needed. For panels mode, add `--gpus all` (requires
+[nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+and WSL2 GPU passthrough).
+
+**WSL2 + Windows 10 / WSL1** — No built-in display. Two options:
+
+1. *Headless (no display needed)* — use `headless:=true` to suppress the GUI
+   client; the simulation and point cloud still run:
+
+   ```bash
+   ros2 launch gz_sensors_ouster ouster_standalone.launch.py headless:=true
+   ros2 launch gz_sensors_ouster sensor_stack.launch.py      headless:=true
+   # or the docker equivalent — smoke always runs headless:
+   docker run --rm gzouster
+   ```
+
+2. *With a Windows X server* (VcXsrv, GWSL, MobaXterm) — start the X server on
+   Windows (allow connections from WSL), then:
+
+   ```bash
+   export DISPLAY=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}'):0.0
+   docker run --rm -it -e DISPLAY gzouster drive
+   ```
+
+**Wayland-native desktop** — If `DISPLAY` is unset but `WAYLAND_DISPLAY` is set,
+Qt6 (used by gz sim and RViz) can run natively with `QT_QPA_PLATFORM=wayland`, or
+fall back to XWayland with `QT_QPA_PLATFORM=xcb`. Pass the variable through docker:
+
+```bash
+docker run --rm -it \
+  -e WAYLAND_DISPLAY -e XDG_RUNTIME_DIR \
+  -v "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY":/tmp/wayland-0 \
+  -e QT_QPA_PLATFORM=wayland \
+  gzouster gui
+```
+
+**SSH / headless GPU server** — `headless:=true` also works with `ray_mode:=panels`
+if the host has a GPU: gz runs server-only and ogre2 initialises via EGL without a
+display, so the point cloud is produced even without a GUI client.
 
 ### Using the host GPU (CUDA backend)
 
