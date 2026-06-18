@@ -14,7 +14,8 @@
 <robot name="ouster_standalone" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <xacro:arg name="metadata_lidar0" default="metadata/os1_64_rev7.json"/>
-  <xacro:arg name="anchor_type" default="camera"/>
+  <xacro:arg name="ray_mode"       default="raycast"/>
+  <xacro:arg name="anchor_type"    default="altimeter"/>
 
   <xacro:include filename="$(find gz_sensors_ouster)/examples/urdf/ouster_macro.xacro"/>
 
@@ -53,6 +54,7 @@
     metadata_path="$(arg metadata_lidar0)"
     lidar_hz="10.0"
     enable_imu="true" imu_hz="100.0"
+    ray_mode="$(arg ray_mode)"
     anchor_type="$(arg anchor_type)"/>
 
 </robot>

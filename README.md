@@ -89,12 +89,14 @@ For IMU simulation, your world SDF must also load the Gazebo IMU system:
 <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
 ```
 
-### World requirements (read this if no point cloud is published)
+### World requirements
 
-This plugin does **not** register a `<sensor type="gpu_lidar">`. It creates its
-own rig of perspective depth cameras inside the ogre2 scene that
-`gz-sim-sensors-system` owns, and it is
-driven by that system's `events::Render` event. Therefore the world must:
+The default `raycast` mode casts beams against the ECM scene mirror with no
+render engine. The only world requirement is `gz-sim-physics-system` (pose
+updates). The bundled examples also load `gz-sim-altimeter-system` so the
+non-rendering `altimeter` pose anchor is handled without Gazebo warnings.
+
+**`panels` mode** adds two requirements:
 
 1. Load the Sensors system with the ogre2 engine:
    ```xml
@@ -102,26 +104,19 @@ driven by that system's `events::Render` event. Therefore the world must:
      <render_engine>ogre2</render_engine>
    </plugin>
    ```
-> **Exception:** with `<ray_mode>raycast</ray_mode>` neither requirement
-> applies — the raycast mode never touches the renderer. The two points
-> below concern the default `panels` mode only.
 
 2. Contain **at least one rendering sensor** (`camera`, `gpu_lidar`,
    `depth_camera`, …). On Gazebo Harmonic the Sensors system only initialises
    rendering — building the scene and emitting `events::Render` — once such a
-   sensor exists in the ECM. With **only** non-rendering sensors (e.g. an
+   sensor exists in the ECM. With only non-rendering sensors (e.g. an
    `altimeter` pose anchor plus an `imu`), the Sensors system never starts
    rendering, `OnRender()` never fires, the panel rig is never created, and **no
-   point cloud is produced**.
+   point cloud is produced**. The plugin logs a one-shot error after ~2 s of
+   sim time: *"events::Render has not fired … add a rendering sensor"*.
 
-The bundled examples satisfy (2) by defaulting the pose-anchor sensor to a tiny
-**`camera`** (see `examples/urdf/ouster_macro.xacro`, `anchor_type:=camera`) —
-the cheapest renderer, which bootstraps the scene **without** adding a second
-lidar. Use `anchor_type:=gpu_lidar` if you also want a native gz scan on
-`<sensor_name>/gz_native_scan` (note: that is a second lidar raycast source and
-will show as an extra cloud if visualised). If this requirement is unmet the
-plugin logs a one-shot error after ~2 s of sim time: *"events::Render has not
-fired … add a rendering sensor"*.
+For panels mode pass `anchor_type:=camera` (cheapest renderer, no second lidar)
+or `anchor_type:=gpu_lidar` (also emits a native gz scan on
+`<sensor_name>/gz_native_scan`).
 
 ## Workspace setup
 
@@ -312,15 +307,14 @@ rather than using a gz `<sensor type="gpu_lidar">`. The macro takes a
   `<sensor_name>` (e.g. `lidar0`). The plugin looks this entity up to read its
   world pose (the ray-cast origin). What it must be depends on `ray_mode`:
   - **`raycast`** (default) — beams are cast on the CPU against an ECM scene
-    mirror, with no render engine, so a non-rendering **`altimeter`** anchor is
-    enough and the world needs no GPU. Pass `anchor_type:=altimeter`.
+    mirror, with no render engine. A non-rendering **`altimeter`** anchor is
+    sufficient; the world needs no GPU. This is the anchor default.
   - **`panels`** — the plugin drives a GpuRays rig off `events::Render`, so the
     anchor must be a *rendering* sensor and the world must load
-    `gz-sim-sensors-system` (see [World
-    requirements](#world-requirements-read-this-if-no-point-cloud-is-published)).
-    It defaults to a minimal **`camera`** (cheapest renderer, not a lidar, so no
-    second scan); `anchor_type:=gpu_lidar` also emits a native gz scan on
-    `<sensor_name>/gz_native_scan`.
+    `gz-sim-sensors-system` (see [World requirements](#world-requirements)).
+    Pass `anchor_type:=camera` (cheapest renderer, no second lidar) or
+    `anchor_type:=gpu_lidar` (also emits a native gz scan on
+    `<sensor_name>/gz_native_scan`).
 - An optional real **`<sensor type="imu">`** (name contains `imu`) when
   `enable_imu` is set. This requires `gz-sim-imu-system` in the world
   (the demo world loads it) — the plugin reads the IMU components that
@@ -764,12 +758,13 @@ counter is per-sensor and lifetime-of-process.
 
 ```
 events::Render has not fired after 2.0s of sim time — gz-sim's Sensors system
-has not started rendering. ... Add a rendering sensor (the example URDF's
-anchor_type defaults to a camera) ...
+has not started rendering. ... Add a rendering sensor (pass anchor_type:=camera
+in xacro, or switch to the default ray_mode:=raycast which needs no renderer) ...
 ```
-The world has no rendering sensor, so `gz-sim-sensors-system` never built the
-ogre2 scene this plugin attaches to. See
-[World requirements](#world-requirements-read-this-if-no-point-cloud-is-published).
+You are using `panels` mode but the world has no rendering sensor, so
+`gz-sim-sensors-system` never built the ogre2 scene. Either add a rendering
+anchor (`anchor_type:=camera`) or switch to `ray_mode:=raycast` (the default),
+which needs no render engine at all. See [World requirements](#world-requirements).
 
 ### `/imu` covariance
 

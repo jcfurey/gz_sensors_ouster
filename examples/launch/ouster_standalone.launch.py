@@ -2,8 +2,8 @@
 #
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
-#   ros2 launch gz_sensors_ouster ouster_standalone.launch.py anchor_type:=gpu_lidar
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py lidar_profile:=legacy
+#   ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels anchor_type:=camera
 #
 # Brings up: gz sim (demo world) + robot_state_publisher (URDF) +
 # `ros_gz_sim create` (spawns the model, which loads the system plugin) +
@@ -44,6 +44,7 @@ def generate_launch_description():
 
     anchor_type = LaunchConfiguration('anchor_type')
     lidar_profile = LaunchConfiguration('lidar_profile')
+    ray_mode = LaunchConfiguration('ray_mode')
 
     # ABSOLUTE metadata path: relative paths resolve against an on-disk SDF dir,
     # which does not exist for a model spawned from the robot_description topic.
@@ -62,6 +63,7 @@ def generate_launch_description():
             'xacro ', urdf,
             ' metadata_lidar0:=', metadata,
             ' anchor_type:=', anchor_type,
+            ' ray_mode:=', ray_mode,
         ]),
         value_type=str,
     )
@@ -75,14 +77,16 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('anchor_type', default_value='camera',
-                              description='Render-bootstrap / pose-anchor sensor type: '
-                                          'camera | gpu_lidar | altimeter. Default camera is '
-                                          'the cheapest renderer and adds no second lidar. '
-                                          'gpu_lidar also emits a native gz scan '
-                                          '(<ns>/gz_native_scan, a 2nd lidar source). '
-                                          'altimeter is non-rendering — only if the world '
-                                          'already has another camera/gpu_lidar.'),
+        DeclareLaunchArgument('ray_mode', default_value='raycast',
+                              description='Ray generation mode: '
+                                          'raycast (default, no GPU/display needed) | '
+                                          'panels (GPU renderer, needs a rendering world).'),
+        DeclareLaunchArgument('anchor_type', default_value='altimeter',
+                              description='Pose-anchor sensor type: '
+                                          'altimeter (default, non-rendering, for raycast) | '
+                                          'camera (cheapest renderer, for panels) | '
+                                          'gpu_lidar (renderer + native gz scan on '
+                                          '<ns>/gz_native_scan, for panels).'),
         DeclareLaunchArgument('lidar_profile', default_value='modern',
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '

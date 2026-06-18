@@ -4,8 +4,12 @@
 
   Loads the systems the plugin needs:
     * Physics            - steps the sim.
-    * Sensors (ogre2)    - builds the ogre2 scene the plugin attaches its
-                           GpuRays to (the plugin idles without a scene).
+    * Altimeter          - handles the non-rendering altimeter pose-anchor that
+                           the plugin (raycast mode, default) uses for its ray
+                           origin. Harmless when no altimeter sensor is present.
+    * Sensors (ogre2)    - only needed for panels mode (not the default). Loads
+                           the ogre2 render engine; idles when the world has no
+                           rendering sensors (i.e. in default raycast mode).
     * SceneBroadcaster   - GUI / state.
     * UserCommands       - lets `ros_gz_sim create` spawn the URDF at runtime.
     * Imu                - populates AngularVelocity/LinearAcceleration on imu
@@ -24,6 +28,8 @@
 
     <plugin filename="gz-sim-physics-system"
             name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-altimeter-system"
+            name="gz::sim::systems::Altimeter"/>
     <plugin filename="gz-sim-sensors-system"
             name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>

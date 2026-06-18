@@ -96,6 +96,7 @@ def generate_launch_description():
 
     anchor_type = LaunchConfiguration('anchor_type')
     lidar_profile = LaunchConfiguration('lidar_profile')
+    ray_mode = LaunchConfiguration('ray_mode')
 
     # ABSOLUTE metadata paths (see ouster_standalone.launch.py for rationale).
     # lidar_profile selects the modern (RNG19, FW v3.2.0) or legacy (LEGACY
@@ -109,6 +110,7 @@ def generate_launch_description():
             ' metadata_front:=', metadata_front,
             ' metadata_rear:=', metadata_rear,
             ' anchor_type:=', anchor_type,
+            ' ray_mode:=', ray_mode,
         ]),
         value_type=str,
     )
@@ -122,14 +124,16 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('anchor_type', default_value='camera',
-                              description='Render-bootstrap / pose-anchor sensor type: '
-                                          'camera | gpu_lidar | altimeter. Default camera is '
-                                          'the cheapest renderer and adds no second lidar. '
-                                          'gpu_lidar also emits a native gz scan '
-                                          '(<ns>/gz_native_scan, a 2nd lidar source). '
-                                          'altimeter is non-rendering — only if the world '
-                                          'already has another camera/gpu_lidar.'),
+        DeclareLaunchArgument('ray_mode', default_value='raycast',
+                              description='Ray generation mode: '
+                                          'raycast (default, no GPU/display needed) | '
+                                          'panels (GPU renderer, needs a rendering world).'),
+        DeclareLaunchArgument('anchor_type', default_value='altimeter',
+                              description='Pose-anchor sensor type: '
+                                          'altimeter (default, non-rendering, for raycast) | '
+                                          'camera (cheapest renderer, for panels) | '
+                                          'gpu_lidar (renderer + native gz scan on '
+                                          '<ns>/gz_native_scan, for panels).'),
         DeclareLaunchArgument('lidar_profile', default_value='modern',
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '

@@ -257,8 +257,8 @@ void GzGpuOusterLidarSystem::Configure(
     if (ray_mode_ != "panels" && ray_mode_ != "raycast") {
         RCLCPP_WARN(kLogger,
             "Unknown ray_mode='%s'; expected panels|raycast. "
-            "Defaulting to panels.", ray_mode_.c_str());
-        ray_mode_ = "panels";
+            "Defaulting to raycast.", ray_mode_.c_str());
+        ray_mode_ = "raycast";
     }
     if (panel_sampling_ != "bilinear" && panel_sampling_ != "nearest") {
         RCLCPP_WARN(kLogger,
@@ -540,12 +540,13 @@ void GzGpuOusterLidarSystem::PostUpdate(
             no_render_warned_ = true;
             RCLCPP_ERROR(kLogger,
                 "events::Render has not fired after %.1fs of sim time — gz-sim's "
-                "Sensors system has not started rendering. This plugin attaches "
-                "its depth-camera rig to the ogre2 scene owned by gz-sim-sensors-system, "
+                "Sensors system has not started rendering. panels mode attaches "
+                "a depth-camera rig to the ogre2 scene owned by gz-sim-sensors-system, "
                 "which only initialises rendering when the world contains at "
                 "least one rendering sensor (camera or gpu_lidar). Add a "
-                "rendering sensor (the example URDF's anchor_type defaults to a "
-                "camera) or no point cloud will be produced.",
+                "rendering sensor (pass anchor_type:=camera in xacro, or switch "
+                "to the default ray_mode:=raycast which needs no renderer) or "
+                "no point cloud will be produced.",
                 static_cast<double>(sim_ns) / 1e9);
         }
     }
