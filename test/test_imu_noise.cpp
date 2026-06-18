@@ -304,4 +304,38 @@ TEST(ImuNoise, NominalValuePreservedAsMean)
     EXPECT_NEAR(az.mean(), 9.81, 5.0 * se);
 }
 
+TEST(ImuNoise, WalkAndWhiteVariancesAreAdditive)
+{
+    // Walk noise and white noise are independent Gaussians; their per-step
+    // variances must add. Choose densities so both contribute equally:
+    //   var_white = (1e-4)² / dt = 1e-8 / 0.01 = 1e-6
+    //   var_walk  = (1e-2)² × dt = 1e-4 × 0.01 = 1e-6
+    // ⟹ var_both ≈ 2e-6; assert sum within ±10%.
+    constexpr int N = 100000;
+    constexpr double dt          = 0.01;
+    constexpr double white_dens  = 1e-4;
+    constexpr double walk_dens   = 1e-2;
+
+    auto measure_var = [&](double wd, double wk) {
+        AxisStats stat;
+        for (int i = 0; i < N; ++i) {
+            Vec3 gb = kZeroVec, ab = kZeroVec;
+            std::mt19937_64 rng{static_cast<uint64_t>(i)};
+            const auto out = applyImuNoise(
+                kZeroVec, kZeroVec, gb, ab,
+                wd, wd, wk, wk, dt, rng);
+            stat.add(out.av.x);
+        }
+        return stat.var();
+    };
+
+    const double var_white = measure_var(white_dens, 0.0);
+    const double var_walk  = measure_var(0.0,        walk_dens);
+    const double var_both  = measure_var(white_dens, walk_dens);
+
+    EXPECT_NEAR(var_both, var_white + var_walk, 0.1 * (var_white + var_walk))
+        << "var_white=" << var_white << " var_walk=" << var_walk
+        << " var_both=" << var_both;
+}
+
 }  // namespace gz_gpu_ouster_lidar

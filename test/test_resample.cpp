@@ -390,4 +390,36 @@ TEST(Resample, AzimuthOffsetShiftsColumns)
     }
 }
 
+// ── bilinearOrAverage partial-validity tests (GPU-path shared math) ──────────
+
+TEST(Resample, BilinearAveragesOnlyValidPixels)
+{
+    // When 2 of 4 pixels are valid, bilinearOrAverage returns their mean
+    // (not a weighted bilinear blend, which would require all 4 valid).
+    const float inf = std::numeric_limits<float>::infinity();
+    // a00=40m, a01=40m, a10=inf (invalid), a11=inf (invalid) → mean = 40.
+    const float result = rpmath::bilinearOrAverage(
+        40.0f, 40.0f, inf, inf,
+        0.5f, 0.5f,
+        /*v00=*/true, /*v01=*/true, /*v10=*/false, /*v11=*/false,
+        /*n_valid=*/2, inf);
+
+    ASSERT_TRUE(std::isfinite(result));
+    EXPECT_NEAR(result, 40.0f, 0.01f);
+}
+
+TEST(Resample, BilinearOneValidPixelReturnsThatPixel)
+{
+    // When only one of four pixels is valid, return that pixel exactly.
+    const float inf = std::numeric_limits<float>::infinity();
+    const float result = rpmath::bilinearOrAverage(
+        30.0f, inf, inf, inf,
+        0.3f, 0.7f,
+        /*v00=*/true, /*v01=*/false, /*v10=*/false, /*v11=*/false,
+        /*n_valid=*/1, inf);
+
+    ASSERT_TRUE(std::isfinite(result));
+    EXPECT_FLOAT_EQ(result, 30.0f);
+}
+
 }  // namespace gz_gpu_ouster_lidar

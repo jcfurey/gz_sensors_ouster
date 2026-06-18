@@ -413,4 +413,167 @@ TEST(NoiseModel, EdgeDiscontinuityCausesDropouts)
     EXPECT_LT(rate, 0.55);
 }
 
+// ---------------------------------------------------------------------------
+// Boundary-condition tests for core math formulas
+// ---------------------------------------------------------------------------
+
+TEST(NoiseModel, ReflectivitySaturatesAt255)
+{
+    // rv=1024: 100 + log2(1024)*22 = 100 + 10*22 = 320 → clamped to 255.
+    constexpr int H = 1, W = 1;
+    std::vector<float> depth(1, 10.0f);
+    std::vector<float> retro(1, 1024.0f);
+    std::vector<uint32_t> range(1);
+    std::vector<uint16_t> signal(1);
+    std::vector<uint8_t>  refl(1);
+    std::vector<uint16_t> nearir(1);
+
+    auto p = noNoiseParams(H, W);
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+
+    EXPECT_EQ(refl[0], 255u);
+}
+
+TEST(NoiseModel, RangeNoiseSigmaCapDoublesVariance)
+{
+    // kRangeRetroFloor=0.25: weight = min(1/sqrt(0.25), 2.0) = 2.0 (cap).
+    // kRangeRetroMax=2.0:    weight = min(1/sqrt(1.0),  2.0) = 1.0 (no cap).
+    // Same constant sigma → effective sigma doubles → variance quadruples.
+    constexpr int H = 1, W = 80000;
+    const int n = H * W;
+    std::vector<float> depth(n, 50.0f);
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.range_noise_min_std = 0.02f;
+    p.range_noise_max_std = 0.02f;  // constant sigma, no range dependency
+
+    auto variance = [&](const std::vector<float> & rv) {
+        std::vector<float> retro_v(n, rv[0]);
+        for (int i = 0; i < n; ++i) retro_v[i] = rv[i % static_cast<int>(rv.size())];
+        processCpu(depth.data(), retro_v.data(),
+                     range.data(), signal.data(), refl.data(), nearir.data(), p);
+        double sum = 0, sum2 = 0;
+        int cnt = 0;
+        for (int i = 0; i < n; ++i) {
+            if (range[i] > 0) {
+                const double v = static_cast<double>(range[i]);
+                sum += v; sum2 += v * v; ++cnt;
+            }
+        }
+        const double mean = sum / cnt;
+        return sum2 / cnt - mean * mean;
+    };
+
+    const std::vector<float> dark(n, 0.25f);   // at cap floor
+    const std::vector<float> bright(n, 1.0f);  // no cap
+    const double var_dark   = variance(dark);
+    const double var_bright = variance(bright);
+
+    // Expected ratio = (2σ)²/σ² = 4; allow 3-5 for statistical headroom.
+    const double ratio = var_dark / var_bright;
+    EXPECT_GT(ratio, 3.0) << "ratio=" << ratio;
+    EXPECT_LT(ratio, 5.0) << "ratio=" << ratio;
+}
+
+TEST(NoiseModel, DropoutCapFloorEqualizesVeryDarkTargets)
+{
+    // kDropoutRetroFloor=0.33: retro=0.05 and retro=0.33 both floor to 0.33,
+    // giving weight=min(1/0.33, 3.0)=3.0.  Effective dropout rates must be
+    // within 1% of each other.
+    constexpr int H = 1, W = 60000;
+    const int n = H * W;
+    std::vector<float> depth(n, 10.0f);
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.dropout_rate_close = 0.2f;
+    p.dropout_rate_far   = 0.4f;
+
+    auto dropout_rate = [&](float rv) {
+        std::vector<float> retro(n, rv);
+        processCpu(depth.data(), retro.data(),
+                     range.data(), signal.data(), refl.data(), nearir.data(), p);
+        int dropped = 0;
+        for (int i = 0; i < n; ++i) {
+            if (range[i] == 0) ++dropped;
+        }
+        return static_cast<double>(dropped) / n;
+    };
+
+    const double rate_very_dark = dropout_rate(0.05f);
+    const double rate_at_floor  = dropout_rate(0.33f);
+
+    EXPECT_NEAR(rate_very_dark, rate_at_floor, 0.01)
+        << "very_dark=" << rate_very_dark << " at_floor=" << rate_at_floor;
+}
+
+TEST(NoiseModel, DetectionLimitBoundaryExact)
+{
+    // d_max(ρ) = max_range·√(ρ/0.8).
+    // With max_range=100, retro=0.64: d_max = 100·√0.8 ≈ 89.44 m.
+    //
+    // The detection limit lives inside dropoutProbability(), which is only
+    // evaluated when dropout is enabled (drop_close > 0 or drop_far > 0).
+    // Use drop_far=1e-6 to enable the code path with negligible base rate:
+    //   At depth=89m: base_p ≈ 8.9e-7 · weight ≈ 1.4e-6 → ~0 drops in N=1000.
+    //   At depth=90m: d > d_max → dropout=1.0 (hard limit) → all drop.
+    constexpr int H = 1, W = 1000;
+    const int n = H * W;
+    std::vector<float> retro(n, 0.64f);
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.max_range = 100.0f;
+    p.dropout_rate_close = 0.0f;
+    p.dropout_rate_far   = 1e-6f;  // tiny but non-zero: enables dropout code path
+
+    std::vector<float> depth_near(n, 89.0f);
+    processCpu(depth_near.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+    for (int i = 0; i < n; ++i) {
+        EXPECT_GT(range[i], 0u)
+            << "depth=89m is inside d_max; pixel " << i << " must survive";
+    }
+
+    std::vector<float> depth_far(n, 90.0f);
+    processCpu(depth_far.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+    for (int i = 0; i < n; ++i) {
+        EXPECT_EQ(range[i], 0u)
+            << "depth=90m exceeds d_max; pixel " << i << " must be dropped";
+    }
+}
+
+TEST(NoiseModel, SignalFloorDoesNotCrashAtVeryShortRange)
+{
+    // At d=0.01 m: r²=kMinDenom exactly, guarding the 1/r² denominator.
+    // Signal = base_signal / kMinDenom → very large, clamped to uint16 max.
+    // The important thing is no crash, no NaN/Inf, and range > 0.
+    constexpr int H = 1, W = 1;
+    std::vector<float> depth(1, 0.01f);  // > kValidDepthMin=0.001 → valid
+    std::vector<float> retro(1, 1.0f);
+    std::vector<uint32_t> range(1);
+    std::vector<uint16_t> signal(1);
+    std::vector<uint8_t>  refl(1);
+    std::vector<uint16_t> nearir(1);
+
+    auto p = noNoiseParams(H, W);
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+
+    EXPECT_GT(range[0],  0u);
+    EXPECT_GT(signal[0], 0u);
+}
+
 }  // namespace gz_gpu_ouster_lidar

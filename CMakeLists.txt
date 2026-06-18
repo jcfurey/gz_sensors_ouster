@@ -237,6 +237,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_imu_noise test/test_imu_noise.cpp)
   target_link_libraries(test_imu_noise gz_gpu_ouster_lidar_cuda)
 
+  # Test: beam azimuth formula and sign convention (header-only math)
+  ament_add_gtest(test_beam_math test/test_beam_math.cpp)
+  target_link_libraries(test_beam_math gz_gpu_ouster_lidar_cuda)
+
   # Test: plugin lifecycle smoke (links against the full plugin .so so a
   # Gazebo schema bump that breaks the vtable surfaces at test build time)
   ament_add_gtest(test_lifecycle test/test_lifecycle.cpp)
