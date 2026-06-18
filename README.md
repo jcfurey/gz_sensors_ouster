@@ -303,9 +303,13 @@ plugin via `rclcpp`, so they need no bridge).
 `lidar_packets` are assembled into a `PointCloud2` on
 `/sensor/lidar/lidar0/points`, exactly as for a real Ouster — verify with
 `ros2 topic hz /sensor/lidar/lidar0/points`. `os_cloud` is configured with
-`point_cloud_frame:=lidar0/lidar_frame` and `pub_static_tf:=true` so the
-cloud lands in the `robot_state_publisher` TF tree (RViz fixed frame
-`base_footprint`) without a duplicate static-transform broadcaster. The
+`point_cloud_frame:=lidar0/lidar_frame` and `pub_static_tf:=true`, so it
+broadcasts the sensor's own static TF subtree
+(`lidar0/lidar_frame → lidar0/os_lidar`/`os_imu`) and the cloud lands in the
+`robot_state_publisher` TF tree (RViz fixed frame `base_footprint`). A small
+`static_transform_publisher` redundantly mirrors the URDF mount joint
+(`base_link → lidar0/lidar_frame`) so the cloud still reaches `base_link`
+even when `robot_state_publisher` is not running. The
 RViz config includes a `PointCloud` display for that topic.
 
 ### How the URDF wires to the plugin

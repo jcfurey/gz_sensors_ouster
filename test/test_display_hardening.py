@@ -1,11 +1,10 @@
 """Display-hardening regression tests.
 
-Verifies that the changes protecting headless/WSL/Wayland users from cryptic
-display errors are present and complete:
-  - docker/entrypoint.sh: warns early when DISPLAY and WAYLAND_DISPLAY are
-    both unset, with actionable X11/WSL/Wayland guidance.
-  - All three example launches: headless arg present with default=false,
-    gz server-only (-s) flag wired to the headless condition.
+Verifies that docker/entrypoint.sh protects headless/WSL/Wayland users from
+cryptic display errors: it warns early when DISPLAY and WAYLAND_DISPLAY are
+both unset, with actionable X11/WSL/Wayland guidance.
+
+(Launch-file headless wiring is covered by test_launch_files.py.)
 
 These are text/structural checks — no simulation or display required.
 """
@@ -13,13 +12,6 @@ import pathlib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 ENTRYPOINT = REPO / 'docker' / 'entrypoint.sh'
-LAUNCHES = REPO / 'examples' / 'launch'
-
-EXAMPLE_LAUNCHES = [
-    'ouster_standalone.launch.py',
-    'sensor_stack.launch.py',
-    'turtlebot3_ouster.launch.py',
-]
 
 
 # ── entrypoint.sh display guard ───────────────────────────────────────────────
