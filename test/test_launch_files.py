@@ -40,7 +40,12 @@ def test_headless_default_is_false(name):
 
 @pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
 def test_headless_enables_server_only_flag(name):
-    assert "' -s -r -v 3'" in (LAUNCHES / name).read_text()
+    src = (LAUNCHES / name).read_text()
+    assert "' -s" in src, f'{name}: -s (server-only) gz flag not found'
+    idx = src.index("' -s")
+    context = src[max(0, idx - 200):idx + 200]
+    assert 'headless' in context, \
+        f'{name}: -s flag exists but is not wired to the headless condition nearby'
 
 
 @pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
@@ -55,7 +60,9 @@ def test_panels_world_referenced(name):
     assert 'ouster_demo_panels.sdf' in (LAUNCHES / name).read_text()
 
 
-@pytest.mark.parametrize('name', ['ouster_standalone.launch.py', 'sensor_stack.launch.py'])
+@pytest.mark.parametrize('name', ['ouster_standalone.launch.py',
+                                   'sensor_stack.launch.py',
+                                   'turtlebot3_ouster.launch.py'])
 def test_no_anchor_type_launch_arg(name):
     """anchor_type is now derived from ray_mode inside the URDF; no launch arg."""
     assert "DeclareLaunchArgument('anchor_type'" not in (LAUNCHES / name).read_text()

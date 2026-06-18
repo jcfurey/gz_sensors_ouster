@@ -26,7 +26,7 @@ EXAMPLE_LAUNCHES = [
 
 def test_entrypoint_checks_display_env_var():
     src = ENTRYPOINT.read_text()
-    assert 'DISPLAY' in src
+    assert '${DISPLAY:-}' in src
 
 
 def test_entrypoint_checks_wayland_display_env_var():
@@ -41,12 +41,12 @@ def test_entrypoint_has_no_display_warning():
 
 def test_entrypoint_has_x11_guidance():
     src = ENTRYPOINT.read_text()
-    assert '.X11-unix' in src or 'X11' in src
+    assert '.X11-unix' in src
 
 
 def test_entrypoint_has_wsl_guidance():
     src = ENTRYPOINT.read_text()
-    assert 'WSL' in src
+    assert 'WSLg' in src
 
 
 def test_entrypoint_guard_is_in_drive_gui_block():
@@ -55,27 +55,3 @@ def test_entrypoint_guard_is_in_drive_gui_block():
     guard_pos = src.find('WAYLAND_DISPLAY', drive_start)
     assert guard_pos != -1, 'WAYLAND_DISPLAY check not found inside drive|gui block'
 
-
-# ── launch file headless wiring ───────────────────────────────────────────────
-
-def test_launches_have_headless_arg():
-    for name in EXAMPLE_LAUNCHES:
-        src = (LAUNCHES / name).read_text()
-        assert "DeclareLaunchArgument('headless'" in src, \
-            f'{name}: missing headless DeclareLaunchArgument'
-
-
-def test_launches_headless_arg_defaults_to_false():
-    for name in EXAMPLE_LAUNCHES:
-        src = (LAUNCHES / name).read_text()
-        idx = src.index("DeclareLaunchArgument('headless'")
-        block = src[idx:idx + 300]
-        assert "default_value='false'" in block, \
-            f'{name}: headless arg default is not false'
-
-
-def test_launches_wire_headless_to_server_only_flag():
-    for name in EXAMPLE_LAUNCHES:
-        src = (LAUNCHES / name).read_text()
-        assert "' -s -r -v 3'" in src, \
-            f'{name}: -s (server-only) gz flag not found'

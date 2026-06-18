@@ -5,6 +5,7 @@ repository entries with all required fields.  Catches accidentally malformed
 edits to the repos file that would break workspace setup for users.
 """
 import pathlib
+import re
 
 import pytest
 import yaml
@@ -49,8 +50,8 @@ def test_ouster_ros_fields(repos):
     assert r.get('type') == 'git'
     assert 'github.com/jcfurey/ouster-ros' in r.get('url', '')
     version = r.get('version', '')
-    assert isinstance(version, str) and len(version) >= 8, (
-        f'version should be a pinned SHA or branch, got: {version!r}')
+    assert re.fullmatch(r'[0-9a-f]{40}', version), (
+        f'ouster-ros version must be a pinned 40-char hex SHA, got: {version!r}')
 
 
 def test_all_entries_have_required_fields(repos):

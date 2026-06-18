@@ -452,11 +452,10 @@ TEST(NoiseModel, RangeNoiseSigmaCapDoublesVariance)
     p.range_noise_min_std = 0.02f;
     p.range_noise_max_std = 0.02f;  // constant sigma, no range dependency
 
-    auto variance = [&](const std::vector<float> & rv) {
-        std::vector<float> retro_v(n, rv[0]);
-        for (int i = 0; i < n; ++i) retro_v[i] = rv[i % static_cast<int>(rv.size())];
+    auto variance = [&](float rv_val, uint64_t seed) {
+        std::vector<float> retro_v(n, rv_val);
         processCpu(depth.data(), retro_v.data(),
-                     range.data(), signal.data(), refl.data(), nearir.data(), p);
+                     range.data(), signal.data(), refl.data(), nearir.data(), p, seed);
         double sum = 0, sum2 = 0;
         int cnt = 0;
         for (int i = 0; i < n; ++i) {
@@ -469,10 +468,8 @@ TEST(NoiseModel, RangeNoiseSigmaCapDoublesVariance)
         return sum2 / cnt - mean * mean;
     };
 
-    const std::vector<float> dark(n, 0.25f);   // at cap floor
-    const std::vector<float> bright(n, 1.0f);  // no cap
-    const double var_dark   = variance(dark);
-    const double var_bright = variance(bright);
+    const double var_dark   = variance(0.25f, 1u);  // retro at cap floor
+    const double var_bright = variance(1.0f,  2u);  // retro with no cap
 
     // Expected ratio = (2σ)²/σ² = 4; allow 3-5 for statistical headroom.
     const double ratio = var_dark / var_bright;
@@ -497,10 +494,10 @@ TEST(NoiseModel, DropoutCapFloorEqualizesVeryDarkTargets)
     p.dropout_rate_close = 0.2f;
     p.dropout_rate_far   = 0.4f;
 
-    auto dropout_rate = [&](float rv) {
+    auto dropout_rate = [&](float rv, uint64_t seed) {
         std::vector<float> retro(n, rv);
         processCpu(depth.data(), retro.data(),
-                     range.data(), signal.data(), refl.data(), nearir.data(), p);
+                     range.data(), signal.data(), refl.data(), nearir.data(), p, seed);
         int dropped = 0;
         for (int i = 0; i < n; ++i) {
             if (range[i] == 0) ++dropped;
@@ -508,8 +505,8 @@ TEST(NoiseModel, DropoutCapFloorEqualizesVeryDarkTargets)
         return static_cast<double>(dropped) / n;
     };
 
-    const double rate_very_dark = dropout_rate(0.05f);
-    const double rate_at_floor  = dropout_rate(0.33f);
+    const double rate_very_dark = dropout_rate(0.05f, 1u);
+    const double rate_at_floor  = dropout_rate(0.33f, 2u);
 
     EXPECT_NEAR(rate_very_dark, rate_at_floor, 0.01)
         << "very_dark=" << rate_very_dark << " at_floor=" << rate_at_floor;
@@ -540,7 +537,7 @@ TEST(NoiseModel, DetectionLimitBoundaryExact)
 
     std::vector<float> depth_near(n, 89.0f);
     processCpu(depth_near.data(), retro.data(),
-                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+                 range.data(), signal.data(), refl.data(), nearir.data(), p, 1u);
     for (int i = 0; i < n; ++i) {
         EXPECT_GT(range[i], 0u)
             << "depth=89m is inside d_max; pixel " << i << " must survive";
@@ -548,7 +545,7 @@ TEST(NoiseModel, DetectionLimitBoundaryExact)
 
     std::vector<float> depth_far(n, 90.0f);
     processCpu(depth_far.data(), retro.data(),
-                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+                 range.data(), signal.data(), refl.data(), nearir.data(), p, 2u);
     for (int i = 0; i < n; ++i) {
         EXPECT_EQ(range[i], 0u)
             << "depth=90m exceeds d_max; pixel " << i << " must be dropped";

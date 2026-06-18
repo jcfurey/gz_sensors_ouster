@@ -11,8 +11,8 @@
 # os_cloud (turns the plugin's lidar_packets into a PointCloud2 on
 # /sensor/lidar/lidar0/points, exactly as for a real Ouster).
 #
-# Default ray_mode is *raycast* (CPU, no render engine) so this runs headless
-# with no GPU. Drive it with teleop_twist_keyboard on /cmd_vel. The
+# Default ray_mode is *raycast* (CPU, no render engine). Drive it with
+# teleop_twist_keyboard on /cmd_vel. The
 # LiDAR/IMU/image topics are published directly by the plugin, so they are NOT
 # bridged.
 import os
