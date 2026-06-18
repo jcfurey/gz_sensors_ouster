@@ -3,7 +3,9 @@
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
 #   ros2 launch gz_sensors_ouster ouster_standalone.launch.py lidar_profile:=legacy
-#   ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels anchor_type:=camera
+#
+# The demo world is raycast (GPU-free); panels mode needs a rendering world you
+# supply (gz-sim-sensors-system + a rendering anchor) — see the README.
 #
 # Brings up: gz sim (demo world) + robot_state_publisher (URDF) +
 # `ros_gz_sim create` (spawns the model, which loads the system plugin) +
@@ -78,15 +80,16 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('ray_mode', default_value='raycast',
-                              description='Ray generation mode: '
-                                          'raycast (default, no GPU/display needed) | '
-                                          'panels (GPU renderer, needs a rendering world).'),
+                              description='Ray generation mode: raycast (default, no '
+                                          'GPU/display needed; the demo world is raycast). '
+                                          'panels needs a rendering world you supply '
+                                          '(see README).'),
         DeclareLaunchArgument('anchor_type', default_value='altimeter',
-                              description='Pose-anchor sensor type: '
-                                          'altimeter (default, non-rendering, for raycast) | '
-                                          'camera (cheapest renderer, for panels) | '
-                                          'gpu_lidar (renderer + native gz scan on '
-                                          '<ns>/gz_native_scan, for panels).'),
+                              description='Pose-anchor sensor type: altimeter (default, '
+                                          'non-rendering, for raycast). For panels with a '
+                                          'rendering world use camera (cheapest) or '
+                                          'gpu_lidar (also emits a native gz scan on '
+                                          '<ns>/gz_native_scan).'),
         DeclareLaunchArgument('lidar_profile', default_value='modern',
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '

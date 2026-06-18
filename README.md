@@ -114,8 +114,10 @@ non-rendering `altimeter` pose anchor is handled without Gazebo warnings.
    point cloud is produced**. The plugin logs a one-shot error after ~2 s of
    sim time: *"events::Render has not fired … add a rendering sensor"*.
 
-For panels mode pass `anchor_type:=camera` (cheapest renderer, no second lidar)
-or `anchor_type:=gpu_lidar` (also emits a native gz scan on
+All bundled example worlds are raycast (no Sensors system), so panels mode needs
+a rendering world you supply: add the two plugins above to a copy of a demo
+world. For the rendering anchor pass `anchor_type:=camera` (cheapest renderer, no
+second lidar) or `anchor_type:=gpu_lidar` (also emits a native gz scan on
 `<sensor_name>/gz_native_scan`).
 
 ## Workspace setup
@@ -267,7 +269,7 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `urdf/ouster_standalone.urdf.xacro` | Single OS1-64 + IMU on a pedestal |
 | `urdf/sensor_stack.urdf.xacro` | Platform with front OS1-64+IMU and rear OS0-128 |
 | `urdf/turtlebot3_ouster.urdf.xacro` | A drivable TurtleBot3 waffle carrying the Ouster (used by the Docker test) |
-| `worlds/ouster_demo.sdf` | Demo world (physics + sensors + IMU systems, ground + obstacles) |
+| `worlds/ouster_demo.sdf` | Demo world (physics + altimeter + IMU systems, ground + obstacles). GPU-free: raycast mode, no rendering Sensors system |
 | `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |

@@ -2,14 +2,16 @@
 <!--
   Demo world for the gz_sensors_ouster examples.
 
-  Loads the systems the plugin needs:
+  This world runs the plugin in its default *raycast* mode: beams are cast on
+  the CPU against a scene mirrored from the ECM, so NO render engine is needed.
+  It deliberately does NOT load gz-sim-sensors-system (the system that spins up
+  the ogre2 render engine), which means it runs headless on any machine — no
+  GPU, no display, and unaffected by a broken/software mesa or Vulkan stack.
+
+  Loads the systems raycast mode needs:
     * Physics            - steps the sim.
-    * Altimeter          - handles the non-rendering altimeter pose-anchor that
-                           the plugin (raycast mode, default) uses for its ray
-                           origin. Harmless when no altimeter sensor is present.
-    * Sensors (ogre2)    - only needed for panels mode (not the default). Loads
-                           the ogre2 render engine; idles when the world has no
-                           rendering sensors (i.e. in default raycast mode).
+    * Altimeter          - activates the non-rendering `altimeter` pose anchor
+                           the raycast plugin looks up for its ray origin.
     * SceneBroadcaster   - GUI / state.
     * UserCommands       - lets `ros_gz_sim create` spawn the URDF at runtime.
     * Imu                - populates AngularVelocity/LinearAcceleration on imu
@@ -17,6 +19,10 @@
 
   Ground + a ring of obstacles at varied ranges so the LiDAR returns are
   non-empty.
+
+  Panels mode (ray_mode:=panels) is an advanced opt-in that needs a render
+  engine: add gz-sim-sensors-system (ogre2) plus a rendering anchor
+  (anchor_type:=camera) to a copy of this world. See the README.
 -->
 <sdf version="1.9">
   <world name="ouster_demo">
@@ -30,10 +36,6 @@
             name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-altimeter-system"
             name="gz::sim::systems::Altimeter"/>
-    <plugin filename="gz-sim-sensors-system"
-            name="gz::sim::systems::Sensors">
-      <render_engine>ogre2</render_engine>
-    </plugin>
     <plugin filename="gz-sim-scene-broadcaster-system"
             name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-user-commands-system"
