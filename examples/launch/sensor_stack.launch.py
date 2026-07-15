@@ -52,11 +52,25 @@ def _metadata_path(pkg_share, lidar_profile, modern_name):
 def _os_cloud(name):
     """ouster_ros os_cloud for one sensor: assemble lidar_packets into a
     PointCloud2 on /sensor/lidar/<name>/points, stamped in <name>/lidar_frame.
-    pub_static_tf=true so the driver also broadcasts its own static TF subtree
-    (<name>/lidar_frame -> <name>/os_lidar, <name>/os_imu) anchored at the robot
-    lidar frame. The cloud stays in <name>/lidar_frame (NOT os_lidar) because the
-    plugin generates points there and the metadata lidar_to_sensor_transform is
-    the real 180deg+36mm offset, which would rotate the sim cloud."""
+
+    The plugin already generates points in <name>/lidar_frame using the standard
+    (identity) Ouster XYZ LUT, so os_cloud must NOT apply the metadata's
+    lidar_to_sensor_transform (the real 180deg + 36mm housing offset) — doing so
+    would rotate/shift the whole cloud. In ouster_ros that transform is applied
+    iff point_cloud_frame == sensor_frame
+    (os_transforms_broadcaster.h: apply_lidar_to_sensor_transform()), so we keep
+    them DIFFERENT: point_cloud_frame == lidar_frame == '<name>/lidar_frame'
+    (identity LUT, cloud in the URDF lidar frame) while sensor_frame is a distinct
+    '<name>/os_sensor'. point_cloud_frame is set equal to lidar_frame so the
+    driver's frame validation keeps it as-is (it would otherwise reset an
+    unrecognised point_cloud_frame back to lidar_frame with a warning).
+
+    pub_static_tf=False: with sensor_frame != lidar_frame the driver would
+    broadcast sensor_frame -> lidar_frame, giving <name>/lidar_frame a second
+    parent on top of the base_link -> <name>/lidar_frame mount (URDF / the
+    _mount_stp below) — a TF-tree conflict. The os_lidar/os_imu leaf frames it
+    used to publish are unused by these examples, so RSP + the mount publisher
+    own the tree instead."""
     return Node(
         package='ouster_ros',
         executable='os_cloud',
@@ -67,10 +81,10 @@ def _os_cloud(name):
             'use_sim_time': True,
             'proc_mask': 'PCL',  # plugin publishes /imu itself; cloud only
             'point_cloud_frame': name + '/lidar_frame',
-            'pub_static_tf': True,
-            'sensor_frame': name + '/lidar_frame',
-            'lidar_frame': name + '/os_lidar',
+            'sensor_frame': name + '/os_sensor',   # != point_cloud_frame → identity LUT
+            'lidar_frame': name + '/lidar_frame',  # == point_cloud_frame → no frame reset
             'imu_frame': name + '/os_imu',
+            'pub_static_tf': False,
             'timestamp_mode': 'TIME_FROM_ROS_TIME',
         }],
     )
@@ -177,7 +191,8 @@ def generate_launch_description():
         ),
 
         # One os_cloud per sensor → /sensor/lidar/{front,rear}/points, each
-        # broadcasting its own os_lidar/os_imu TF subtree.
+        # stamped in <name>/lidar_frame with the identity LUT (no housing
+        # rotation); see _os_cloud for the frame rationale.
         _os_cloud('front'),
         _os_cloud('rear'),
 

@@ -303,14 +303,14 @@ plugin via `rclcpp`, so they need no bridge).
 `lidar_packets` are assembled into a `PointCloud2` on
 `/sensor/lidar/lidar0/points`, exactly as for a real Ouster — verify with
 `ros2 topic hz /sensor/lidar/lidar0/points`. `os_cloud` is configured with
-`point_cloud_frame:=lidar0/lidar_frame` and `pub_static_tf:=true`, so it
-broadcasts the sensor's own static TF subtree
-(`lidar0/lidar_frame → lidar0/os_lidar`/`os_imu`) and the cloud lands in the
-`robot_state_publisher` TF tree (RViz fixed frame `base_footprint`). A small
-`static_transform_publisher` redundantly mirrors the URDF mount joint
-(`base_link → lidar0/lidar_frame`) so the cloud still reaches `base_link`
-even when `robot_state_publisher` is not running. The
-RViz config includes a `PointCloud` display for that topic.
+`point_cloud_frame:=lidar0/lidar_frame` (the cloud is stamped in the URDF lidar
+frame) and a **distinct** `sensor_frame:=lidar0/os_sensor` so the driver uses the
+identity XYZ LUT — see [Frames vs `os_cloud`](#frames-vs-ouster_ros-os_cloud) for
+why that pairing matters — and the cloud lands in the `robot_state_publisher` TF
+tree (RViz fixed frame `base_footprint`). A small `static_transform_publisher`
+redundantly mirrors the URDF mount joint (`base_link → lidar0/lidar_frame`) so
+the cloud still reaches `base_link` even when `robot_state_publisher` is not
+running. The RViz config includes a `PointCloud` display for that topic.
 
 ### How the URDF wires to the plugin
 
@@ -351,21 +351,32 @@ therefore configure `os_cloud` so the cloud's full TF chain to `base_link`
 is explicit:
 
 - `point_cloud_frame:=<name>/lidar_frame` — the `PointCloud2` is stamped in the
-  robot's lidar frame. It is **not** put in `os_lidar`: the metadata's
-  `lidar_to_sensor_transform` is the real Ouster 180° + 36 mm offset, which
-  would rotate the simulated cloud. (Set `point_cloud_frame:=<name>/os_lidar`
-  if you want that physical offset applied.)
-- `pub_static_tf:=true` with `sensor_frame:=<name>/lidar_frame` — the ouster
-  driver broadcasts its own `<name>/lidar_frame → <name>/os_lidar` and
-  `→ <name>/os_imu` static transforms from the metadata.
+  robot's lidar frame. The plugin's ranges are calibrated to the **standard
+  (identity) Ouster XYZ LUT**, so the cloud must be reconstructed **without** the
+  metadata's `lidar_to_sensor_transform` (the real Ouster 180° + 36 mm housing
+  offset) — applying it would rotate/shift the whole cloud.
+- The catch: `ouster_ros` applies `lidar_to_sensor_transform` **iff
+  `point_cloud_frame == sensor_frame`**
+  (`os_transforms_broadcaster.h::apply_lidar_to_sensor_transform()`). So the
+  launches keep the two **different** — `sensor_frame:=<name>/os_sensor` — to get
+  the identity LUT, and set `lidar_frame:=<name>/lidar_frame` equal to
+  `point_cloud_frame` so the driver's frame validation keeps the requested frame
+  (an unrecognised `point_cloud_frame` is otherwise reset to `lidar_frame` with a
+  warning). Setting `point_cloud_frame == sensor_frame` instead would apply the
+  housing rotation — the opposite of what a sim cloud aligned to the URDF frame
+  wants.
+- `pub_static_tf:=false` — with `sensor_frame != lidar_frame` the driver would
+  broadcast `sensor_frame → lidar_frame`, giving `<name>/lidar_frame` a second
+  parent on top of the `base_link → <name>/lidar_frame` mount, a TF-tree
+  conflict. The unused `os_lidar`/`os_imu` leaf frames are dropped; RSP and the
+  mount publisher own the tree.
 - A `static_transform_publisher` publishes `base_link → <name>/lidar_frame`
   (matching the URDF mount joint), so the cloud reaches `base_link` even if
   `robot_state_publisher` is not running. When RSP is up it publishes the same
   edge, which is harmless (a one-time `TF_REPEATED_DATA` warning).
 
 Net TF chain: `points (<name>/lidar_frame) → base_link → base_footprint`, via
-both the launch stack (RSP / the mount `static_transform_publisher`) and the
-ouster driver.
+the launch stack (RSP / the mount `static_transform_publisher`).
 
 ## Docker (standalone test)
 

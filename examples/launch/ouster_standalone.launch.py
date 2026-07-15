@@ -149,20 +149,31 @@ def generate_launch_description():
                 # Stamp the cloud in the URDF lidar frame that
                 # robot_state_publisher already places in the TF tree, so RViz
                 # (fixed frame base_footprint) can display it.
-                # Stamp the cloud in the URDF lidar frame, NOT os_lidar: the
-                # plugin generates points aligned with lidar0/lidar_frame, while
-                # the metadata's lidar_to_sensor_transform is the real Ouster
-                # 180deg + 36mm offset — publishing in os_lidar would rotate the
-                # sim cloud. (Set this to lidar0/os_lidar if you want the full
-                # physical sensor<->lidar offset instead.)
+                #
+                # The plugin generates points aligned with lidar0/lidar_frame via
+                # the standard (identity) Ouster XYZ LUT, so os_cloud must NOT
+                # apply the metadata's lidar_to_sensor_transform (the real
+                # 180deg + 36mm housing offset) — that would rotate/shift the
+                # whole cloud. ouster_ros applies it iff
+                # point_cloud_frame == sensor_frame
+                # (os_transforms_broadcaster.h: apply_lidar_to_sensor_transform()),
+                # so keep them DIFFERENT: point_cloud_frame == lidar_frame ==
+                # 'lidar0/lidar_frame' (identity LUT, cloud in the URDF lidar
+                # frame), sensor_frame a distinct 'lidar0/os_sensor'.
+                # point_cloud_frame is set equal to lidar_frame so the driver's
+                # frame validation keeps it (an unrecognised point_cloud_frame is
+                # otherwise reset back to lidar_frame with a warning).
                 'point_cloud_frame': 'lidar0/lidar_frame',
-                # Let the ouster driver broadcast its own static TF subtree
-                # (lidar0/lidar_frame -> lidar0/os_lidar, lidar0/os_imu) from the
-                # metadata, anchored at the robot's lidar frame.
-                'pub_static_tf': True,
-                'sensor_frame': 'lidar0/lidar_frame',
-                'lidar_frame': 'lidar0/os_lidar',
+                'sensor_frame': 'lidar0/os_sensor',   # != point_cloud_frame → identity LUT
+                'lidar_frame': 'lidar0/lidar_frame',  # == point_cloud_frame → no frame reset
                 'imu_frame': 'lidar0/os_imu',
+                # pub_static_tf=False: with sensor_frame != lidar_frame the driver
+                # would broadcast sensor_frame -> lidar_frame, giving
+                # lidar0/lidar_frame a second parent on top of the
+                # base_link -> lidar0/lidar_frame mount (URDF / the
+                # static_transform_publisher below) — a TF-tree conflict. RSP +
+                # that mount publisher own the tree instead.
+                'pub_static_tf': False,
                 # Stamp on receipt with ROS (sim) time, sidestepping any epoch
                 # mismatch between the packet column timestamps and /clock.
                 'timestamp_mode': 'TIME_FROM_ROS_TIME',
