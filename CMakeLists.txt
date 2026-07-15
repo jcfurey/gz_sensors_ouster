@@ -54,8 +54,10 @@ find_package(Eigen3 REQUIRED)
 # toolchains just disable that backend and fall through to the next at
 # runtime. At least one is always compiled in — the CPU backend.
 #
-# User-overridable: pass -DGZ_GPU_OUSTER_USE_{CUDA,HIP,SYCL}=ON/OFF on the
-# cmake command line to force a backend on or off regardless of the probe.
+# User-overridable: each GZ_GPU_OUSTER_USE_{CUDA,HIP,SYCL} option is tri-state
+# AUTO (default, probe the toolchain) | ON (force on; configure fails if the
+# toolchain is missing) | OFF (force off regardless of the probe). Pass e.g.
+# -DGZ_GPU_OUSTER_USE_CUDA=OFF on the cmake command line.
 include(CheckLanguage)
 
 # ── CUDA (NVIDIA) ────────────────────────────────────────────────────────────
@@ -85,45 +87,92 @@ if(CMAKE_CUDA_COMPILER AND NOT EXISTS "${CMAKE_CUDA_COMPILER}")
   unset(_cuda_cache_vars)
   check_language(CUDA)
 endif()
-set(GZ_GPU_OUSTER_USE_CUDA OFF CACHE BOOL "Build the CUDA backend for NVIDIA GPUs")
-if(CMAKE_CUDA_COMPILER AND EXISTS "${CMAKE_CUDA_COMPILER}")
-  enable_language(CUDA)
-  find_package(CUDAToolkit QUIET)
-  if(CUDAToolkit_FOUND)
-    set(GZ_GPU_OUSTER_USE_CUDA ON)
-    message(STATUS "${PROJECT_NAME}: CUDA backend enabled (nvcc + curand)")
+# Each backend is TRI-STATE: AUTO (default) probes the toolchain; ON forces the
+# backend on and fails at configure time if its toolchain is missing; OFF forces
+# it off even when the toolchain is present. This keeps an explicit user
+# override authoritative — previously the probe set a normal variable that
+# shadowed the cache, so -DGZ_GPU_OUSTER_USE_CUDA=OFF was silently ignored when
+# nvcc was present, and =ON without a toolchain broke cryptically in the backend
+# subdirectory instead of erroring here. The resolved decision is exported to
+# cuda/CMakeLists.txt as GZ_GPU_OUSTER_ENABLE_<BACKEND>.
+set(GZ_GPU_OUSTER_USE_CUDA AUTO CACHE STRING
+    "CUDA (NVIDIA) backend: AUTO (probe) | ON (force) | OFF (disable)")
+set_property(CACHE GZ_GPU_OUSTER_USE_CUDA PROPERTY STRINGS AUTO ON OFF)
+set(GZ_GPU_OUSTER_ENABLE_CUDA OFF)
+if(GZ_GPU_OUSTER_USE_CUDA STREQUAL "AUTO")
+  if(CMAKE_CUDA_COMPILER AND EXISTS "${CMAKE_CUDA_COMPILER}")
+    enable_language(CUDA)
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND)
+      set(GZ_GPU_OUSTER_ENABLE_CUDA ON)
+      message(STATUS "${PROJECT_NAME}: CUDA backend auto-enabled (nvcc + curand)")
+    else()
+      message(STATUS "${PROJECT_NAME}: nvcc found but CUDAToolkit missing; CUDA backend disabled")
+    endif()
   else()
-    message(STATUS "${PROJECT_NAME}: nvcc found but CUDAToolkit missing; CUDA backend disabled")
+    message(STATUS "${PROJECT_NAME}: no CUDA compiler; CUDA backend disabled (auto)")
   endif()
-else()
-  message(STATUS "${PROJECT_NAME}: no CUDA compiler; CUDA backend disabled")
+elseif(GZ_GPU_OUSTER_USE_CUDA)  # ON / TRUE / 1
+  if(NOT (CMAKE_CUDA_COMPILER AND EXISTS "${CMAKE_CUDA_COMPILER}"))
+    message(FATAL_ERROR
+      "${PROJECT_NAME}: GZ_GPU_OUSTER_USE_CUDA=ON but no CUDA compiler was found")
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  set(GZ_GPU_OUSTER_ENABLE_CUDA ON)
+  message(STATUS "${PROJECT_NAME}: CUDA backend force-enabled (user override)")
+else()  # OFF / FALSE / 0
+  message(STATUS "${PROJECT_NAME}: CUDA backend disabled (user override)")
 endif()
 
 # ── HIP (AMD, including APUs via ROCm) ──────────────────────────────────────
 check_language(HIP)
-set(GZ_GPU_OUSTER_USE_HIP OFF CACHE BOOL "Build the HIP backend for AMD GPUs (incl. APUs)")
-if(CMAKE_HIP_COMPILER)
-  set(GZ_GPU_OUSTER_USE_HIP ON)
-  message(STATUS "${PROJECT_NAME}: HIP backend enabled (${CMAKE_HIP_COMPILER})")
-else()
-  message(STATUS "${PROJECT_NAME}: no HIP compiler; HIP backend disabled")
+set(GZ_GPU_OUSTER_USE_HIP AUTO CACHE STRING
+    "HIP (AMD, incl. APUs) backend: AUTO (probe) | ON (force) | OFF (disable)")
+set_property(CACHE GZ_GPU_OUSTER_USE_HIP PROPERTY STRINGS AUTO ON OFF)
+set(GZ_GPU_OUSTER_ENABLE_HIP OFF)
+if(GZ_GPU_OUSTER_USE_HIP STREQUAL "AUTO")
+  if(CMAKE_HIP_COMPILER)
+    set(GZ_GPU_OUSTER_ENABLE_HIP ON)
+    message(STATUS "${PROJECT_NAME}: HIP backend auto-enabled (${CMAKE_HIP_COMPILER})")
+  else()
+    message(STATUS "${PROJECT_NAME}: no HIP compiler; HIP backend disabled (auto)")
+  endif()
+elseif(GZ_GPU_OUSTER_USE_HIP)  # ON / TRUE / 1
+  if(NOT CMAKE_HIP_COMPILER)
+    message(FATAL_ERROR
+      "${PROJECT_NAME}: GZ_GPU_OUSTER_USE_HIP=ON but no HIP compiler was found")
+  endif()
+  set(GZ_GPU_OUSTER_ENABLE_HIP ON)
+  message(STATUS "${PROJECT_NAME}: HIP backend force-enabled (user override)")
+else()  # OFF / FALSE / 0
+  message(STATUS "${PROJECT_NAME}: HIP backend disabled (user override)")
 endif()
 
 # ── SYCL (Intel iGPU + Arc via oneAPI DPC++ / AdaptiveCpp) ──────────────────
-# Enable automatically when the compiler identifies as IntelLLVM (icpx) or
-# when SYCL is explicitly requested via -DGZ_GPU_OUSTER_USE_SYCL=ON (e.g.
-# for AdaptiveCpp builds where the compiler ID is Clang).
-set(GZ_GPU_OUSTER_USE_SYCL OFF CACHE BOOL "Build the SYCL backend for Intel GPUs")
-if(NOT GZ_GPU_OUSTER_USE_SYCL AND CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-  set(GZ_GPU_OUSTER_USE_SYCL ON)
-  message(STATUS "${PROJECT_NAME}: SYCL backend enabled (icpx detected)")
-elseif(GZ_GPU_OUSTER_USE_SYCL)
-  message(STATUS "${PROJECT_NAME}: SYCL backend enabled (user-requested)")
-else()
-  message(STATUS "${PROJECT_NAME}: SYCL backend disabled")
+# AUTO enables the backend when the compiler identifies as IntelLLVM (icpx);
+# ON forces it on (e.g. for AdaptiveCpp builds where the compiler ID is Clang),
+# OFF disables it even under icpx.
+set(GZ_GPU_OUSTER_USE_SYCL AUTO CACHE STRING
+    "SYCL (Intel) backend: AUTO (icpx auto-detect) | ON (force) | OFF (disable)")
+set_property(CACHE GZ_GPU_OUSTER_USE_SYCL PROPERTY STRINGS AUTO ON OFF)
+set(GZ_GPU_OUSTER_ENABLE_SYCL OFF)
+if(GZ_GPU_OUSTER_USE_SYCL STREQUAL "AUTO")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
+    set(GZ_GPU_OUSTER_ENABLE_SYCL ON)
+    message(STATUS "${PROJECT_NAME}: SYCL backend auto-enabled (icpx detected)")
+  else()
+    message(STATUS "${PROJECT_NAME}: SYCL backend disabled "
+                   "(auto; needs icpx or -DGZ_GPU_OUSTER_USE_SYCL=ON)")
+  endif()
+elseif(GZ_GPU_OUSTER_USE_SYCL)  # ON / TRUE / 1
+  set(GZ_GPU_OUSTER_ENABLE_SYCL ON)
+  message(STATUS "${PROJECT_NAME}: SYCL backend force-enabled (user override)")
+else()  # OFF / FALSE / 0
+  message(STATUS "${PROJECT_NAME}: SYCL backend disabled (user override)")
 endif()
 
-if(NOT GZ_GPU_OUSTER_USE_CUDA AND NOT GZ_GPU_OUSTER_USE_HIP AND NOT GZ_GPU_OUSTER_USE_SYCL)
+if(NOT GZ_GPU_OUSTER_ENABLE_CUDA AND NOT GZ_GPU_OUSTER_ENABLE_HIP AND NOT GZ_GPU_OUSTER_ENABLE_SYCL)
   message(STATUS "${PROJECT_NAME}: no GPU backend enabled; CPU fallback only")
 endif()
 
