@@ -309,13 +309,19 @@ endif()
 # tree they must sit NEXT to the public headers so the quoted includes
 # (same-directory lookup) keep resolving for downstream consumers of the
 # installed gz_gpu_ouster_lidar_system.hpp.
+#
+# ament_auto_package installs include/gz_gpu_ouster_lidar/ to
+# <prefix>/include/gz_gpu_ouster_lidar/, so these backend headers must go to the
+# SAME directory — not include/${PROJECT_NAME}/... , which is a *different*
+# folder (<prefix>/include/gz_sensors_ouster/gz_gpu_ouster_lidar/) where the
+# quoted same-directory include would not find them.
 install(FILES
   cuda/imu_noise.hpp
   cuda/panel_layout.hpp
   cuda/raycast_scene.hpp
   cuda/raycast_math.hpp
   cuda/ray_processor_math.hpp
-  DESTINATION include/${PROJECT_NAME}/gz_gpu_ouster_lidar
+  DESTINATION include/gz_gpu_ouster_lidar
 )
 
 # Installs the plugin library + include/ headers, exports the ament package,
