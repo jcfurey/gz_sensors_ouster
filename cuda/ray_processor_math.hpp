@@ -241,17 +241,28 @@ GZ_OUSTER_HD inline float sampleBeamRange(
     return planar / cosp;
 }
 
-/// Beam-origin parallax correction: subtract the lidar-origin-to-beam-origin
-/// offset projected onto the beam elevation. No-op for non-finite depth or a
-/// zero offset.
+/// Beam-origin parallax correction: convert the panel-rendered Euclidean range
+/// (measured from the lidar origin) into the reported Ouster range.
+///
+/// The panel depth cameras render from the lidar origin, so `depth` is the range
+/// from that origin along the beam. The Ouster XYZ LUT reconstructs each point as
+///   xyz = (R - n)·d_hat + n·[cos(enc), sin(enc), 0]
+/// where R is the reported range and n = beam_origin_m. Projecting onto d_hat
+/// gives (R - n) = depth - n·cos(elev), i.e. R = depth + n·(1 - cos(elev)). The
+/// beam-origin distance t = depth - n·cos(elev); the reported range is t + n,
+/// matching the raycast path (range = t0 + n_off) and real-sensor reconstruction.
+/// The previous form returned t (omitting the + n), reconstructing every point
+/// ~n (≈1.4–2.8 cm) closer than the raycast mode and the LUT. No-op at elev = 0
+/// (cos = 1) and n = 0. No-op for non-finite depth.
 GZ_OUSTER_HD inline float applyBeamOrigin(float depth, float beam_angle_deg,
                                           float beam_origin_m)
 {
     if (gzm::isfinite_(depth) && beam_origin_m > 0.0f) {
-        // Keep the multiply-then-divide order (deg * π / 180) the backends
-        // used inline, so results are bit-identical, not merely close.
+        // Keep the multiply order (deg * π / 180) the backends used inline, so
+        // results stay bit-identical across backends, not merely close.
         const float elev_rad = beam_angle_deg * kPi / 180.0f;
-        return gzm::fmax_(0.0f, depth - beam_origin_m * gzm::cos_(elev_rad));
+        return gzm::fmax_(0.0f,
+            depth - beam_origin_m * gzm::cos_(elev_rad) + beam_origin_m);
     }
     return depth;
 }

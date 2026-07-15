@@ -289,7 +289,7 @@ TEST(Resample, FarClipReadsAsMiss)
     }
 }
 
-TEST(Resample, BeamOriginSubtraction)
+TEST(Resample, BeamOriginReportsXyzLutRange)
 {
     constexpr int H = 1, W = 16;
     constexpr float kRange = 10.0f;
@@ -313,10 +313,15 @@ TEST(Resample, BeamOriginSubtraction)
     proc.processRaw(raw.data(), beam_alt.data(), beam_az.data(), layout.rp,
                     range.data(), signal.data(), refl.data(), nearir.data(), pp);
 
-    // depth - beam_origin * cos(0) = 10 - 0.05 = 9.95 m = 9950 mm
+    // Reported range R = depth + n*(1 - cos(elev)) (applyBeamOrigin). At elev=0
+    // the beam-origin term vanishes, so R == depth exactly: the panel-origin
+    // Euclidean range 10 m reconstructs at 10 m via the Ouster XYZ LUT
+    // xyz = (R - n)*d_hat + n*[cos,sin,0]. (The pre-fix code returned depth - n
+    // = 9.95 m, reconstructing every point n too close and disagreeing with the
+    // raycast path.)
     for (int i = 0; i < n; ++i) {
-        EXPECT_NEAR(static_cast<double>(range[i]), 9950.0, 30.0)
-            << "beam origin subtraction at pixel " << i;
+        EXPECT_NEAR(static_cast<double>(range[i]), 10000.0, 30.0)
+            << "beam-origin XYZ-LUT range at pixel " << i;
     }
 }
 
