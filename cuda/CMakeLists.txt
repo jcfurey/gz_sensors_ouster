@@ -46,12 +46,18 @@ if(GZ_GPU_OUSTER_ENABLE_CUDA)
     CUDA_STANDARD_REQUIRED ON
     CUDA_EXTENSIONS OFF
   )
-  # CUDA target architectures. Honour an explicit -DCMAKE_CUDA_ARCHITECTURES
-  # (the Docker CUDA_ARCH build-arg maps to it); otherwise default to a portable
-  # Turing→Ada list. Do NOT use the "all-major" keyword: it requires CMake
-  # >= 3.23 while this project declares a 3.18 minimum, and hardcoding it as a
-  # target property would also override the documented CUDA_ARCH knob.
-  if(NOT CMAKE_CUDA_ARCHITECTURES)
+  # CUDA target architectures. Honour an explicit -DCMAKE_CUDA_ARCHITECTURES /
+  # CUDAARCHS (the Docker CUDA_ARCH build-arg maps to the former); otherwise
+  # default to a portable Volta→Ada list. Two traps this avoids:
+  #  - the "all-major" keyword requires CMake >= 3.23 while this project
+  #    declares a 3.18 minimum, and hardcoding it as a target property would
+  #    override the documented CUDA_ARCH knob;
+  #  - testing `if(NOT CMAKE_CUDA_ARCHITECTURES)` here is DEAD CODE, because
+  #    enable_language(CUDA) in the root CMakeLists auto-populates that cache
+  #    variable with the toolchain default (CMP0104) — the root captures the
+  #    user's actual intent as GZ_OUSTER_CUDA_ARCHS_USER_SET before any CUDA
+  #    enablement, and that is what must be tested.
+  if(NOT GZ_OUSTER_CUDA_ARCHS_USER_SET)
     set_target_properties(gz_gpu_ouster_lidar_cuda PROPERTIES
       CUDA_ARCHITECTURES "70;75;80;86;89")
   endif()
