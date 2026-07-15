@@ -43,7 +43,15 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
     noise_ = noise;
 
     if (!rclcpp::ok()) {
-        rclcpp::init(0, nullptr);
+        // A Gazebo *system plugin* does not own the process — gz-sim (and any
+        // co-loaded ROS plugin such as gz_ros2_control) does. Initialise
+        // rclcpp WITHOUT signal handlers so we don't hijack SIGINT/SIGTERM
+        // from the host: the default (SignalHandlerOptions::All) would install
+        // a handler that runs rclcpp::shutdown() on Ctrl-C, tearing the
+        // context down under the still-running sim/drain threads and turning a
+        // clean gz-sim shutdown into a publish-on-dead-context abort.
+        rclcpp::init(0, nullptr, rclcpp::InitOptions(),
+                     rclcpp::SignalHandlerOptions::None);
     }
 
     // Construct the executor lazily here, AFTER rclcpp::init() above (see

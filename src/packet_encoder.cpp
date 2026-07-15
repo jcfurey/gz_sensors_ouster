@@ -36,7 +36,13 @@ void PacketEncoder::start(const OusterMetadata * meta, RosInterface * ros,
 
 void PacketEncoder::stop()
 {
-    shutdown_.store(true, std::memory_order_release);
+    // Set shutdown_ under drain_mtx_ so the drain thread can't miss it in the
+    // window between evaluating its cv_ predicate and blocking in wait() — a
+    // lost wakeup there would hang the join below at teardown.
+    {
+        std::lock_guard<std::mutex> lk(drain_mtx_);
+        shutdown_.store(true, std::memory_order_release);
+    }
     drain_cv_.notify_all();
     if (drain_thread_.joinable()) {
         drain_thread_.join();
