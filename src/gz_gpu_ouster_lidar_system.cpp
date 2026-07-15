@@ -304,6 +304,24 @@ void GzGpuOusterLidarSystem::Configure(
         return;
     }
 
+    // sensor_name is used as BOTH the ROS node namespace and the absolute topic
+    // prefix, so it must be a non-empty absolute name. A relative prefix makes
+    // every topic relative — resolved a second time under the node namespace —
+    // so it double-namespaces (e.g. "lidar0" → /lidar0/lidar0/lidar_packets).
+    // Normalise a relative name and warn on an empty one rather than failing
+    // silently downstream.
+    if (sensor_name_.empty()) {
+        RCLCPP_WARN(kLogger,
+            "sensor_name is empty; topics and the pose-anchor lookup will not "
+            "resolve. Set <sensor_name> (e.g. /sensor/lidar/lidar0).");
+    } else if (sensor_name_.front() != '/') {
+        RCLCPP_WARN(kLogger,
+            "sensor_name '%s' is relative; prefixing '/' so the plugin's topics "
+            "stay absolute (a relative prefix double-namespaces every topic "
+            "under the node).", sensor_name_.c_str());
+        sensor_name_ = "/" + sensor_name_;
+    }
+
     // Discover world name
     auto worldEntity = ::gz::sim::worldEntity(ecm);
     if (worldEntity != ::gz::sim::kNullEntity) {

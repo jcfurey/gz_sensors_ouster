@@ -180,6 +180,24 @@ def generate_launch_description():
             }],
         ),
 
+        # ouster_ros os_image: decodes the same lidar_packets + metadata into the
+        # range/signal/reflec/nearir images + camera_info — the SINGLE image
+        # source in sim, identical to hardware. The RViz config's Image displays
+        # subscribe to these topics; without this node they would stay empty
+        # (the plugin's own native image pubs are off by default). Publishes on
+        # SensorDataQoS, matching the RViz displays' Best Effort reliability.
+        Node(
+            package='ouster_ros',
+            executable='os_image',
+            name='os_image',
+            namespace='/sensor/lidar/lidar0',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'timestamp_mode': 'TIME_FROM_ROS_TIME',
+            }],
+        ),
+
         # Explicit mount transform base_link -> lidar0/lidar_frame, matching the
         # URDF mount joint (xyz 0 0 0.44). robot_state_publisher also publishes
         # this from the URDF; broadcasting it here too guarantees the cloud

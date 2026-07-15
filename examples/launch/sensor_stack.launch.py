@@ -90,6 +90,24 @@ def _os_cloud(name):
     )
 
 
+def _os_image(name):
+    """ouster_ros os_image for one sensor: decodes lidar_packets + metadata into
+    the range/signal/reflec/nearir images + camera_info under
+    /sensor/lidar/<name>/. The single image source in sim (the plugin's native
+    image pubs are off by default), matching the RViz Image displays."""
+    return Node(
+        package='ouster_ros',
+        executable='os_image',
+        name='os_image',
+        namespace='/sensor/lidar/' + name,
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'timestamp_mode': 'TIME_FROM_ROS_TIME',
+        }],
+    )
+
+
 def _mount_stp(name, x, y, z, yaw=0.0):
     """Explicit base_link -> <name>/lidar_frame mount transform, matching the
     URDF mount joint. robot_state_publisher also publishes this; broadcasting it
@@ -195,6 +213,11 @@ def generate_launch_description():
         # rotation); see _os_cloud for the frame rationale.
         _os_cloud('front'),
         _os_cloud('rear'),
+
+        # os_image per sensor → the range/signal/reflec/nearir images the RViz
+        # config displays (single image source in sim; plugin native pubs off).
+        _os_image('front'),
+        _os_image('rear'),
 
         # Explicit mount transforms base_link -> {front,rear}/lidar_frame,
         # matching the URDF (front xyz 0.45 0 0.35; rear xyz -0.45 0 0.35 yaw π).
