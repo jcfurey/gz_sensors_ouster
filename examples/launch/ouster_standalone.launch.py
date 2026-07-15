@@ -102,6 +102,11 @@ def generate_launch_description():
                                           'Use on WSL, SSH, and any headless host.'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config'),
+        DeclareLaunchArgument('images', default_value='true',
+                              description='Run the ouster_ros os_image node (the sim image '
+                                          'source). Set false on headless/CI runs that do '
+                                          'not consume the image topics to save the '
+                                          'per-scan decode CPU.'),
 
         # Make libgz_sensors_ouster.so discoverable as a gz system plugin.
         AppendEnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH', pkg_lib),
@@ -186,6 +191,9 @@ def generate_launch_description():
         # subscribe to these topics; without this node they would stay empty
         # (the plugin's own native image pubs are off by default). Publishes on
         # SensorDataQoS, matching the RViz displays' Best Effort reliability.
+        # os_image decodes every scan whether or not anything subscribes, so it
+        # is gated behind images:=true (default) — pass images:=false on
+        # headless/CI runs that don't consume the image topics.
         Node(
             package='ouster_ros',
             executable='os_image',
@@ -195,7 +203,13 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'timestamp_mode': 'TIME_FROM_ROS_TIME',
+                # Stamp images/camera_info in the URDF lidar frame. The os_image
+                # default is 'os_lidar', a frame nothing broadcasts here
+                # (pub_static_tf is false), which breaks TF-consuming uses
+                # (RViz Camera display, image_geometry reprojection).
+                'sensor_frame': 'lidar0/lidar_frame',
             }],
+            condition=IfCondition(LaunchConfiguration('images')),
         ),
 
         # Explicit mount transform base_link -> lidar0/lidar_frame, matching the

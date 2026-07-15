@@ -94,7 +94,12 @@ def _os_image(name):
     """ouster_ros os_image for one sensor: decodes lidar_packets + metadata into
     the range/signal/reflec/nearir images + camera_info under
     /sensor/lidar/<name>/. The single image source in sim (the plugin's native
-    image pubs are off by default), matching the RViz Image displays."""
+    image pubs are off by default), matching the RViz Image displays. Gated
+    behind images:=true (default): os_image decodes every scan whether or not
+    anything subscribes, so headless/CI runs can opt out with images:=false.
+    sensor_frame stamps the images/camera_info in the URDF lidar frame — the
+    os_image default 'os_lidar' is broadcast by nothing here (pub_static_tf is
+    false) and would also make front/rear indistinguishable by frame_id."""
     return Node(
         package='ouster_ros',
         executable='os_image',
@@ -104,7 +109,9 @@ def _os_image(name):
         parameters=[{
             'use_sim_time': True,
             'timestamp_mode': 'TIME_FROM_ROS_TIME',
+            'sensor_frame': name + '/lidar_frame',
         }],
+        condition=IfCondition(LaunchConfiguration('images')),
     )
 
 
@@ -181,6 +188,10 @@ def generate_launch_description():
                                           'Use on WSL, SSH, and any headless host.'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config'),
+        DeclareLaunchArgument('images', default_value='true',
+                              description='Run the per-sensor ouster_ros os_image nodes '
+                                          '(the sim image source). Set false on headless/'
+                                          'CI runs that do not consume the image topics.'),
 
         AppendEnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH', pkg_lib),
 

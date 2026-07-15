@@ -14,27 +14,30 @@ Visualization Manager:
       Name: TF
       Enabled: true
       Show Names: true
+    # os_image publishes the images on SensorDataQoS (BEST_EFFORT), so the
+    # Image displays must subscribe Best Effort (a RELIABLE subscriber is
+    # incompatible with a BEST_EFFORT publisher and would show nothing).
     - Class: rviz_default_plugins/Image
       Name: FrontRange
       Enabled: true
       Topic:
         Value: /sensor/lidar/front/range_image
         Depth: 5
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
     - Class: rviz_default_plugins/Image
       Name: FrontSignal
       Enabled: true
       Topic:
         Value: /sensor/lidar/front/signal_image
         Depth: 5
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
     - Class: rviz_default_plugins/Image
       Name: RearRange
       Enabled: true
       Topic:
         Value: /sensor/lidar/rear/range_image
         Depth: 5
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
     - Class: rviz_default_plugins/PointCloud2
       Name: FrontCloud
       Enabled: true

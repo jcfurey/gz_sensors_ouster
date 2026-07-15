@@ -101,6 +101,10 @@ def generate_launch_description():
                               description='Run gz server-only (no GUI client).'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config.'),
+        DeclareLaunchArgument('images', default_value='true',
+                              description='Run the ouster_ros os_image node (the sim image '
+                                          'source). Set false on headless/CI runs that do '
+                                          'not consume the image topics.'),
 
         # libgz_sensors_ouster.so discoverable as a gz system plugin.
         AppendEnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH', pkg_lib),
@@ -191,9 +195,13 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'timestamp_mode': 'TIME_FROM_ROS_TIME',
-                # frame_id intentionally left at the os_image default, matching
-                # the hardware bringup os_image node.
+                # Stamp images/camera_info in the URDF lidar frame. The os_image
+                # default 'os_lidar' is broadcast by nothing in this launch
+                # (pub_static_tf is false), so TF-consuming uses of the images
+                # would fail to resolve the frame.
+                'sensor_frame': 'lidar0/lidar_frame',
             }],
+            condition=IfCondition(LaunchConfiguration('images')),
         ),
 
         Node(
