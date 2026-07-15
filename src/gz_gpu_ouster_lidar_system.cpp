@@ -36,10 +36,10 @@
 #include <gz/sim/EntityComponentManager.hh>
 #include <gz/sim/EventManager.hh>
 #include <gz/sim/Util.hh>
+#include <gz/sim/World.hh>
 #include <gz/sim/components/Name.hh>
 #include <gz/sim/components/Sensor.hh>
 #include <gz/sim/components/AngularVelocity.hh>
-#include <gz/sim/components/Gravity.hh>
 #include <gz/sim/components/LinearAcceleration.hh>
 #include <gz/sim/rendering/Events.hh>
 
@@ -83,16 +83,25 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     shutdown_.store(true, std::memory_order_release);
     render_conn_.reset();
     render_teardown_conn_.reset();
-    { std::lock_guard<std::recursive_mutex> lk(render_busy_mtx_); }
-    // The panel rig's OGRE2 depth cameras are normally destroyed on the render
-    // thread via OnRenderTeardown() (events::RenderTeardown), so their GL
-    // resources are freed on the thread that owns the GL context. Only fall
-    // back to destroying here — on the server thread — if that never ran. In
-    // practice this fallback fires only when the rig holds no cameras (panels
-    // mode where events::Render never fired, or raycast mode): rig_->destroy()
-    // early-returns on an empty camera list, so no GL work happens off-thread.
+    // Taking render_busy_mtx_ flushes any in-flight render callback (see the
+    // header comment); holding it across the rig fallback below also keeps
+    // the teardown paths mutually exclusive with OnRenderTeardown.
     {
         std::lock_guard<std::recursive_mutex> lk(render_busy_mtx_);
+        // The panel rig's OGRE2 depth cameras are normally destroyed on the
+        // render thread via OnRenderTeardown() (events::RenderTeardown), so
+        // their GL resources are freed on the thread that owns the GL context.
+        // This fallback covers the paths where that never ran:
+        //  - benign: the rig holds no cameras (panels mode where events::Render
+        //    never fired, or raycast mode) — destroy() early-returns, no GL work;
+        //  - KNOWN LIMITATION: the plugin's model is removed from a *running*
+        //    world. gz-sim emits RenderTeardown only when the Sensors render
+        //    loop exits, not on entity removal, so here we still destroy live
+        //    cameras from the server thread while rendering continues. That is
+        //    the pre-RenderTeardown behavior (thread-affinity risk); there is
+        //    no plugin-visible hook to schedule the destroy on the render
+        //    thread once our event connections are reset. Leaking instead
+        //    would permanently hold rig VRAM per spawn/despawn cycle.
         if (rig_ && !rig_destroyed_) {
             rig_->destroy();
             rig_destroyed_ = true;
@@ -308,13 +317,17 @@ void GzGpuOusterLidarSystem::Configure(
     // prefix, so it must be a non-empty absolute name. A relative prefix makes
     // every topic relative — resolved a second time under the node namespace —
     // so it double-namespaces (e.g. "lidar0" → /lidar0/lidar0/lidar_packets).
-    // Normalise a relative name and warn on an empty one rather than failing
-    // silently downstream.
+    // An empty name is fatal (like an empty metadata_path): the pose-anchor
+    // lookup would never match and the plugin would run forever publishing
+    // nothing — disable it loudly instead of limping. A relative name is
+    // normalised.
     if (sensor_name_.empty()) {
-        RCLCPP_WARN(kLogger,
-            "sensor_name is empty; topics and the pose-anchor lookup will not "
-            "resolve. Set <sensor_name> (e.g. /sensor/lidar/lidar0).");
-    } else if (sensor_name_.front() != '/') {
+        RCLCPP_ERROR(kLogger,
+            "'sensor_name' SDF parameter is required (e.g. "
+            "/sensor/lidar/lidar0); plugin disabled");
+        return;
+    }
+    if (sensor_name_.front() != '/') {
         RCLCPP_WARN(kLogger,
             "sensor_name '%s' is relative; prefixing '/' so the plugin's topics "
             "stay absolute (a relative prefix double-namespaces every topic "
@@ -322,12 +335,19 @@ void GzGpuOusterLidarSystem::Configure(
         sensor_name_ = "/" + sensor_name_;
     }
 
-    // Discover world name
+    // Discover world name + gravity. The Gravity component is created from
+    // the world SDF before systems are configured, so a one-time read here
+    // covers non-standard worlds (reduced/tilted gravity); the member default
+    // (standard gravity) stands if the component is somehow absent.
     auto worldEntity = ::gz::sim::worldEntity(ecm);
     if (worldEntity != ::gz::sim::kNullEntity) {
         auto * nameComp = ecm.Component<::gz::sim::components::Name>(worldEntity);
         if (nameComp) {
             world_name_ = nameComp->Data();
+        }
+        if (const auto gravity =
+                ::gz::sim::World(worldEntity).Gravity(ecm)) {
+            world_gravity_ = *gravity;
         }
     }
 
@@ -523,6 +543,13 @@ void GzGpuOusterLidarSystem::OnRender()
     onrender_entries_.fetch_add(1, std::memory_order_relaxed);
 
     if (sensor_initialized_.load(std::memory_order_acquire)) {
+        // Skip scan renders while the sim is paused: PostUpdate won't consume
+        // a frame until unpause, and a mid-pause render could capture a scene
+        // the user is editing in the GUI, publishing a stale world as the
+        // first post-resume cloud. (Rig creation below is NOT gated — building
+        // the cameras while paused is cheap and desirable.)
+        if (paused_.load(std::memory_order_acquire)) return;
+
         // ── Throttle to lidar_hz_ on SIM time ───────────────────────────────
         // Pace on sim time (published by PostUpdate) rather than wall-clock so
         // the panels scan rate tracks lidar_hz at any real-time factor and
@@ -609,40 +636,49 @@ void GzGpuOusterLidarSystem::PostUpdate(
         }
     }
 
+    // Publish the paused state for the render thread: OnRender skips scan
+    // renders while paused. A mid-pause render could only capture a world the
+    // user is editing in the GUI, and PostUpdate would not consume the frame
+    // until unpause anyway — so it would publish as a stale first post-resume
+    // cloud. Stored before the early-return so the flag tracks every tick.
+    paused_.store(info.paused, std::memory_order_release);
     if (info.paused) {
-        was_paused_ = true;
         return;
     }
 
     // Publish the current sim time for the render thread's sim-time throttle
-    // (panels mode). While paused, PostUpdate returns above without updating
-    // this, so OnRender stops advancing too — no post-pause burst.
+    // (panels mode). No unpause re-anchoring is needed for the sim-time
+    // throttles: sim time does not advance while paused, and a world-reset
+    // rewind is handled by each throttle's own rewind guard.
     const auto sim_now_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
     latest_sim_ns_.store(sim_now_ns.count(), std::memory_order_release);
 
-    // Reset timing state after sim resumes to prevent stale data burst.
-    if (was_paused_) {
-        was_paused_ = false;
-        last_imu_sim_time_ = sim_now_ns;
-    }
-
     if (!sensor_initialized_.load(std::memory_order_acquire)) return;
     if (!ros_) return;
 
-    // Sim-thread publishes go through rclcpp, which can throw (e.g. an
-    // RCLError if the context is torn down mid-step). gz-sim does not wrap
+    // Sim-thread work here can throw — rclcpp publishes (an RCLError if the
+    // context is torn down mid-step) and, on the "scan" path, the GPU backend
+    // (a CUDA/HIP error surfacing as an exception). gz-sim does not wrap
     // ISystemPostUpdate in a try/catch, so an escaping exception aborts the
-    // whole server. Swallow + throttle-log here, mirroring the drain thread's
-    // publish guard, so one bad publish never takes the sim down.
+    // whole server. Swallow + throttle-log instead: a persistent failure logs
+    // every 5 s (identifying the failing stage) while the sim keeps running.
+    // catch (...) is deliberate — an unknown exception type crossing into
+    // gz-sim would abort just the same.
     auto guarded = [this](const char * what, auto && fn) {
         try {
             fn();
         } catch (const std::exception & e) {
             if (ros_ && ros_->clock()) {
                 RCLCPP_ERROR_THROTTLE(kLogger, *ros_->clock(), 5000,
-                    "%s: %s publish failed: %s",
+                    "%s: %s stage failed: %s",
                     sensor_name_.c_str(), what, e.what());
+            }
+        } catch (...) {
+            if (ros_ && ros_->clock()) {
+                RCLCPP_ERROR_THROTTLE(kLogger, *ros_->clock(), 5000,
+                    "%s: %s stage failed (non-std exception)",
+                    sensor_name_.c_str(), what);
             }
         }
     };
@@ -927,21 +963,10 @@ void GzGpuOusterLidarSystem::publishImu(
     // Madgwick cannot find a gravity reference, and downstream localization
     // (Sierra, robot_localization, etc.) never publishes odom->base_footprint.
     //
-    // Use the WORLD's actual gravity vector (read once from its Gravity
-    // component) rather than a hardcoded 9.80665 down-Z, so non-standard worlds
-    // (reduced/tilted gravity, e.g. lunar or inclined test rigs) still produce a
-    // correct proper-acceleration reference. Falls back to standard gravity if
-    // the component is absent.
-    if (!gravity_read_) {
-        const auto world_ent = ::gz::sim::worldEntity(ecm);
-        if (world_ent != ::gz::sim::kNullEntity) {
-            if (const auto * g =
-                    ecm.Component<::gz::sim::components::Gravity>(world_ent)) {
-                world_gravity_ = g->Data();
-            }
-        }
-        gravity_read_ = true;
-    }
+    // world_gravity_ is the WORLD's actual gravity vector (read once in
+    // Configure) rather than a hardcoded 9.80665 down-Z, so non-standard
+    // worlds (reduced/tilted gravity, e.g. lunar or inclined test rigs) still
+    // produce a correct proper-acceleration reference.
     const auto imu_world_pose = ::gz::sim::worldPose(imu_entity_, ecm);
     const auto & R = imu_world_pose.Rot();
     const auto gravity_body = R.RotateVectorReverse(world_gravity_);

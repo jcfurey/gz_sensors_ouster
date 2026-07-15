@@ -305,6 +305,14 @@ void RosInterface::publishMetadataIfNeeded(std::chrono::nanoseconds sim_now)
     }
     if (metadata_published_) return;
 
+    // Sim-time rewind (world reset): last_meta_pub_time_ would otherwise sit
+    // ahead of sim_now and the throttle below would publish nothing until sim
+    // time climbed back past the pre-reset value — the same stall class as
+    // the scan/IMU throttles, which carry their own rewind guards.
+    if (last_meta_pub_time_.count() >= 0 && sim_now < last_meta_pub_time_) {
+        last_meta_pub_time_ = std::chrono::nanoseconds(-1);
+    }
+
     if (last_meta_pub_time_.count() < 0 ||
         sim_now - last_meta_pub_time_ >= kRepubPeriod) {
         std_msgs::msg::String meta_msg;

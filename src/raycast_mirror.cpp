@@ -320,6 +320,14 @@ void RaycastMirror::postUpdate(
     if (params_.motion_distortion) {
         const auto now =
             std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+        // Sim-time rewind (world reset): the history holds poses stamped ahead
+        // of `now`, so the append gate below would never admit new samples and
+        // the trim delta would go negative — buildColumnPoses would then clamp
+        // every column to the stale pre-reset pose for the whole rewound span.
+        // Drop the history and start fresh from the post-reset pose.
+        if (!pose_history_.empty() && now < pose_history_.back().first) {
+            pose_history_.clear();
+        }
         if (pose_history_.empty() || pose_history_.back().first < now) {
             pose_history_.emplace_back(now, sensor_pose);
         }

@@ -118,12 +118,11 @@ private:
     bool imu_rng_seeded_ = false;
     std::vector<uint8_t> imu_pkt_buf_;
     std::chrono::nanoseconds last_imu_sim_time_{0};
-    // World gravity vector (world frame), read once from the world's Gravity
-    // component. Used to turn kinematic acceleration into the proper
-    // acceleration a real accelerometer reports. Defaults to standard gravity
-    // as a fallback if the component is absent.
+    // World gravity vector (world frame), read once in Configure from the
+    // world's Gravity component. Used to turn kinematic acceleration into the
+    // proper acceleration a real accelerometer reports. Defaults to standard
+    // gravity as a fallback if the component is absent.
     ::gz::math::Vector3d world_gravity_{0.0, 0.0, -9.80665};
-    bool gravity_read_ = false;
 
     // ── Components ───────────────────────────────────────────────────────────
     std::unique_ptr<OusterMetadata> meta_;
@@ -183,13 +182,18 @@ private:
     // reads it. last_render_sim_ns_ is touched only by OnRender.
     std::atomic<int64_t> latest_sim_ns_{0};
     int64_t last_render_sim_ns_ = -1;
+    // Paused state published by PostUpdate for OnRender: scan renders are
+    // skipped while paused (PostUpdate won't consume a frame until unpause,
+    // and a mid-pause render could capture a half-edited GUI scene that then
+    // publishes as the first post-resume cloud). Starts true so nothing
+    // renders before the first unpaused sim tick.
+    std::atomic<bool> paused_{true};
     std::atomic<bool> sensor_initialized_{false};
     // Counts OnRender() entries; stays 0 when the Sensors system never
     // starts rendering (no rendering sensor in the world); PostUpdate()
     // uses it to emit a one-shot diagnostic.
     std::atomic<uint64_t> onrender_entries_{0};
     bool no_render_warned_{false};
-    bool was_paused_ = false;
 
     std::atomic<bool> shutdown_{false};
 
