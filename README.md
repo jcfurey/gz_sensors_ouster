@@ -331,8 +331,9 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
 | Azimuth | Zone | What to look for |
 |---------|------|------------------|
 | 0° | Range ladder | Six identical 80%-reflectance targets at 6–105 m: range-noise σ ramps with distance, signal falls as 1/r², the far pair thins out from `dropout_rate_far` |
-| 45° | Reflectance ladder | Seven panels at one range, `laser_retro` 0.03→1.0: a staircase in the 0–100 reflectivity band; dark panels are noisier and drop out more |
-| 75° | Retroreflectors | `laser_retro` 2/8/40 → the calibrated log band (bytes 101–255), like signs and retro tape |
+| 45° | Reflectance ladder | Seven panels at one range, `laser_retro` 0.02→1.0: an even staircase across the 0–100 reflectivity band; dark panels are noisier and drop out more |
+| 58–72° | Retroreflector ladder | Nine posts, `laser_retro` 1.3→300 → the calibrated log band walked end to end (bytes 108, 130, 151, 173, 195, 220, 242, 255, 255), like signs and retro tape |
+| 82–129° | **Signal / intensity ladder** | Nine posts at *fixed* reflectivity walking in from 19.2 m to 1.2 m. SIGNAL is `base_signal·ρ/r²`, so the 1/r² term — not reflectivity — is what sweeps it; the closest post saturates the channel outright |
 | 135° | Detection limit | A dark (ρ=0.10) target at 34 m returns; its twin at 52 m is past `max_range·√(ρ/0.8)` = 42 m and **always** drops — while a bright target at the same 52 m returns fine. The miss is reflectance-driven, not a range cutoff |
 | 180° | Specular / gloss | Matte (kₛ 0.10), glossy (0.45) and mirror (0.95) faces: the specular lobe, and above the mirror threshold a **ghost return** behind the mirror (the orange post's reflection) |
 | 215° | Glass | Panes at τ=0.60 and τ=0.92 with walls behind: the pane wins on the first, the wall behind wins on the second — "lidar sees through the window" |
@@ -341,7 +342,35 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
 | 330° | Moving beacon | A rotating arm with a retroreflective paddle — exercises dynamic transforms, and honestly shows that `motion_distortion` corrects **ego** motion only, not moving targets |
 | — | Perimeter + ground | Walls at 60 m for long-range structure; a straight wall spanning many columns makes any azimuth/encoder-convention error obvious (it would break into arcs) |
 
-Two properties worth knowing:
+#### Channel coverage
+
+The zones are sized so that **one scan drives every Ouster channel across its
+whole domain**, not a narrow slice — a consumer that only ever sees a thin band
+of values can look correct in sim and fall over on real data. Measured from the
+`PointCloud2` that `os_cloud` assembles (12 scans, OS1-64 defaults):
+
+| Channel | min | max | Coverage |
+|---------|-----|-----|----------|
+| `intensity` (SIGNAL) | 0 | **65535** | 4.8 decades, ~7800 distinct values |
+| `reflectivity` | 0 | **255** | ~206 distinct values across 0–255 |
+| `ambient` (NEAR_IR) | 0 | **65535** | saturates on the sun-facing retro panel |
+| `range` | 0 | **113977 mm** | out to the 110 m perimeter (OS1 window is 120 m) |
+
+Two design points make the hard channels reachable:
+
+- **SIGNAL is the one a naive scene starves.** It goes as `ρ/r²`, so with
+  nothing closer than 6 m it never leaves single digits — before the intensity
+  ladder existed this world peaked at **195** of a possible 65535 (0.3% of the
+  channel), with a third of objects returning literally 0. The ladder walks in
+  to 1.2 m at *constant* `laser_retro`, so range alone sweeps it.
+- **Occlusion and detection limits are load-bearing.** The perimeter sits at
+  110 m rather than 60 m, because at 60 m it silently blocked the 70 m and
+  105 m range targets (max observed range was 69 m). Its `laser_retro` is 0.75
+  so that its own detection limit `120·√(0.75/0.8) = 116 m` stays beyond its
+  110 m distance — at the earlier 0.45 the wall would have been dropped by the
+  reflectance model instead of returning.
+
+Two further properties worth knowing:
 
 - **Self-contained.** Built entirely from `box`/`sphere`/`cylinder`/`plane`
   primitives — no Fuel downloads, no external meshes. That is also a
@@ -351,8 +380,8 @@ Two properties worth knowing:
   (`test_worlds.py::test_visual_geometry_is_mirrorable`) enforces this for every
   shipped world. The mesh/BVH path is covered by the TurtleBot3 example instead.
 - **Raycast mode.** It loads no render engine, so it runs headless anywhere. The
-  startup log should read `raycast scene mirror v1: 46 instances (0 meshes,
-  0 visuals skipped) from 46 visuals` — a non-zero "skipped" count means
+  startup log should read `raycast scene mirror v1: 59 instances (0 meshes,
+  0 visuals skipped) from 59 visuals` — a non-zero "skipped" count means
   something in the world is invisible to the sensor.
 
 ### How the URDF wires to the plugin
