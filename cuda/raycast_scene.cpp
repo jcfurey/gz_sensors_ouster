@@ -85,7 +85,91 @@ int buildBvhNode(std::vector<MeshBvhNode> & nodes, std::vector<int> & order,
     return node_idx;
 }
 
+// ── Top-level BVH (TLAS) over instance world AABBs ───────────────────────────
+
+constexpr int kTlasLeaf = 2;
+constexpr int kTlasMaxDepth = 32;
+
+/// Median split on the widest axis of the CENTROID bounds (splitting on the
+/// AABB bounds instead would degenerate whenever one huge instance — e.g. an
+/// "infinite" ground plane — dominates the node extent).
+int buildTlasNode(std::vector<MeshBvhNode> & nodes, std::vector<int> & order,
+                  const InstanceXform * xf, int first, int count, int depth)
+{
+    const int node_idx = static_cast<int>(nodes.size());
+    nodes.emplace_back();
+
+    float bmin[3] = {kInf, kInf, kInf};
+    float bmax[3] = {-kInf, -kInf, -kInf};
+    float cmin[3] = {kInf, kInf, kInf};
+    float cmax[3] = {-kInf, -kInf, -kInf};
+    for (int i = first; i < first + count; ++i) {
+        const InstanceXform & x = xf[order[static_cast<size_t>(i)]];
+        for (int a = 0; a < 3; ++a) {
+            bmin[a] = std::min(bmin[a], x.bmin[a]);
+            bmax[a] = std::max(bmax[a], x.bmax[a]);
+            const float c = 0.5f * (x.bmin[a] + x.bmax[a]);
+            cmin[a] = std::min(cmin[a], c);
+            cmax[a] = std::max(cmax[a], c);
+        }
+    }
+    {
+        MeshBvhNode & n = nodes[static_cast<size_t>(node_idx)];
+        for (int a = 0; a < 3; ++a) {
+            n.bmin[a] = bmin[a];
+            n.bmax[a] = bmax[a];
+        }
+    }
+
+    if (count <= kTlasLeaf || depth >= kTlasMaxDepth) {
+        MeshBvhNode & n = nodes[static_cast<size_t>(node_idx)];
+        n.left = -1;
+        n.right = -1;
+        n.first = first;
+        n.count = count;
+        return node_idx;
+    }
+
+    int axis = 0;
+    {
+        const float ext[3] = {cmax[0] - cmin[0], cmax[1] - cmin[1],
+                              cmax[2] - cmin[2]};
+        if (ext[1] > ext[axis]) axis = 1;
+        if (ext[2] > ext[axis]) axis = 2;
+    }
+    const int mid = first + count / 2;
+    std::nth_element(
+        order.begin() + first, order.begin() + mid,
+        order.begin() + first + count,
+        [xf, axis](int a, int b) {
+            return (xf[a].bmin[axis] + xf[a].bmax[axis]) <
+                   (xf[b].bmin[axis] + xf[b].bmax[axis]);
+        });
+
+    // Children are appended after this node; the vector may reallocate during
+    // recursion, so record the indices afterwards rather than holding a ref.
+    const int left = buildTlasNode(nodes, order, xf, first, count / 2,
+                                   depth + 1);
+    const int right = buildTlasNode(nodes, order, xf, mid, count - count / 2,
+                                    depth + 1);
+    nodes[static_cast<size_t>(node_idx)].left = left;
+    nodes[static_cast<size_t>(node_idx)].right = right;
+    return node_idx;
+}
+
 }  // namespace
+
+void buildTlas(const InstanceXform * xforms, int n_instances, Tlas & out)
+{
+    out.clear();
+    if (xforms == nullptr || n_instances < kTlasMinInstances) return;
+
+    out.order.resize(static_cast<size_t>(n_instances));
+    std::iota(out.order.begin(), out.order.end(), 0);
+    // A balanced binary tree over n leaves of size kTlasLeaf has < 2n nodes.
+    out.nodes.reserve(static_cast<size_t>(2 * n_instances));
+    buildTlasNode(out.nodes, out.order, xforms, 0, n_instances, 0);
+}
 
 int Scene::addMesh(const std::vector<float> & verts,
                    const std::vector<int> & tris)
@@ -247,7 +331,10 @@ void castScan(const SceneView & scene,
               const ScanParams & sp,
               float * range_out, float * retro_out,
               const float * col_r, const float * col_t,
-              float * nir_out)
+              float * nir_out,
+              const MeshBvhNode * tlas_nodes,
+              const int * tlas_order,
+              int n_tlas_nodes)
 {
     const int n = sp.H * sp.W;
 
@@ -259,7 +346,8 @@ void castScan(const SceneView & scene,
                      xforms, beam_alt_deg, beam_az_deg,
                      sensor_r, sensor_t, sp, idx, kInf, range, retro,
                      col_r, col_t,
-                     nir_out ? &nir_out[idx] : nullptr);
+                     nir_out ? &nir_out[idx] : nullptr,
+                     tlas_nodes, tlas_order, n_tlas_nodes);
         range_out[idx] = range;
         if (retro_out) retro_out[idx] = retro;
     }

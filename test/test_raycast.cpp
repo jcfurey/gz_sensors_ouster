@@ -708,4 +708,143 @@ TEST(Raycast, ApparentReflectanceSpecularLobeZeroAtFortyFive)
     EXPECT_NEAR(retro[0], 0.8f * 0.70711f, 1e-3f);  // no specular contribution
 }
 
+// ── Top-level BVH (TLAS) ─────────────────────────────────────────────────────
+
+namespace {
+
+/// Scene of `n` scattered instances (mixed primitive types, distinct retro
+/// values, no coincident surfaces) plus the transforms placing them on a
+/// ring — dense enough to exercise TLAS descent and pruning.
+int makeScatteredScene(int n, rc::Scene & scene,
+                       std::vector<rc::InstanceXform> & xf)
+{
+    const float ssize[3] = {0.6f, 0.0f, 0.0f};
+    const float bsize[3] = {0.5f, 0.5f, 0.5f};
+    const float csize[3] = {0.4f, 0.8f, 0.0f};
+    for (int i = 0; i < n; ++i) {
+        const rc::GeomType type = (i % 3 == 0)   ? rc::GeomType::kSphere
+                                  : (i % 3 == 1) ? rc::GeomType::kBox
+                                                 : rc::GeomType::kCylinder;
+        const float * size = (i % 3 == 0)   ? ssize
+                             : (i % 3 == 1) ? bsize
+                                            : csize;
+        // Distinct retro per instance so a mis-attributed hit is detectable.
+        const int idx = scene.addInstance(type, size, 0.2f + 0.01f * i);
+        // Ring of radius growing with i: spreads instances so the TLAS has
+        // real spatial structure to exploit, with no two surfaces coincident.
+        const float ang = 0.37f * static_cast<float>(i);
+        const float rad = 3.0f + 0.45f * static_cast<float>(i);
+        xf.push_back(xformAt(scene, idx, rad * std::cos(ang),
+                             rad * std::sin(ang), 0.15f * ((i % 5) - 2)));
+    }
+    return n;
+}
+
+}  // namespace
+
+TEST(RaycastTlas, MatchesLinearScanExactly)
+{
+    // The TLAS changes only which instances a ray bothers to test — never the
+    // per-instance intersection math — so a full scan must come back
+    // bit-identical to the linear broad phase. This is the safety property
+    // that lets the optimisation be enabled unconditionally.
+    constexpr int kInstances = 40;
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makeScatteredScene(kInstances, scene, xf);
+    ASSERT_GE(kInstances, rc::kTlasMinInstances);
+
+    constexpr int H = 8, W = 128;
+    std::vector<float> alt(H), az(H, 0.0f);
+    for (int i = 0; i < H; ++i) {
+        alt[static_cast<size_t>(i)] = -8.0f + 16.0f * i / (H - 1);
+    }
+    const auto sp = scanParams(H, W);
+
+    const size_t n = static_cast<size_t>(H) * W;
+    std::vector<float> range_lin(n), retro_lin(n);
+    std::vector<float> range_tlas(n), retro_tlas(n);
+
+    // Linear broad phase (no TLAS).
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, sp, range_lin.data(), retro_lin.data());
+
+    // TLAS broad phase.
+    rc::Tlas tlas;
+    rc::buildTlas(xf.data(), static_cast<int>(xf.size()), tlas);
+    ASSERT_FALSE(tlas.empty()) << "TLAS should be built above the threshold";
+    ASSERT_EQ(tlas.order.size(), static_cast<size_t>(kInstances));
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, sp, range_tlas.data(), retro_tlas.data(),
+                 nullptr, nullptr, nullptr,
+                 tlas.nodes.data(), tlas.order.data(),
+                 static_cast<int>(tlas.nodes.size()));
+
+    size_t hits = 0;
+    for (size_t i = 0; i < n; ++i) {
+        EXPECT_FLOAT_EQ(range_tlas[i], range_lin[i]) << "range at " << i;
+        EXPECT_FLOAT_EQ(retro_tlas[i], retro_lin[i]) << "retro at " << i;
+        if (std::isfinite(range_lin[i])) ++hits;
+    }
+    // Guard against a vacuous pass (both all-miss would compare equal).
+    EXPECT_GT(hits, n / 20) << "scene should produce a substantial hit count";
+}
+
+TEST(RaycastTlas, EmptyBelowThresholdAndWellFormedAbove)
+{
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+
+    // Below the threshold the linear scan wins: no tree is built.
+    makeScatteredScene(rc::kTlasMinInstances - 1, scene, xf);
+    rc::Tlas small;
+    rc::buildTlas(xf.data(), static_cast<int>(xf.size()), small);
+    EXPECT_TRUE(small.empty());
+
+    // A null instance array must also be handled.
+    rc::Tlas none;
+    rc::buildTlas(nullptr, 100, none);
+    EXPECT_TRUE(none.empty());
+
+    // At/above the threshold: every instance referenced exactly once, every
+    // child index in range, and each node's bounds enclosing its children's.
+    rc::Scene big_scene;
+    std::vector<rc::InstanceXform> big_xf;
+    constexpr int kN = 64;
+    makeScatteredScene(kN, big_scene, big_xf);
+    rc::Tlas tlas;
+    rc::buildTlas(big_xf.data(), kN, tlas);
+    ASSERT_FALSE(tlas.empty());
+
+    std::vector<int> seen(kN, 0);
+    for (const auto & nd : tlas.nodes) {
+        if (nd.left < 0) {
+            ASSERT_GE(nd.first, 0);
+            ASSERT_LE(nd.first + nd.count,
+                      static_cast<int>(tlas.order.size()));
+            for (int k = 0; k < nd.count; ++k) {
+                const int inst = tlas.order[static_cast<size_t>(nd.first + k)];
+                ASSERT_GE(inst, 0);
+                ASSERT_LT(inst, kN);
+                ++seen[static_cast<size_t>(inst)];
+            }
+        } else {
+            ASSERT_LT(nd.left, static_cast<int>(tlas.nodes.size()));
+            ASSERT_LT(nd.right, static_cast<int>(tlas.nodes.size()));
+            for (const int child : {nd.left, nd.right}) {
+                const auto & c = tlas.nodes[static_cast<size_t>(child)];
+                for (int a = 0; a < 3; ++a) {
+                    EXPECT_LE(nd.bmin[a], c.bmin[a] + 1e-4f);
+                    EXPECT_GE(nd.bmax[a], c.bmax[a] - 1e-4f);
+                }
+            }
+        }
+    }
+    for (int i = 0; i < kN; ++i) {
+        EXPECT_EQ(seen[static_cast<size_t>(i)], 1)
+            << "instance " << i << " referenced " << seen[static_cast<size_t>(i)]
+            << " times (expected exactly once)";
+    }
+}
+
 }  // namespace gz_gpu_ouster_lidar
