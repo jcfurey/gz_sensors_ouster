@@ -16,6 +16,7 @@
 #include "backend.hpp"
 #include "ray_processor_math.hpp"
 #include "raycast_math.hpp"
+#include "raycast_scene.hpp"   // rc::Tlas / rc::buildTlas (host-side)
 
 #include <hip/hip_runtime.h>
 #include <hiprand/hiprand_kernel.h>
@@ -106,7 +107,10 @@ __global__ void castScanKernelHip(
     float * __restrict__ retro_out,
     const float * __restrict__ col_r,   // per-column poses (motion
     const float * __restrict__ col_t,   // distortion); may be nullptr
-    float * __restrict__ nir_out)       // NEAR_IR ambient; may be nullptr
+    float * __restrict__ nir_out,       // NEAR_IR ambient; may be nullptr
+    const rc::MeshBvhNode * __restrict__ tlas_nodes,  // top-level BVH;
+    const int * __restrict__ tlas_order,              // null => linear scan
+    int n_tlas_nodes)
 {
     const int n = args.sp.H * args.sp.W;
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -116,7 +120,8 @@ __global__ void castScanKernelHip(
     rc::rcCastOneRay(instances, args.n_instances, verts, tris, order, nodes,
                      xforms, beam_alt, beam_az, args.sr, args.st, args.sp,
                      idx, __int_as_float(0x7f800000), range, retro,
-                     col_r, col_t, nir_out ? &nirv : nullptr);
+                     col_r, col_t, nir_out ? &nirv : nullptr,
+                     tlas_nodes, tlas_order, n_tlas_nodes);
     range_out[idx] = range;
     retro_out[idx] = retro;
     if (nir_out) nir_out[idx] = nirv;
@@ -269,6 +274,8 @@ public:
         maybeFree(d_rc_order_);
         maybeFree(d_rc_nodes_);
         maybeFree(d_rc_xforms_);
+        maybeFree(d_tlas_nodes_);
+        maybeFree(d_tlas_order_);
         maybeFree(d_rand_states_);
         if (stream_) hipStreamDestroy(stream_);
     }
@@ -415,6 +422,28 @@ public:
                 static_cast<size_t>(scene.n_instances) *
                     sizeof(rc::InstanceXform));
         }
+
+        // Top-level BVH over the instances' world AABBs: built on the host
+        // from this scan's transforms and uploaded with them. Without it every
+        // ray tests every instance. Empty below rc::kTlasMinInstances → the
+        // kernel gets nullptr and uses the linear scan.
+        rc::buildTlas(xforms, scene.n_instances, tlas_host_);
+        const int n_tlas_nodes = static_cast<int>(tlas_host_.nodes.size());
+        if (n_tlas_nodes > 0) {
+            const size_t node_bytes =
+                static_cast<size_t>(n_tlas_nodes) * sizeof(rc::MeshBvhNode);
+            const size_t order_bytes = tlas_host_.order.size() * sizeof(int);
+            if (tlas_nodes_cap_ < static_cast<int>(node_bytes)) {
+                allocDev(d_tlas_nodes_, node_bytes);
+                tlas_nodes_cap_ = static_cast<int>(node_bytes);
+            }
+            if (tlas_order_cap_ < static_cast<int>(order_bytes)) {
+                allocDev(d_tlas_order_, order_bytes);
+                tlas_order_cap_ = static_cast<int>(order_bytes);
+            }
+            h2d(d_tlas_nodes_, tlas_host_.nodes.data(), node_bytes);
+            h2d(d_tlas_order_, tlas_host_.order.data(), order_bytes);
+        }
         uploadBeamTables(beam_alt_deg, beam_az_deg, sp.H);
 
         RcCastArgsHip args;
@@ -438,7 +467,12 @@ public:
             static_cast<float *>(d_retro_),
             have_cols ? static_cast<const float *>(d_col_r_) : nullptr,
             have_cols ? static_cast<const float *>(d_col_t_) : nullptr,
-            nir_out ? static_cast<float *>(d_nir_f_) : nullptr);
+            nir_out ? static_cast<float *>(d_nir_f_) : nullptr,
+            n_tlas_nodes > 0
+                ? static_cast<const rc::MeshBvhNode *>(d_tlas_nodes_) : nullptr,
+            n_tlas_nodes > 0
+                ? static_cast<const int *>(d_tlas_order_) : nullptr,
+            n_tlas_nodes);
         HIP_CHECK(hipGetLastError());
 
         d2h(range_out, d_depth_, static_cast<size_t>(out_n) * sizeof(float));
@@ -652,6 +686,13 @@ private:
     void * d_rc_order_  = nullptr;
     void * d_rc_nodes_  = nullptr;
     void * d_rc_xforms_ = nullptr;
+    // Top-level BVH: host build buffer (capacity reused across scans) plus
+    // its device mirrors. Caps are in BYTES.
+    rc::Tlas tlas_host_;
+    void * d_tlas_nodes_ = nullptr;
+    void * d_tlas_order_ = nullptr;
+    int tlas_nodes_cap_ = 0;
+    int tlas_order_cap_ = 0;
     int rc_insts_cap_ = 0;
     int rc_verts_cap_ = 0;
     int rc_tris_cap_ = 0;

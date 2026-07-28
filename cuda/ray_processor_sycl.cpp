@@ -24,6 +24,7 @@
 #include <sycl/sycl.hpp>
 #include "ray_processor_math.hpp"
 #include "raycast_math.hpp"
+#include "raycast_scene.hpp"   // rc::Tlas / rc::buildTlas (host-side)
 
 #include <cmath>
 #include <cstdint>
@@ -108,6 +109,8 @@ public:
         maybeFree(u_rc_order_);
         maybeFree(u_rc_nodes_);
         maybeFree(u_rc_xforms_);
+        maybeFree(u_tlas_nodes_);
+        maybeFree(u_tlas_order_);
     }
 
     void processRaw(
@@ -223,6 +226,29 @@ public:
                 static_cast<size_t>(scene.n_instances) *
                     sizeof(rc::InstanceXform));
         }
+
+        // Top-level BVH over the instances' world AABBs: built on the host
+        // from this scan's transforms and copied into shared USM with them.
+        // Without it every ray tests every instance. Empty below
+        // rc::kTlasMinInstances → the kernel sees null and uses the linear scan.
+        rc::buildTlas(xforms, scene.n_instances, tlas_host_);
+        const int n_tlas_nodes = static_cast<int>(tlas_host_.nodes.size());
+        if (n_tlas_nodes > 0) {
+            const int n_order = static_cast<int>(tlas_host_.order.size());
+            if (tlas_nodes_cap_ < n_tlas_nodes) {
+                allocShared(u_tlas_nodes_, static_cast<size_t>(n_tlas_nodes));
+                tlas_nodes_cap_ = n_tlas_nodes;
+            }
+            if (tlas_order_cap_ < n_order) {
+                allocShared(u_tlas_order_, static_cast<size_t>(n_order));
+                tlas_order_cap_ = n_order;
+            }
+            std::memcpy(u_tlas_nodes_, tlas_host_.nodes.data(),
+                        static_cast<size_t>(n_tlas_nodes) *
+                            sizeof(rc::MeshBvhNode));
+            std::memcpy(u_tlas_order_, tlas_host_.order.data(),
+                        static_cast<size_t>(n_order) * sizeof(int));
+        }
         uploadBeamTables(beam_alt_deg, beam_az_deg, sp.H);
 
         float sr[9], st[3];
@@ -250,6 +276,10 @@ public:
         const float * cols_r = have_cols ? u_col_r_ : nullptr;
         const float * cols_t = have_cols ? u_col_t_ : nullptr;
         float * d_nir = nir_out ? u_nir_f_ : nullptr;
+        const rc::MeshBvhNode * tl_nodes =
+            (n_tlas_nodes > 0) ? u_tlas_nodes_ : nullptr;
+        const int * tl_order = (n_tlas_nodes > 0) ? u_tlas_order_ : nullptr;
+        const int tl_n = n_tlas_nodes;
 
         q_.parallel_for(sycl::range<1>{static_cast<size_t>(out_n)},
             [=](sycl::id<1> it) {
@@ -258,7 +288,8 @@ public:
                 rc::rcCastOneRay(insts, n_inst, verts, tris, order, nodes,
                                  xf, alt, az, pose.sr, pose.st, sp_copy,
                                  idx, kInf, range, retro, cols_r, cols_t,
-                                 d_nir ? &nirv : nullptr);
+                                 d_nir ? &nirv : nullptr,
+                                 tl_nodes, tl_order, tl_n);
                 d_range[idx] = range;
                 d_retro[idx] = retro;
                 if (d_nir) d_nir[idx] = nirv;
@@ -559,6 +590,13 @@ private:
     int *               u_rc_order_  = nullptr;
     rc::MeshBvhNode *   u_rc_nodes_  = nullptr;
     rc::InstanceXform * u_rc_xforms_ = nullptr;
+    // Top-level BVH: host build buffer (capacity reused across scans) plus
+    // its shared-USM mirrors. Caps are in ELEMENTS (allocShared is typed).
+    rc::Tlas tlas_host_;
+    rc::MeshBvhNode * u_tlas_nodes_ = nullptr;
+    int * u_tlas_order_ = nullptr;
+    int tlas_nodes_cap_ = 0;
+    int tlas_order_cap_ = 0;
     int rc_insts_cap_ = 0;
     int rc_verts_cap_ = 0;
     int rc_tris_cap_ = 0;
