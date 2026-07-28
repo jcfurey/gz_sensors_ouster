@@ -30,6 +30,7 @@ def test_all_worlds_have_physics(name):
 
 @pytest.mark.parametrize('name', ['ouster_demo.sdf',
                                    'ouster_demo_panels.sdf',
+                                   'ouster_showcase.sdf',
                                    'turtlebot3_ouster_headless.sdf'])
 def test_example_worlds_have_imu(name):
     assert 'gz-sim-imu-system' in _plugins(name)
@@ -37,14 +38,44 @@ def test_example_worlds_have_imu(name):
 
 # ── Raycast worlds: no rendering system, yes altimeter ───────────────────────
 
-@pytest.mark.parametrize('name', ['ouster_demo.sdf', 'turtlebot3_ouster_headless.sdf'])
+RAYCAST_WORLDS = ['ouster_demo.sdf', 'ouster_showcase.sdf',
+                  'turtlebot3_ouster_headless.sdf']
+
+
+@pytest.mark.parametrize('name', RAYCAST_WORLDS)
 def test_raycast_worlds_have_no_sensors_system(name):
     assert 'gz-sim-sensors-system' not in _plugins(name)
 
 
-@pytest.mark.parametrize('name', ['ouster_demo.sdf', 'turtlebot3_ouster_headless.sdf'])
+@pytest.mark.parametrize('name', RAYCAST_WORLDS)
 def test_raycast_worlds_have_altimeter_system(name):
     assert 'gz-sim-altimeter-system' in _plugins(name)
+
+
+# The raycast scene mirror only handles box / sphere / cylinder / plane /
+# mesh visuals (src/raycast_mirror.cpp). Anything else — capsule, ellipsoid,
+# heightmap, polyline — is silently skipped, so it would be INVISIBLE to the
+# lidar while still showing up in the GUI: a demo world that looks right and
+# scans wrong. Guard the example worlds against acquiring one.
+MIRRORED_GEOMETRY = {'box', 'sphere', 'cylinder', 'plane', 'mesh'}
+
+
+@pytest.mark.parametrize('name', WORLD_NAMES)
+def test_visual_geometry_is_mirrorable(name):
+    doc = xml.dom.minidom.parse(str(WORLDS / name))
+    offenders = []
+    for visual in doc.getElementsByTagName('visual'):
+        for geom in visual.getElementsByTagName('geometry'):
+            for child in geom.childNodes:
+                if child.nodeType != child.ELEMENT_NODE:
+                    continue
+                if child.tagName not in MIRRORED_GEOMETRY:
+                    offenders.append(
+                        f'{visual.getAttribute("name") or "<unnamed>"}'
+                        f' -> {child.tagName}')
+    assert not offenders, (
+        f'{name} has visual geometry the raycast mirror cannot see '
+        f'(silently invisible to the lidar): {offenders}')
 
 
 # ── Panels world: rendering system present, no altimeter ─────────────────────

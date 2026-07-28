@@ -278,6 +278,7 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `worlds/ouster_demo.sdf` | Demo world (physics + altimeter + IMU systems, ground + obstacles). GPU-free: raycast mode, no rendering Sensors system |
 | `worlds/ouster_demo_panels.sdf` | Panels-mode counterpart of `ouster_demo.sdf` (loads gz-sim-sensors-system/ogre2). Selected automatically by example launches when `ray_mode:=panels` |
 | `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
+| `worlds/ouster_showcase.sdf` | **Guided tour of the sensor model** — labelled zones for range, reflectance, retroreflectors, the detection limit, specular/mirror ghosts, glass, curvature, sun/NEAR_IR and a moving beacon. Raycast (GPU-free), built only from primitives so it needs no downloads. See [Showcase world](#showcase-world) |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
 | `launch/turtlebot3_ouster.launch.py` | Bring up the TurtleBot3 waffle + Ouster (drivable, raycast by default) |
@@ -311,6 +312,48 @@ tree (RViz fixed frame `base_footprint`). A small `static_transform_publisher`
 redundantly mirrors the URDF mount joint (`base_link → lidar0/lidar_frame`) so
 the cloud still reaches `base_link` even when `robot_state_publisher` is not
 running. The RViz config includes a `PointCloud` display for that topic.
+
+### Showcase world
+
+`worlds/ouster_showcase.sdf` is the "see everything the model does" world. Where
+`ouster_demo.sdf` answers *does it produce points*, the showcase answers *what
+does each part of the sensor model actually look like* — each effect gets its
+own labelled zone, laid out radially around the origin so one 360° scan sweeps
+through all of them:
+
+```bash
+ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
+    world:=ouster_showcase.sdf
+# headless (WSL/SSH/CI):  ... world:=ouster_showcase.sdf headless:=true
+# with RViz:              ... world:=ouster_showcase.sdf rviz:=true
+```
+
+| Azimuth | Zone | What to look for |
+|---------|------|------------------|
+| 0° | Range ladder | Six identical 80%-reflectance targets at 6–105 m: range-noise σ ramps with distance, signal falls as 1/r², the far pair thins out from `dropout_rate_far` |
+| 45° | Reflectance ladder | Seven panels at one range, `laser_retro` 0.03→1.0: a staircase in the 0–100 reflectivity band; dark panels are noisier and drop out more |
+| 75° | Retroreflectors | `laser_retro` 2/8/40 → the calibrated log band (bytes 101–255), like signs and retro tape |
+| 135° | Detection limit | A dark (ρ=0.10) target at 34 m returns; its twin at 52 m is past `max_range·√(ρ/0.8)` = 42 m and **always** drops — while a bright target at the same 52 m returns fine. The miss is reflectance-driven, not a range cutoff |
+| 180° | Specular / gloss | Matte (kₛ 0.10), glossy (0.45) and mirror (0.95) faces: the specular lobe, and above the mirror threshold a **ghost return** behind the mirror (the orange post's reflection) |
+| 215° | Glass | Panes at τ=0.60 and τ=0.92 with walls behind: the pane wins on the first, the wall behind wins on the second — "lidar sees through the window" |
+| 270° | Curvature | Spheres and cylinders of several radii: apparent reflectance ρ·cos(α) falls off toward each silhouette |
+| 305° | Sun / NEAR_IR | Four identical panels at different tilts. NEAR_IR is reflected *ambient*, so orientation alone separates them while range and reflectivity do not |
+| 330° | Moving beacon | A rotating arm with a retroreflective paddle — exercises dynamic transforms, and honestly shows that `motion_distortion` corrects **ego** motion only, not moving targets |
+| — | Perimeter + ground | Walls at 60 m for long-range structure; a straight wall spanning many columns makes any azimuth/encoder-convention error obvious (it would break into arcs) |
+
+Two properties worth knowing:
+
+- **Self-contained.** Built entirely from `box`/`sphere`/`cylinder`/`plane`
+  primitives — no Fuel downloads, no external meshes. That is also a
+  correctness requirement: the raycast mirror only handles those plus `mesh`,
+  and silently skips `capsule`/`ellipsoid`/`heightmap`/`polyline`, which would
+  be visible in the GUI but invisible to the lidar. A structural test
+  (`test_worlds.py::test_visual_geometry_is_mirrorable`) enforces this for every
+  shipped world. The mesh/BVH path is covered by the TurtleBot3 example instead.
+- **Raycast mode.** It loads no render engine, so it runs headless anywhere. The
+  startup log should read `raycast scene mirror v1: 46 instances (0 meshes,
+  0 visuals skipped) from 46 visuals` — a non-zero "skipped" count means
+  something in the world is invisible to the sensor.
 
 ### How the URDF wires to the plugin
 

@@ -1,0 +1,623 @@
+<?xml version="1.0"?>
+<!--
+  ouster_showcase.sdf — a fully fleshed-out demo world for gz_sensors_ouster.
+
+  Where ouster_demo.sdf is a minimal "does it produce points" scene, this world
+  is a guided tour: every lever of the simulated Ouster sensor model gets its
+  own labelled zone, laid out radially around the origin so a single 360°
+  rotation sweeps through all of them in one scan. Drop a sensor in at the
+  origin, look at the cloud, and you can see each effect in isolation.
+
+  DEFAULT ray_mode (raycast) — this world runs the plugin's exact per-beam
+  raycaster, which is where the material model lives (laser_retro, specular,
+  transparency, sun-driven NEAR_IR). It loads NO render engine, so it runs
+  headless on any machine: no GPU, no display, no ogre2.
+
+    ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
+        world:=ouster_showcase.sdf
+
+  SELF-CONTAINED / OFFLINE: built entirely from box / sphere / cylinder / plane
+  primitives — no Fuel downloads, no external meshes, nothing to fetch. That is
+  also a hard requirement of the raycaster: it mirrors only box, sphere,
+  cylinder, plane and mesh geometry from the ECM. Capsule, ellipsoid,
+  heightmap and polyline visuals are silently skipped (counted in the
+  "visuals skipped" startup log), so they must not be used here. The mesh/BVH
+  path is exercised by the TurtleBot3 example instead, which carries real
+  meshes.
+
+  Systems loaded (raycast needs no renderer):
+    * Physics          - steps the sim.
+    * Altimeter        - drives the non-rendering `altimeter` pose anchor the
+                         raycast plugin looks up for its ray origin.
+    * SceneBroadcaster - GUI / state.
+    * UserCommands     - lets `ros_gz_sim create` spawn the robot at runtime.
+    * Imu              - populates AngularVelocity/LinearAcceleration for the
+                         plugin's /imu output.
+
+  ZONE MAP (azimuth measured CCW from +X, which is Ouster measurement id 0):
+
+     az    zone                            what to look for
+     .....................................................................
+       0°  A: range ladder                 range noise grows with distance
+      45°  B: reflectance ladder           reflectivity byte 0-100 band
+      75°  C: retroreflectors              reflectivity byte 101-255 log band
+     135°  D: detection limit              dark far target drops, bright does not
+     180°  E: specular / gloss             specular lobe; mirror ghost returns
+     215°  F: glass                        pane vs object behind it
+     270°  G: curvature                    incidence-angle falloff
+     305°  H: sun / NEAR_IR                orientation drives the NIR channel
+     330°  I: moving beacon                motion distortion, dynamic transforms
+       -   J: perimeter + ground           long-range structure and ground plane
+
+  All tuned for the default OS1-64 metadata (max_range 120 m). With OS0
+  (50 m) the far half of zones A and D fall outside range — that is itself a
+  useful thing to see.
+-->
+<sdf version="1.9">
+  <world name="ouster_showcase">
+
+    <physics name="default" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-altimeter-system"
+            name="gz::sim::systems::Altimeter"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu"/>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.8 0.9 1</background>
+    </scene>
+
+    <!-- The FIRST directional light is what the raycaster reads for the
+         NEAR_IR ambient model: its propagation direction and the mean of its
+         <diffuse> RGB. Surfaces facing into the sun (n̂·(−ŝ) → 1) read bright
+         in NEAR_IR, surfaces facing away read the ambient floor. Note the
+         model has no occlusion ray, so geometry does NOT cast NIR shadows —
+         orientation is what matters (see zone H). -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.5 0.3 -1</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>300 300</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <laser_retro>0.35</laser_retro>
+          <geometry><plane><normal>0 0 1</normal><size>300 300</size></plane></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE A — RANGE LADDER (az 0°, straight ahead) ══════════════════
+         Six identical targets (same size, same laser_retro 0.8 = the 80%
+         Lambertian reference the vendor range spec is quoted at) at
+         geometrically increasing range. Everything except distance is held
+         constant, so the cloud shows the pure range effects:
+           * range noise sigma ramps min->max with distance
+           * signal falls as 1/r^2
+           * dropout_rate_far raises the miss rate on the last two
+         At the OS1 default (120 m) the 105 m target sits near the edge of
+         the range window and visibly thins out. -->
+    <model name="A_range_06m">
+      <static>true</static><pose>6 0 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 1.2 1.5</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.8</laser_retro>
+          <geometry><box><size>0.3 1.2 1.5</size></box></geometry>
+          <material><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="A_range_14m">
+      <static>true</static><pose>14 0 0.9 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 1.2 1.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.8</laser_retro>
+          <geometry><box><size>0.3 1.2 1.8</size></box></geometry>
+          <material><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="A_range_26m">
+      <static>true</static><pose>26 0 1.1 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.4 1.6 2.2</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.8</laser_retro>
+          <geometry><box><size>0.4 1.6 2.2</size></box></geometry>
+          <material><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="A_range_44m">
+      <static>true</static><pose>44 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.5 2.2 3.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.8</laser_retro>
+          <geometry><box><size>0.5 2.2 3.0</size></box></geometry>
+          <material><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="A_range_70m">
+      <static>true</static><pose>70 0 2.0 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.6 3.0 4.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.8</laser_retro>
+          <geometry><box><size>0.6 3.0 4.0</size></box></geometry>
+          <material><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="A_range_105m">
+      <static>true</static><pose>105 0 2.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 4.0 5.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.8</laser_retro>
+          <geometry><box><size>0.8 4.0 5.0</size></box></geometry>
+          <material><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE B — REFLECTANCE LADDER (az 45°, all at ~12 m) ═════════════
+         Seven panels at identical range, differing ONLY in laser_retro. This
+         isolates reflectance from distance. Expect in the REFLECTIVITY
+         channel a near-linear staircase over the calibrated 0-100 Lambertian
+         band (byte ~= retro x 100), and in the range channel: darker panels
+         are both noisier (sigma scales ~1/sqrt(retro)) and more likely to
+         drop out (up to 3x the base rate at the dark end).
+         Laid along the 45° diagonal, spaced 1.6 m apart across the beam. -->
+    <model name="B_retro_003">
+      <static>true</static><pose>8.49 8.49 0.9 0 0 -0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.4 0.15 1.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.03</laser_retro>
+          <geometry><box><size>1.4 0.15 1.8</size></box></geometry>
+          <material><diffuse>0.05 0.05 0.05 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="B_retro_008">
+      <static>true</static><pose>9.62 7.36 0.9 0 0 -0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.4 0.15 1.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.08</laser_retro>
+          <geometry><box><size>1.4 0.15 1.8</size></box></geometry>
+          <material><diffuse>0.12 0.12 0.12 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="B_retro_015">
+      <static>true</static><pose>10.75 6.23 0.9 0 0 -0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.4 0.15 1.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.15</laser_retro>
+          <geometry><box><size>1.4 0.15 1.8</size></box></geometry>
+          <material><diffuse>0.2 0.2 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="B_retro_030">
+      <static>true</static><pose>11.88 5.10 0.9 0 0 -0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.4 0.15 1.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.30</laser_retro>
+          <geometry><box><size>1.4 0.15 1.8</size></box></geometry>
+          <material><diffuse>0.35 0.35 0.35 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="B_retro_050">
+      <static>true</static><pose>13.01 3.97 0.9 0 0 -0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.4 0.15 1.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.50</laser_retro>
+          <geometry><box><size>1.4 0.15 1.8</size></box></geometry>
+          <material><diffuse>0.55 0.55 0.55 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="B_retro_080">
+      <static>true</static><pose>14.14 2.84 0.9 0 0 -0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.4 0.15 1.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.80</laser_retro>
+          <geometry><box><size>1.4 0.15 1.8</size></box></geometry>
+          <material><diffuse>0.8 0.8 0.8 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="B_retro_100">
+      <static>true</static><pose>15.27 1.71 0.9 0 0 -0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.4 0.15 1.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>1.0</laser_retro>
+          <geometry><box><size>1.4 0.15 1.8</size></box></geometry>
+          <material><diffuse>0.95 0.95 0.95 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE C — RETROREFLECTORS (az 75°, ~16 m) ═══════════════════════
+         laser_retro > 1 leaves the Lambertian band and enters the calibrated
+         log band (bytes 101-255), the way real traffic signs and retro tape
+         read on an Ouster. Slope is ~22 per doubling, so 2 / 8 / 40 should
+         land near bytes 122 / 166 / 217. These also never trigger the
+         reflectance-dependent forced drop within the range window. -->
+    <model name="C_retro_2">
+      <static>true</static><pose>3.88 14.49 1.2 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.12</radius><length>2.4</length></cylinder></geometry></collision>
+        <visual name="v"><laser_retro>2.0</laser_retro>
+          <geometry><cylinder><radius>0.12</radius><length>2.4</length></cylinder></geometry>
+          <material><diffuse>0.9 0.9 0.3 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="C_retro_8">
+      <static>true</static><pose>4.66 14.24 1.2 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.12</radius><length>2.4</length></cylinder></geometry></collision>
+        <visual name="v"><laser_retro>8.0</laser_retro>
+          <geometry><cylinder><radius>0.12</radius><length>2.4</length></cylinder></geometry>
+          <material><diffuse>0.95 0.95 0.5 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="C_retro_40">
+      <static>true</static><pose>5.44 13.99 1.2 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.12</radius><length>2.4</length></cylinder></geometry></collision>
+        <visual name="v"><laser_retro>40.0</laser_retro>
+          <geometry><cylinder><radius>0.12</radius><length>2.4</length></cylinder></geometry>
+          <material><diffuse>1 1 0.7 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE D — REFLECTANCE-DEPENDENT DETECTION LIMIT (az 135°) ═══════
+         The model drops every return past d_max(rho) = max_range*sqrt(rho/0.8)
+         — detection SNR goes as rho/d^2, and vendor range specs are quoted at
+         80% reflectance. For the OS1 default (max_range 120 m):
+             rho = 0.10 -> d_max = 120*sqrt(0.125) = 42.4 m
+         The three targets below are the controlled experiment:
+           D_dark_34m   rho 0.10 @ 34 m  -> inside  the limit, returns
+           D_dark_52m   rho 0.10 @ 52 m  -> BEYOND  the limit, always drops
+           D_bright_52m rho 0.80 @ 52 m  -> same range, bright, returns
+         Seeing the dark one vanish while its bright twin at identical range
+         survives is the whole point: the miss is reflectance-driven, not a
+         range cutoff. -->
+    <model name="D_dark_34m">
+      <static>true</static><pose>-24.04 24.04 1.4 0 0 0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2.5 0.3 2.8</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.10</laser_retro>
+          <geometry><box><size>2.5 0.3 2.8</size></box></geometry>
+          <material><diffuse>0.1 0.1 0.12 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="D_dark_52m">
+      <static>true</static><pose>-36.77 36.77 1.8 0 0 0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>3.0 0.3 3.6</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.10</laser_retro>
+          <geometry><box><size>3.0 0.3 3.6</size></box></geometry>
+          <material><diffuse>0.1 0.1 0.12 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="D_bright_52m">
+      <static>true</static><pose>-33.94 39.60 1.8 0 0 0.7854</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>3.0 0.3 3.6</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.80</laser_retro>
+          <geometry><box><size>3.0 0.3 3.6</size></box></geometry>
+          <material><diffuse>0.9 0.9 0.9 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE E — SPECULAR / GLOSS (az 180°, ~10 m) ═════════════════════
+         The material <specular> mean feeds the monostatic specular lobe
+         ks*cos(2a)^8 on top of the Lambertian term, so a glossy face returns
+         a strong spike where the beam hits it near normal and falls off fast
+         with incidence. At/above the mirror threshold (ks >= 0.5) the surface
+         additionally produces a MIRROR GHOST: a second bounce reported behind
+         the mirror, exactly like the phantom returns a real lidar sees off
+         glass and polished panels.
+           E_matte   ks 0.10 - ordinary paint, essentially Lambertian
+           E_glossy  ks 0.45 - just under the ghost threshold: lobe, no ghost
+           E_mirror  ks 0.95 - above it: lobe AND ghost returns behind it -->
+    <model name="E_matte">
+      <static>true</static><pose>-10 -2.2 1.0 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.25 1.8 2.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.6</laser_retro>
+          <geometry><box><size>0.25 1.8 2.0</size></box></geometry>
+          <material><diffuse>0.5 0.35 0.3 1</diffuse><specular>0.1 0.1 0.1 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="E_glossy">
+      <static>true</static><pose>-10 0 1.0 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.25 1.8 2.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.6</laser_retro>
+          <geometry><box><size>0.25 1.8 2.0</size></box></geometry>
+          <material><diffuse>0.2 0.25 0.5 1</diffuse><specular>0.45 0.45 0.45 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="E_mirror">
+      <static>true</static><pose>-10 2.2 1.0 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.25 1.8 2.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.6</laser_retro>
+          <geometry><box><size>0.25 1.8 2.0</size></box></geometry>
+          <material><diffuse>0.8 0.85 0.9 1</diffuse><specular>0.95 0.95 0.95 1</specular></material></visual>
+      </link>
+    </model>
+    <!-- Ghost bait: a bright post off to the side of the mirror. Its mirrored
+         image is what shows up behind E_mirror in the cloud. -->
+    <model name="E_ghost_bait">
+      <static>true</static><pose>-7.5 5.5 1.2 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.3</radius><length>2.4</length></cylinder></geometry></collision>
+        <visual name="v"><laser_retro>1.0</laser_retro>
+          <geometry><cylinder><radius>0.3</radius><length>2.4</length></cylinder></geometry>
+          <material><diffuse>0.9 0.4 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE F — GLASS / TRANSPARENCY (az 215°) ════════════════════════
+         <transparency> makes a surface see-through to the beam: the pane
+         itself returns a weak (1-tau)-weighted echo while the object behind
+         returns a tau^2-weighted one (the pulse crosses the pane twice), and
+         single-return mode reports whichever is stronger. Two pairs:
+           tau 0.60 - pane still wins on the front face
+           tau 0.92 - nearly clear; the wall behind dominates
+         This is the classic "lidar sees through the window" case. -->
+    <model name="F_pane_60">
+      <static>true</static><pose>-7.37 -5.16 1.2 0 0 0.6</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.08 2.4 2.4</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.5</laser_retro>
+          <transparency>0.60</transparency>
+          <geometry><box><size>0.08 2.4 2.4</size></box></geometry>
+          <material><diffuse>0.6 0.8 0.9 0.4</diffuse><specular>0.6 0.6 0.6 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="F_wall_behind_60">
+      <static>true</static><pose>-9.83 -6.88 1.2 0 0 0.6</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 2.4 2.4</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.9</laser_retro>
+          <geometry><box><size>0.3 2.4 2.4</size></box></geometry>
+          <material><diffuse>0.9 0.5 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="F_pane_92">
+      <static>true</static><pose>-5.16 -7.37 1.2 0 0 0.97</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.08 2.4 2.4</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.5</laser_retro>
+          <transparency>0.92</transparency>
+          <geometry><box><size>0.08 2.4 2.4</size></box></geometry>
+          <material><diffuse>0.7 0.9 1.0 0.15</diffuse><specular>0.6 0.6 0.6 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="F_wall_behind_92">
+      <static>true</static><pose>-6.88 -9.83 1.2 0 0 0.97</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 2.4 2.4</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.9</laser_retro>
+          <geometry><box><size>0.3 2.4 2.4</size></box></geometry>
+          <material><diffuse>0.2 0.7 0.4 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE G — CURVATURE (az 270°, 8-14 m) ═══════════════════════════
+         Curved surfaces sweep the incidence angle continuously across a
+         single object, so the apparent reflectance rho*cos(a) falls off from
+         the centre toward the silhouette. Spheres and cylinders of different
+         radii show how sharply: the returned intensity gradient across each
+         object is the extended-Lambertian term made visible, and the
+         silhouette edges are where the edge-discontinuity suppression bites. -->
+    <model name="G_sphere_small">
+      <static>true</static><pose>0 -8.5 0.8 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><sphere><radius>0.5</radius></sphere></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><sphere><radius>0.5</radius></sphere></geometry>
+          <material><diffuse>0.3 0.6 0.8 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="G_sphere_mid">
+      <static>true</static><pose>-2.2 -10.5 1.0 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><sphere><radius>1.0</radius></sphere></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><sphere><radius>1.0</radius></sphere></geometry>
+          <material><diffuse>0.3 0.6 0.8 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="G_sphere_big">
+      <static>true</static><pose>2.4 -12.5 2.0 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><sphere><radius>2.0</radius></sphere></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><sphere><radius>2.0</radius></sphere></geometry>
+          <material><diffuse>0.3 0.6 0.8 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="G_cyl_thin">
+      <static>true</static><pose>-4.5 -9.0 1.3 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.4</radius><length>2.6</length></cylinder></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><cylinder><radius>0.4</radius><length>2.6</length></cylinder></geometry>
+          <material><diffuse>0.4 0.75 0.5 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="G_cyl_fat">
+      <static>true</static><pose>4.6 -10.0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>1.2</radius><length>3.0</length></cylinder></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><cylinder><radius>1.2</radius><length>3.0</length></cylinder></geometry>
+          <material><diffuse>0.4 0.75 0.5 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE H — SUN / NEAR_IR (az 305°, ~11 m) ════════════════════════
+         NEAR_IR is ambient sunlight reflected off the scene, NOT laser
+         return, so it responds to surface ORIENTATION relative to the sun
+         (direction -0.5 0.3 -1 above), not to range. These four panels share
+         one laser_retro and differ only in yaw/tilt, so the NIR channel
+         separates them while RANGE and REFLECTIVITY do not.
+         Caveat worth seeing: there is no occlusion ray to the sun, so a panel
+         standing in another object's geometric shadow still reads bright —
+         NIR shadowing is a documented gap, not a bug. -->
+    <model name="H_face_sun">
+      <static>true</static><pose>6.31 -9.01 1.0 0 -0.5 2.6</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.6 0.12 2.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><box><size>1.6 0.12 2.0</size></box></geometry>
+          <material><diffuse>0.8 0.8 0.75 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="H_face_away">
+      <static>true</static><pose>7.55 -7.55 1.0 0 0.5 2.6</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.6 0.12 2.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><box><size>1.6 0.12 2.0</size></box></geometry>
+          <material><diffuse>0.8 0.8 0.75 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="H_vertical">
+      <static>true</static><pose>8.79 -6.09 1.0 0 0 2.6</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.6 0.12 2.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><box><size>1.6 0.12 2.0</size></box></geometry>
+          <material><diffuse>0.8 0.8 0.75 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="H_flat_up">
+      <static>true</static><pose>10.03 -4.63 0.6 0 1.5708 2.6</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.6 0.12 2.0</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.7</laser_retro>
+          <geometry><box><size>1.6 0.12 2.0</size></box></geometry>
+          <material><diffuse>0.8 0.8 0.75 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ══ ZONE I — MOVING BEACON (az 330°, ~7 m) ═════════════════════════
+         A continuously rotating arm carrying a retroreflective paddle. Two
+         things to exercise:
+           1. motion_distortion (raycast mode): with it enabled, each column
+              is cast from the sensor pose at ITS acquisition time. The model
+              is ego-motion only, so a MOVING TARGET is not itself deskewed —
+              this beacon is the honest illustration of that boundary.
+           2. Dynamic transforms: the arm's world pose changes every scan, so
+              the per-scan transform refresh and the top-level BVH rebuild are
+              continuously exercised (a static-only world would never test
+              them).
+         Driven open-loop by JointController's initial_velocity, so it spins
+         with no command topic and no controller tuning. -->
+    <model name="I_beacon">
+      <pose>6.06 -3.5 0 0 0 0</pose>
+      <link name="post">
+        <inertial><mass>50</mass>
+          <inertia><ixx>4</ixx><iyy>4</iyy><izz>1</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="c"><pose>0 0 1.0 0 0 0</pose>
+          <geometry><cylinder><radius>0.18</radius><length>2.0</length></cylinder></geometry></collision>
+        <visual name="v"><pose>0 0 1.0 0 0 0</pose>
+          <laser_retro>0.55</laser_retro>
+          <geometry><cylinder><radius>0.18</radius><length>2.0</length></cylinder></geometry>
+          <material><diffuse>0.4 0.4 0.45 1</diffuse></material></visual>
+      </link>
+      <link name="arm">
+        <pose>0 0 2.05 0 0 0</pose>
+        <inertial><mass>5</mass>
+          <inertia><ixx>0.5</ixx><iyy>0.5</iyy><izz>0.9</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="c"><pose>0.9 0 0 0 0 0</pose>
+          <geometry><box><size>1.8 0.12 0.12</size></box></geometry></collision>
+        <visual name="v"><pose>0.9 0 0 0 0 0</pose>
+          <laser_retro>0.6</laser_retro>
+          <geometry><box><size>1.8 0.12 0.12</size></box></geometry>
+          <material><diffuse>0.7 0.7 0.7 1</diffuse></material></visual>
+        <!-- Retroreflective paddle on the arm tip: easy to track frame to
+             frame in the cloud, and lands in the 101-255 reflectivity band. -->
+        <collision name="paddle_c"><pose>1.85 0 0 0 0 0</pose>
+          <geometry><box><size>0.1 0.5 0.5</size></box></geometry></collision>
+        <visual name="paddle_v"><pose>1.85 0 0 0 0 0</pose>
+          <laser_retro>12.0</laser_retro>
+          <geometry><box><size>0.1 0.5 0.5</size></box></geometry>
+          <material><diffuse>1 0.9 0.2 1</diffuse></material></visual>
+      </link>
+      <joint name="base_fixed" type="fixed">
+        <parent>world</parent>
+        <child>post</child>
+      </joint>
+      <joint name="arm_joint" type="revolute">
+        <parent>post</parent>
+        <child>arm</child>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit><lower>-1e16</lower><upper>1e16</upper></limit>
+          <dynamics><damping>0.02</damping></dynamics>
+        </axis>
+      </joint>
+      <plugin filename="gz-sim-joint-controller-system"
+              name="gz::sim::systems::JointController">
+        <joint_name>arm_joint</joint_name>
+        <initial_velocity>0.6</initial_velocity>
+      </plugin>
+    </model>
+
+    <!-- ══ ZONE J — PERIMETER (radius ~60 m) ══════════════════════════════
+         Four long wall segments well inside the OS1 120 m window. They give
+         the cloud far structure to register against (useful for SLAM demos),
+         and their length means a single wall spans many azimuth columns —
+         handy for spotting azimuth/encoder-convention errors, which show up
+         as a straight wall breaking into arcs. -->
+    <model name="J_wall_north">
+      <static>true</static><pose>0 60 3 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>70 0.6 6</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.45</laser_retro>
+          <geometry><box><size>70 0.6 6</size></box></geometry>
+          <material><diffuse>0.55 0.55 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="J_wall_south">
+      <static>true</static><pose>0 -60 3 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>70 0.6 6</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.45</laser_retro>
+          <geometry><box><size>70 0.6 6</size></box></geometry>
+          <material><diffuse>0.55 0.55 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="J_wall_east">
+      <static>true</static><pose>60 0 3 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>70 0.6 6</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.45</laser_retro>
+          <geometry><box><size>70 0.6 6</size></box></geometry>
+          <material><diffuse>0.55 0.55 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="J_wall_west">
+      <static>true</static><pose>-60 0 3 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>70 0.6 6</size></box></geometry></collision>
+        <visual name="v"><laser_retro>0.45</laser_retro>
+          <geometry><box><size>70 0.6 6</size></box></geometry>
+          <material><diffuse>0.55 0.55 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

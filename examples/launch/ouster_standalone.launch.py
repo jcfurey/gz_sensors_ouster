@@ -52,9 +52,15 @@ def generate_launch_description():
     ray_mode = LaunchConfiguration('ray_mode')
     headless = LaunchConfiguration('headless')
 
+    # An explicit world:=<file.sdf> wins; otherwise the world is derived from
+    # ray_mode (panels needs the rendering world). Note the plugin's ray_mode
+    # comes from the xacro, so pairing a rendering world with ray_mode:=raycast
+    # (or vice versa) is on the caller — the auto path keeps them consistent.
+    world_arg = LaunchConfiguration('world')
     world_name = PythonExpression(
-        ["'ouster_demo_panels.sdf' if '", ray_mode,
-         "' == 'panels' else 'ouster_demo.sdf'"])
+        ["'", world_arg, "' if '", world_arg, "' else ("
+         "'ouster_demo_panels.sdf' if '", ray_mode, "' == 'panels' "
+         "else 'ouster_demo.sdf')"])
     world = PathJoinSubstitution([pkg_share, 'examples', 'worlds', world_name])
 
     # ABSOLUTE metadata path: relative paths resolve against an on-disk SDF dir,
@@ -100,6 +106,12 @@ def generate_launch_description():
         DeclareLaunchArgument('headless', default_value='false',
                               description='Run gz server-only (no GUI client). '
                                           'Use on WSL, SSH, and any headless host.'),
+        DeclareLaunchArgument('world', default_value='',
+                              description='World SDF file name inside '
+                                          'share/gz_sensors_ouster/examples/worlds '
+                                          '(e.g. ouster_showcase.sdf, the guided '
+                                          'tour of the sensor model). Empty '
+                                          'auto-selects from ray_mode.'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config'),
         DeclareLaunchArgument('images', default_value='true',
