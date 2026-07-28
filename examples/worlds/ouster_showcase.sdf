@@ -58,7 +58,7 @@
   channel across (most of) its domain, not just a narrow slice — otherwise a
   consumer can look correct here and fall over on real data:
 
-    RANGE         0.3 m near clip out to the 105 m target and the 60 m walls.
+    RANGE         0.3 m near clip out to the 105 m target and the 110 m walls.
     REFLECTIVITY  ~2 to 255. Zone B walks the linear Lambertian band
                   (retro 0.02-1.0 -> bytes 2,10,25,45,65,85,100); zone C walks
                   the log retro band (retro 1.3-300 -> 108,130,151,173,195,
@@ -228,7 +228,7 @@
       <static>true</static><pose>11.88 5.10 0.9 0 0 -0.7854</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>1.4 0.15 1.8</size></box></geometry></collision>
-        <visual name="v"><laser_retro>0.75</laser_retro>
+        <visual name="v"><laser_retro>0.45</laser_retro>
           <geometry><box><size>1.4 0.15 1.8</size></box></geometry>
           <material><diffuse>0.35 0.35 0.35 1</diffuse></material></visual>
       </link>
@@ -789,7 +789,7 @@
       </plugin>
     </model>
 
-    <!-- ══ ZONE J — PERIMETER (radius ~60 m) ══════════════════════════════
+    <!-- ══ ZONE J — PERIMETER (radius 110 m) ══════════════════════════════
          Four long wall segments at 110 m — OUTSIDE the range ladder (zone A
          reaches 105 m) so they cannot occlude it, and inside the OS1 120 m
          window. Their laser_retro is 0.75, which puts their detection limit

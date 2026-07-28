@@ -60,6 +60,83 @@ def test_raycast_worlds_have_altimeter_system(name):
 MIRRORED_GEOMETRY = {'box', 'sphere', 'cylinder', 'plane', 'mesh'}
 
 
+# The showcase world's reflectance/retro ladders encode their intended
+# laser_retro in the model name (B_retro_045 -> 0.45, C_retro_2p6 -> 2.6), and
+# the zone comments quote the resulting reflectivity bytes. That makes a
+# name/value mismatch machine-checkable — and it is worth checking, because a
+# careless global search-and-replace over the SDF (e.g. retuning one zone's
+# values, or bumping the perimeter walls' retro) silently rewrites any other
+# model that happened to share the old literal, breaking the ladder's
+# monotonicity while the world still loads and still looks fine.
+
+def _showcase_retro_by_model() -> dict:
+    doc = xml.dom.minidom.parse(str(WORLDS / 'ouster_showcase.sdf'))
+    out = {}
+    for model in doc.getElementsByTagName('model'):
+        retros = [r.firstChild.nodeValue.strip()
+                  for r in model.getElementsByTagName('laser_retro')
+                  if r.firstChild]
+        if retros:
+            out[model.getAttribute('name')] = [float(v) for v in retros]
+    return out
+
+
+def test_showcase_ladder_retro_matches_model_name():
+    """B_retro_045 must actually carry laser_retro 0.45, etc."""
+    mismatches = []
+    for model, retros in _showcase_retro_by_model().items():
+        if model.startswith('B_retro_'):
+            expected = int(model.rsplit('_', 1)[1]) / 100.0
+        elif model.startswith('C_retro_'):
+            expected = float(model.rsplit('_', 1)[1].replace('p', '.'))
+        else:
+            continue
+        if len(retros) != 1 or abs(retros[0] - expected) > 1e-9:
+            mismatches.append(f'{model}: expected {expected}, found {retros}')
+    assert not mismatches, (
+        'ladder model name does not match its laser_retro '
+        f'(a stray global replace?): {mismatches}')
+
+
+def test_showcase_ladders_are_monotonic():
+    """Both reflectance ladders must increase, or the demo they exist for
+    (a clean staircase in the REFLECTIVITY channel) is broken."""
+    by_model = _showcase_retro_by_model()
+    for prefix in ('B_retro_', 'C_retro_'):
+        rungs = sorted(
+            ((m, v[0]) for m, v in by_model.items() if m.startswith(prefix)),
+            key=lambda kv: kv[1])
+        values = [v for _, v in rungs]
+        assert len(values) >= 3, f'{prefix} ladder is suspiciously short'
+        assert values == sorted(set(values)), (
+            f'{prefix} ladder has duplicate or non-monotonic rungs: {rungs}')
+
+
+def test_showcase_comments_match_perimeter_distance():
+    """The zone/coverage prose quotes the perimeter distance; keep it honest.
+    Doc drift here misdescribes the scene rather than breaking it, but this
+    world's whole purpose is being a readable reference."""
+    text = (WORLDS / 'ouster_showcase.sdf').read_text()
+    walls = [m for m in _showcase_retro_by_model() if m.startswith('J_wall_')]
+    assert walls, 'expected J_wall_* perimeter models'
+    doc = xml.dom.minidom.parse(str(WORLDS / 'ouster_showcase.sdf'))
+    dists = set()
+    for model in doc.getElementsByTagName('model'):
+        if not model.getAttribute('name').startswith('J_wall_'):
+            continue
+        pose = model.getElementsByTagName('pose')[0].firstChild.nodeValue.split()
+        dists.add(round(max(abs(float(pose[0])), abs(float(pose[1])))))
+    assert len(dists) == 1, f'perimeter walls are at mixed distances: {dists}'
+    actual = dists.pop()
+    # Any comment quoting a different "<N> m wall/perimeter" distance is stale.
+    import re as _re
+    quoted = {int(v) for v in _re.findall(r'(\d+)\s*m (?:walls|perimeter)', text)}
+    stale = {q for q in quoted if q != actual}
+    assert not stale, (
+        f'comments mention {sorted(stale)} m walls but the perimeter is at '
+        f'{actual} m')
+
+
 @pytest.mark.parametrize('name', WORLD_NAMES)
 def test_visual_geometry_is_mirrorable(name):
     doc = xml.dom.minidom.parse(str(WORLDS / name))
