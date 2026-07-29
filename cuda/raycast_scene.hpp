@@ -43,6 +43,36 @@ struct SceneView {
     int n_nodes = 0;
 };
 
+/// Top-level acceleration structure: a BVH over the instances' per-scan world
+/// AABBs. Without it every ray tests every instance (O(n_instances) AABB
+/// tests per ray — at 64x1024 beams that is 65 k x n_instances per scan), so
+/// cast cost grows linearly with scene richness. With it a ray descends only
+/// the subtrees its path actually crosses.
+///
+/// Rebuilt each scan from the same world AABBs already computed for the
+/// InstanceXform array, so it never goes stale as objects move.
+struct Tlas {
+    std::vector<MeshBvhNode> nodes;  ///< node 0 is the root
+    std::vector<int> order;          ///< leaf entries: instance indices
+
+    void clear()
+    {
+        nodes.clear();
+        order.clear();
+    }
+    bool empty() const { return nodes.empty(); }
+};
+
+/// Below this instance count the linear scan is cheaper than building and
+/// traversing a tree, so buildTlas() leaves the Tlas empty and the caster
+/// falls back to the linear path.
+constexpr int kTlasMinInstances = 8;
+
+/// Build a TLAS over `n_instances` world AABBs taken from `xforms`.
+/// Reuses `out`'s existing capacity (call it every scan without churn).
+/// Leaves `out` empty when n_instances < kTlasMinInstances.
+void buildTlas(const InstanceXform * xforms, int n_instances, Tlas & out);
+
 /// Flat scene storage. Build with addMesh()/addInstance(); immutable
 /// afterwards (the plugin shares it with the cast worker via
 /// shared_ptr<const Scene> and rebuilds a fresh one on entity changes).
@@ -107,6 +137,8 @@ private:
 /// APPARENT reflectance of the reported return — kd·cos(α) + ks·cos(2α)⁸,
 /// transmission-weighted for glass (see rcCastOneRay) — 0 when the material
 /// is unset or on a miss.
+/// `tlas_nodes`/`tlas_order` (optional): top-level BVH from buildTlas(); when
+/// null or empty the caster falls back to the linear instance scan.
 void castScan(const SceneView & scene,
               const InstanceXform * xforms,
               const float * beam_alt_deg,
@@ -115,7 +147,10 @@ void castScan(const SceneView & scene,
               const ScanParams & sp,
               float * range_out, float * retro_out,
               const float * col_r = nullptr, const float * col_t = nullptr,
-              float * nir_out = nullptr);
+              float * nir_out = nullptr,
+              const MeshBvhNode * tlas_nodes = nullptr,
+              const int * tlas_order = nullptr,
+              int n_tlas_nodes = 0);
 
 }  // namespace rc
 }  // namespace gz_gpu_ouster_lidar

@@ -52,9 +52,15 @@ def generate_launch_description():
     ray_mode = LaunchConfiguration('ray_mode')
     headless = LaunchConfiguration('headless')
 
+    # An explicit world:=<file.sdf> wins; otherwise the world is derived from
+    # ray_mode (panels needs the rendering world). Note the plugin's ray_mode
+    # comes from the xacro, so pairing a rendering world with ray_mode:=raycast
+    # (or vice versa) is on the caller — the auto path keeps them consistent.
+    world_arg = LaunchConfiguration('world')
     world_name = PythonExpression(
-        ["'ouster_demo_panels.sdf' if '", ray_mode,
-         "' == 'panels' else 'ouster_demo.sdf'"])
+        ["'", world_arg, "' if '", world_arg, "' else ("
+         "'ouster_demo_panels.sdf' if '", ray_mode, "' == 'panels' "
+         "else 'ouster_demo.sdf')"])
     world = PathJoinSubstitution([pkg_share, 'examples', 'worlds', world_name])
 
     # ABSOLUTE metadata path: relative paths resolve against an on-disk SDF dir,
@@ -100,8 +106,19 @@ def generate_launch_description():
         DeclareLaunchArgument('headless', default_value='false',
                               description='Run gz server-only (no GUI client). '
                                           'Use on WSL, SSH, and any headless host.'),
+        DeclareLaunchArgument('world', default_value='',
+                              description='World SDF file name inside '
+                                          'share/gz_sensors_ouster/examples/worlds '
+                                          '(e.g. ouster_showcase.sdf, the guided '
+                                          'tour of the sensor model). Empty '
+                                          'auto-selects from ray_mode.'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config'),
+        DeclareLaunchArgument('images', default_value='true',
+                              description='Run the ouster_ros os_image node (the sim image '
+                                          'source). Set false on headless/CI runs that do '
+                                          'not consume the image topics to save the '
+                                          'per-scan decode CPU.'),
 
         # Make libgz_sensors_ouster.so discoverable as a gz system plugin.
         AppendEnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH', pkg_lib),
@@ -149,24 +166,62 @@ def generate_launch_description():
                 # Stamp the cloud in the URDF lidar frame that
                 # robot_state_publisher already places in the TF tree, so RViz
                 # (fixed frame base_footprint) can display it.
-                # Stamp the cloud in the URDF lidar frame, NOT os_lidar: the
-                # plugin generates points aligned with lidar0/lidar_frame, while
-                # the metadata's lidar_to_sensor_transform is the real Ouster
-                # 180deg + 36mm offset — publishing in os_lidar would rotate the
-                # sim cloud. (Set this to lidar0/os_lidar if you want the full
-                # physical sensor<->lidar offset instead.)
+                #
+                # The plugin generates points aligned with lidar0/lidar_frame via
+                # the standard (identity) Ouster XYZ LUT, so os_cloud must NOT
+                # apply the metadata's lidar_to_sensor_transform (the real
+                # 180deg + 36mm housing offset) — that would rotate/shift the
+                # whole cloud. ouster_ros applies it iff
+                # point_cloud_frame == sensor_frame
+                # (os_transforms_broadcaster.h: apply_lidar_to_sensor_transform()),
+                # so keep them DIFFERENT: point_cloud_frame == lidar_frame ==
+                # 'lidar0/lidar_frame' (identity LUT, cloud in the URDF lidar
+                # frame), sensor_frame a distinct 'lidar0/os_sensor'.
+                # point_cloud_frame is set equal to lidar_frame so the driver's
+                # frame validation keeps it (an unrecognised point_cloud_frame is
+                # otherwise reset back to lidar_frame with a warning).
                 'point_cloud_frame': 'lidar0/lidar_frame',
-                # Let the ouster driver broadcast its own static TF subtree
-                # (lidar0/lidar_frame -> lidar0/os_lidar, lidar0/os_imu) from the
-                # metadata, anchored at the robot's lidar frame.
-                'pub_static_tf': True,
-                'sensor_frame': 'lidar0/lidar_frame',
-                'lidar_frame': 'lidar0/os_lidar',
+                'sensor_frame': 'lidar0/os_sensor',   # != point_cloud_frame → identity LUT
+                'lidar_frame': 'lidar0/lidar_frame',  # == point_cloud_frame → no frame reset
                 'imu_frame': 'lidar0/os_imu',
+                # pub_static_tf=False: with sensor_frame != lidar_frame the driver
+                # would broadcast sensor_frame -> lidar_frame, giving
+                # lidar0/lidar_frame a second parent on top of the
+                # base_link -> lidar0/lidar_frame mount (URDF / the
+                # static_transform_publisher below) — a TF-tree conflict. RSP +
+                # that mount publisher own the tree instead.
+                'pub_static_tf': False,
                 # Stamp on receipt with ROS (sim) time, sidestepping any epoch
                 # mismatch between the packet column timestamps and /clock.
                 'timestamp_mode': 'TIME_FROM_ROS_TIME',
             }],
+        ),
+
+        # ouster_ros os_image: decodes the same lidar_packets + metadata into the
+        # range/signal/reflec/nearir images + camera_info — the SINGLE image
+        # source in sim, identical to hardware. The RViz config's Image displays
+        # subscribe to these topics; without this node they would stay empty
+        # (the plugin's own native image pubs are off by default). Publishes on
+        # SensorDataQoS, matching the RViz displays' Best Effort reliability.
+        # os_image decodes every scan whether or not anything subscribes, so it
+        # is gated behind images:=true (default) — pass images:=false on
+        # headless/CI runs that don't consume the image topics.
+        Node(
+            package='ouster_ros',
+            executable='os_image',
+            name='os_image',
+            namespace='/sensor/lidar/lidar0',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'timestamp_mode': 'TIME_FROM_ROS_TIME',
+                # Stamp images/camera_info in the URDF lidar frame. The os_image
+                # default is 'os_lidar', a frame nothing broadcasts here
+                # (pub_static_tf is false), which breaks TF-consuming uses
+                # (RViz Camera display, image_geometry reprojection).
+                'sensor_frame': 'lidar0/lidar_frame',
+            }],
+            condition=IfCondition(LaunchConfiguration('images')),
         ),
 
         # Explicit mount transform base_link -> lidar0/lidar_frame, matching the

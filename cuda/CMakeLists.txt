@@ -3,10 +3,11 @@
 # compiled in; vendor backends (CUDA / HIP / SYCL) are added behind build
 # flags.
 #
-# Build options (set by the root CMakeLists based on toolchain availability):
-#   GZ_GPU_OUSTER_USE_CUDA — NVIDIA GPUs via nvcc + curand
-#   GZ_GPU_OUSTER_USE_HIP  — AMD GPUs (discrete + APUs) via hipcc + hiprand
-#   GZ_GPU_OUSTER_USE_SYCL — Intel GPUs (iGPU + Arc) via icpx / DPC++ / AdaptiveCpp
+# Build decisions (resolved by the root CMakeLists from the AUTO/ON/OFF option
+# plus toolchain availability, and exported as normal variables):
+#   GZ_GPU_OUSTER_ENABLE_CUDA — NVIDIA GPUs via nvcc + curand
+#   GZ_GPU_OUSTER_ENABLE_HIP  — AMD GPUs (discrete + APUs) via hipcc + hiprand
+#   GZ_GPU_OUSTER_ENABLE_SYCL — Intel GPUs (iGPU + Arc) via icpx / DPC++ / AdaptiveCpp
 #
 # All three can be enabled simultaneously. At runtime the dispatcher picks
 # whichever backend successfully initialises a device, in preference order
@@ -36,16 +37,30 @@ target_include_directories(gz_gpu_ouster_lidar_cuda PUBLIC
 )
 
 # ── CUDA backend (NVIDIA) ───────────────────────────────────────────────────
-if(GZ_GPU_OUSTER_USE_CUDA)
+if(GZ_GPU_OUSTER_ENABLE_CUDA)
   target_sources(gz_gpu_ouster_lidar_cuda PRIVATE ray_processor_cuda.cu)
   target_compile_definitions(gz_gpu_ouster_lidar_cuda PRIVATE
     GZ_GPU_OUSTER_HAVE_CUDA=1)
   set_target_properties(gz_gpu_ouster_lidar_cuda PROPERTIES
-    CUDA_ARCHITECTURES all-major
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
     CUDA_EXTENSIONS OFF
   )
+  # CUDA target architectures. Honour an explicit -DCMAKE_CUDA_ARCHITECTURES /
+  # CUDAARCHS (the Docker CUDA_ARCH build-arg maps to the former); otherwise
+  # default to a portable Volta→Ada list. Two traps this avoids:
+  #  - the "all-major" keyword requires CMake >= 3.23 while this project
+  #    declares a 3.18 minimum, and hardcoding it as a target property would
+  #    override the documented CUDA_ARCH knob;
+  #  - testing `if(NOT CMAKE_CUDA_ARCHITECTURES)` here is DEAD CODE, because
+  #    enable_language(CUDA) in the root CMakeLists auto-populates that cache
+  #    variable with the toolchain default (CMP0104) — the root captures the
+  #    user's actual intent as GZ_OUSTER_CUDA_ARCHS_USER_SET before any CUDA
+  #    enablement, and that is what must be tested.
+  if(NOT GZ_OUSTER_CUDA_ARCHS_USER_SET)
+    set_target_properties(gz_gpu_ouster_lidar_cuda PROPERTIES
+      CUDA_ARCHITECTURES "70;75;80;86;89")
+  endif()
   target_link_libraries(gz_gpu_ouster_lidar_cuda CUDA::curand)
 endif()
 
@@ -54,7 +69,7 @@ endif()
 # either CMAKE_HIP_COMPILER=hipcc or the rocm/llvm toolchain on PATH.
 # The integrated-GPU (APU) code path is selected at runtime by inspecting
 # hipDeviceProp_t::integrated.
-if(GZ_GPU_OUSTER_USE_HIP)
+if(GZ_GPU_OUSTER_ENABLE_HIP)
   enable_language(HIP)
   target_sources(gz_gpu_ouster_lidar_cuda PRIVATE ray_processor_hip.cpp)
   set_source_files_properties(ray_processor_hip.cpp PROPERTIES
@@ -73,7 +88,7 @@ endif()
 # -DGZ_GPU_OUSTER_USE_SYCL=ON and CMAKE_CXX_COMPILER=icpx (or acpp).
 # Uses sycl::malloc_shared so Intel iGPUs avoid explicit host/device copies;
 # discrete Arc GPUs page-migrate transparently.
-if(GZ_GPU_OUSTER_USE_SYCL)
+if(GZ_GPU_OUSTER_ENABLE_SYCL)
   target_sources(gz_gpu_ouster_lidar_cuda PRIVATE ray_processor_sycl.cpp)
   target_compile_definitions(gz_gpu_ouster_lidar_cuda PRIVATE
     GZ_GPU_OUSTER_HAVE_SYCL=1)

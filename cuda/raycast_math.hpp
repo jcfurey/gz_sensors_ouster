@@ -460,28 +460,82 @@ GZ_OUSTER_HD inline float rcApparentReflectance(const RcInstance & inst,
 /// Nearest hit of one ray over all instances. Returns the hit parameter
 /// (or -1), the winning instance in `inst_out` (-1 for a miss) and, for
 /// mesh hits, the winning global triangle index in `tri_out`.
+/// Narrow-phase test of one instance, updating the running best hit.
+/// Shared by both broad-phase strategies in rcNearestHit below.
+GZ_OUSTER_HD inline void rcTestInstance(
+    const RcInstance * instances,
+    const float * verts, const int * tris, const int * order,
+    const MeshBvhNode * nodes, const InstanceXform * xforms,
+    RcV3 o, RcV3 d, float tmin, int i,
+    float & best, int & inst_out, int & tri_out)
+{
+    const InstanceXform & x = xforms[i];
+    if (!rcHitAabb(o, d, x.bmin, x.bmax, tmin, best)) return;
+    const RcV3 o_l = rcXformPoint(x.r, x.t, o);
+    const RcV3 d_l = rcRotate(x.r, d);
+    int tri = -1;
+    const float t = rcHitInstance(instances[i], verts, tris, order,
+                                  nodes, o_l, d_l, tmin, best, &tri);
+    if (t > 0.0f && t < best) {
+        best = t;
+        inst_out = i;
+        tri_out = tri;
+    }
+}
+
+/// Nearest hit across the whole scene.
+///
+/// Broad phase: when a top-level BVH (TLAS) over the instances' world AABBs is
+/// supplied, traverse it — cost is O(log n_instances) per ray for a spatially
+/// separated scene instead of the O(n_instances) linear scan, and the `best`
+/// culling prunes whole subtrees. The TLAS is rebuilt per scan from the same
+/// world AABBs already computed for `xforms` (see rc::buildTlas), so it costs
+/// nothing extra to keep current.
+///
+/// Passing tlas_nodes == nullptr (or an empty TLAS) falls back to the linear
+/// scan, which stays the right choice for a handful of instances and keeps
+/// every backend correct even if it does not upload a TLAS.
 GZ_OUSTER_HD inline float rcNearestHit(
     const RcInstance * instances, int n_instances,
     const float * verts, const int * tris, const int * order,
     const MeshBvhNode * nodes, const InstanceXform * xforms,
     RcV3 o, RcV3 d, float tmin, float tmax,
-    int & inst_out, int & tri_out)
+    int & inst_out, int & tri_out,
+    const MeshBvhNode * tlas_nodes = nullptr,
+    const int * tlas_order = nullptr,
+    int n_tlas_nodes = 0)
 {
     float best = tmax;
     inst_out = -1;
     tri_out = -1;
-    for (int i = 0; i < n_instances; ++i) {
-        const InstanceXform & x = xforms[i];
-        if (!rcHitAabb(o, d, x.bmin, x.bmax, tmin, best)) continue;
-        const RcV3 o_l = rcXformPoint(x.r, x.t, o);
-        const RcV3 d_l = rcRotate(x.r, d);
-        int tri = -1;
-        const float t = rcHitInstance(instances[i], verts, tris, order,
-                                      nodes, o_l, d_l, tmin, best, &tri);
-        if (t > 0.0f && t < best) {
-            best = t;
-            inst_out = i;
-            tri_out = tri;
+
+    if (tlas_nodes == nullptr || tlas_order == nullptr || n_tlas_nodes <= 0) {
+        for (int i = 0; i < n_instances; ++i) {
+            rcTestInstance(instances, verts, tris, order, nodes, xforms,
+                           o, d, tmin, i, best, inst_out, tri_out);
+        }
+        return (inst_out >= 0) ? best : -1.0f;
+    }
+
+    // TLAS traversal. Root is node 0 (rc::buildTlas emits it first). Stack
+    // depth is bounded by the tree depth, which the builder caps well below
+    // kRcBvhStack; the explicit capacity guard keeps a malformed/deeper tree
+    // from overrunning the stack on device.
+    int stack[kRcBvhStack];
+    int sp = 0;
+    stack[sp++] = 0;
+    while (sp > 0) {
+        const MeshBvhNode & nd = tlas_nodes[stack[--sp]];
+        if (!rcHitAabb(o, d, nd.bmin, nd.bmax, tmin, best)) continue;
+        if (nd.left < 0) {
+            for (int k = 0; k < nd.count; ++k) {
+                rcTestInstance(instances, verts, tris, order, nodes, xforms,
+                               o, d, tmin, tlas_order[nd.first + k],
+                               best, inst_out, tri_out);
+            }
+        } else if (sp + 2 <= kRcBvhStack) {
+            stack[sp++] = nd.left;
+            stack[sp++] = nd.right;
         }
     }
     return (inst_out >= 0) ? best : -1.0f;
@@ -524,7 +578,10 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     const ScanParams & sp, int idx, float inf_value,
     float & range_out, float & retro_out,
     const float * col_r = nullptr, const float * col_t = nullptr,
-    float * nir_out = nullptr)
+    float * nir_out = nullptr,
+    const MeshBvhNode * tlas_nodes = nullptr,
+    const int * tlas_order = nullptr,
+    int n_tlas_nodes = 0)
 {
     const int beam = idx / sp.W;
     const int m = idx % sp.W;
@@ -564,7 +621,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     int inst0 = -1, tri0 = -1;
     const float t0 = rcNearestHit(instances, n_instances, verts, tris, order,
                                   nodes, xforms, o, d, sp.near_clip, t_budget,
-                                  inst0, tri0);
+                                  inst0, tri0,
+                                  tlas_nodes, tlas_order, n_tlas_nodes);
     if (inst0 < 0) {
         range_out = inf_value;
         retro_out = 0.0f;
@@ -607,7 +665,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
         int inst1 = -1, tri1 = -1;
         const float t1 = rcNearestHit(instances, n_instances, verts, tris,
                                       order, nodes, xforms, p, d, kRcSegTmin,
-                                      t_budget - seg_start, inst1, tri1);
+                                      t_budget - seg_start, inst1, tri1,
+                                      tlas_nodes, tlas_order, n_tlas_nodes);
         if (inst1 >= 0) {
             const float rho1 = rcHitReflectance(instances, xforms, verts,
                                                 tris, p, d, t1, inst1, tri1) *
@@ -656,7 +715,9 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                           tris, order, nodes, xforms, g0,
                                           refl, kRcSegTmin,
                                           t_budget - t0 - kRcSegEps,
-                                          inst2, tri2);
+                                          inst2, tri2,
+                                          tlas_nodes, tlas_order,
+                                          n_tlas_nodes);
             if (inst2 >= 0) {
                 const float mirror_eff = (1.0f - tau) * instances[inst0].spec;
                 const float rho2 =

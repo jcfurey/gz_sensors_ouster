@@ -64,16 +64,26 @@ public:
         const float * col_t,
         float * nir_out) override
     {
+        // Top-level BVH over the instances' world AABBs, rebuilt from this
+        // scan's transforms (cheap: O(n log n) over instances, versus the
+        // O(H*W*n_instances) AABB tests it saves in the cast below). Reuses
+        // tlas_'s capacity across scans. Below kTlasMinInstances it stays
+        // empty and rc::castScan falls back to the linear scan.
+        rc::buildTlas(xforms, scene.n_instances, tlas_);
+
         // OpenMP-parallel reference implementation; no upload, no cache.
         rc::castScan(scene, xforms, beam_alt_deg, beam_az_deg,
                      sensor_r, sensor_t, sp, range_out, retro_out,
-                     col_r, col_t, nir_out);
+                     col_r, col_t, nir_out,
+                     tlas_.nodes.data(), tlas_.order.data(),
+                     static_cast<int>(tlas_.nodes.size()));
     }
 
     const char * name() const override { return "cpu"; }
 
 private:
     uint64_t seed_;
+    rc::Tlas tlas_;   // per-scan top-level BVH; capacity reused
 };
 
 }  // namespace

@@ -118,6 +118,11 @@ private:
     bool imu_rng_seeded_ = false;
     std::vector<uint8_t> imu_pkt_buf_;
     std::chrono::nanoseconds last_imu_sim_time_{0};
+    // World gravity vector (world frame), read once in Configure from the
+    // world's Gravity component. Used to turn kinematic acceleration into the
+    // proper acceleration a real accelerometer reports. Defaults to standard
+    // gravity as a fallback if the component is absent.
+    ::gz::math::Vector3d world_gravity_{0.0, 0.0, -9.80665};
 
     // ── Components ───────────────────────────────────────────────────────────
     std::unique_ptr<OusterMetadata> meta_;
@@ -160,14 +165,35 @@ private:
     // callback. Do not delete.
     ::gz::sim::EventManager * event_mgr_{nullptr};
     gz::common::ConnectionPtr render_conn_;
-    std::chrono::steady_clock::time_point last_render_time_{};
+    // events::RenderTeardown fires on the render thread when gz-sim tears the
+    // render engine down (server shutdown / world reload). We destroy the
+    // panel rig's OGRE2 depth cameras there so their GL resources are freed on
+    // the thread that owns the GL context — never from the dtor on the server
+    // thread (thread-affine GL teardown → corruption/segfault otherwise).
+    gz::common::ConnectionPtr render_teardown_conn_;
+    // Guards the rig teardown against running twice (RenderTeardown vs the
+    // dtor fallback). Written on the render thread (OnRenderTeardown) and the
+    // main thread (dtor), both under render_busy_mtx_.
+    bool rig_destroyed_ = false;
+    // Panels-mode scan cadence is throttled on SIM time (not wall-clock) so
+    // the scan rate matches lidar_hz regardless of the real-time factor and
+    // stays consistent with the sim-time packet timestamps. PostUpdate (sim
+    // thread) publishes the latest sim time here; OnRender (render thread)
+    // reads it. last_render_sim_ns_ is touched only by OnRender.
+    std::atomic<int64_t> latest_sim_ns_{0};
+    int64_t last_render_sim_ns_ = -1;
+    // Paused state published by PostUpdate for OnRender: scan renders are
+    // skipped while paused (PostUpdate won't consume a frame until unpause,
+    // and a mid-pause render could capture a half-edited GUI scene that then
+    // publishes as the first post-resume cloud). Starts true so nothing
+    // renders before the first unpaused sim tick.
+    std::atomic<bool> paused_{true};
     std::atomic<bool> sensor_initialized_{false};
     // Counts OnRender() entries; stays 0 when the Sensors system never
     // starts rendering (no rendering sensor in the world); PostUpdate()
     // uses it to emit a one-shot diagnostic.
     std::atomic<uint64_t> onrender_entries_{0};
     bool no_render_warned_{false};
-    bool was_paused_ = false;
 
     std::atomic<bool> shutdown_{false};
 
@@ -192,6 +218,7 @@ private:
 
     // ── Private methods ──────────────────────────────────────────────────────
     void OnRender();
+    void OnRenderTeardown();
     void encodeAndPublish(int64_t stamp_ns, const float * raw_data, int raw_n);
     void publishImu(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm);

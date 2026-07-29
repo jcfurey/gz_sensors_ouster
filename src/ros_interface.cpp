@@ -43,7 +43,15 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
     noise_ = noise;
 
     if (!rclcpp::ok()) {
-        rclcpp::init(0, nullptr);
+        // A Gazebo *system plugin* does not own the process — gz-sim (and any
+        // co-loaded ROS plugin such as gz_ros2_control) does. Initialise
+        // rclcpp WITHOUT signal handlers so we don't hijack SIGINT/SIGTERM
+        // from the host: the default (SignalHandlerOptions::All) would install
+        // a handler that runs rclcpp::shutdown() on Ctrl-C, tearing the
+        // context down under the still-running sim/drain threads and turning a
+        // clean gz-sim shutdown into a publish-on-dead-context abort.
+        rclcpp::init(0, nullptr, rclcpp::InitOptions(),
+                     rclcpp::SignalHandlerOptions::None);
     }
 
     // Construct the executor lazily here, AFTER rclcpp::init() above (see
@@ -296,6 +304,14 @@ void RosInterface::publishMetadataIfNeeded(std::chrono::nanoseconds sim_now)
             "metadata subscriber count dropped to 0; re-arming republish");
     }
     if (metadata_published_) return;
+
+    // Sim-time rewind (world reset): last_meta_pub_time_ would otherwise sit
+    // ahead of sim_now and the throttle below would publish nothing until sim
+    // time climbed back past the pre-reset value — the same stall class as
+    // the scan/IMU throttles, which carry their own rewind guards.
+    if (last_meta_pub_time_.count() >= 0 && sim_now < last_meta_pub_time_) {
+        last_meta_pub_time_ = std::chrono::nanoseconds(-1);
+    }
 
     if (last_meta_pub_time_.count() < 0 ||
         sim_now - last_meta_pub_time_ >= kRepubPeriod) {

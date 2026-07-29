@@ -101,6 +101,10 @@ def generate_launch_description():
                               description='Run gz server-only (no GUI client).'),
         DeclareLaunchArgument('rviz', default_value='false',
                               description='Launch RViz with the example config.'),
+        DeclareLaunchArgument('images', default_value='true',
+                              description='Run the ouster_ros os_image node (the sim image '
+                                          'source). Set false on headless/CI runs that do '
+                                          'not consume the image topics.'),
 
         # libgz_sensors_ouster.so discoverable as a gz system plugin.
         AppendEnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH', pkg_lib),
@@ -157,12 +161,21 @@ def generate_launch_description():
                 # Build only the point cloud — the plugin publishes /imu itself.
                 'proc_mask': 'PCL',
                 # Stamp the cloud in the URDF lidar frame that
-                # robot_state_publisher places in the TF tree.
+                # robot_state_publisher places in the TF tree. The plugin's points
+                # use the identity Ouster XYZ LUT, so os_cloud must NOT apply the
+                # metadata lidar_to_sensor_transform (180deg + 36mm housing
+                # offset). ouster_ros applies it iff
+                # point_cloud_frame == sensor_frame, so keep them different:
+                # point_cloud_frame == lidar_frame == 'lidar0/lidar_frame'
+                # (identity LUT), sensor_frame a distinct 'lidar0/os_sensor'.
                 'point_cloud_frame': 'lidar0/lidar_frame',
-                'pub_static_tf': True,
-                'sensor_frame': 'lidar0/lidar_frame',
-                'lidar_frame': 'lidar0/os_lidar',
+                'sensor_frame': 'lidar0/os_sensor',   # != point_cloud_frame → identity LUT
+                'lidar_frame': 'lidar0/lidar_frame',  # == point_cloud_frame → no frame reset
                 'imu_frame': 'lidar0/os_imu',
+                # pub_static_tf=False: avoid the driver re-parenting
+                # lidar0/lidar_frame under sensor_frame (it already has the
+                # base_link mount parent from RSP / the static_transform_publisher).
+                'pub_static_tf': False,
                 'timestamp_mode': 'TIME_FROM_ROS_TIME',
             }],
         ),
@@ -182,9 +195,13 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'timestamp_mode': 'TIME_FROM_ROS_TIME',
-                # frame_id intentionally left at the os_image default, matching
-                # the hardware bringup os_image node.
+                # Stamp images/camera_info in the URDF lidar frame. The os_image
+                # default 'os_lidar' is broadcast by nothing in this launch
+                # (pub_static_tf is false), so TF-consuming uses of the images
+                # would fail to resolve the frame.
+                'sensor_frame': 'lidar0/lidar_frame',
             }],
+            condition=IfCondition(LaunchConfiguration('images')),
         ),
 
         Node(

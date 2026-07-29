@@ -36,6 +36,7 @@
 #include <gz/sim/EntityComponentManager.hh>
 #include <gz/sim/EventManager.hh>
 #include <gz/sim/Util.hh>
+#include <gz/sim/World.hh>
 #include <gz/sim/components/Name.hh>
 #include <gz/sim/components/Sensor.hh>
 #include <gz/sim/components/AngularVelocity.hh>
@@ -71,7 +72,7 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     // 1. Set shutdown_ first so a render callback that begins (or is
     //    already past the lock) can observe it and bail before touching
     //    teardown-fragile state.
-    // 2. Disconnect the render hook. gz::common::Connection::reset() does
+    // 2. Disconnect the render hooks. gz::common::Connection::reset() does
     //    not wait for in-flight callbacks, so this only prevents *new*
     //    invocations.
     // 3. Take render_busy_mtx_ to flush any in-flight callback. By the
@@ -81,9 +82,30 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     //    (rig / mirror), then the encoder's drain, then ROS.
     shutdown_.store(true, std::memory_order_release);
     render_conn_.reset();
-    { std::lock_guard<std::recursive_mutex> lk(render_busy_mtx_); }
-    if (rig_) {
-        rig_->destroy();
+    render_teardown_conn_.reset();
+    // Taking render_busy_mtx_ flushes any in-flight render callback (see the
+    // header comment); holding it across the rig fallback below also keeps
+    // the teardown paths mutually exclusive with OnRenderTeardown.
+    {
+        std::lock_guard<std::recursive_mutex> lk(render_busy_mtx_);
+        // The panel rig's OGRE2 depth cameras are normally destroyed on the
+        // render thread via OnRenderTeardown() (events::RenderTeardown), so
+        // their GL resources are freed on the thread that owns the GL context.
+        // This fallback covers the paths where that never ran:
+        //  - benign: the rig holds no cameras (panels mode where events::Render
+        //    never fired, or raycast mode) — destroy() early-returns, no GL work;
+        //  - KNOWN LIMITATION: the plugin's model is removed from a *running*
+        //    world. gz-sim emits RenderTeardown only when the Sensors render
+        //    loop exits, not on entity removal, so here we still destroy live
+        //    cameras from the server thread while rendering continues. That is
+        //    the pre-RenderTeardown behavior (thread-affinity risk); there is
+        //    no plugin-visible hook to schedule the destroy on the render
+        //    thread once our event connections are reset. Leaking instead
+        //    would permanently hold rig VRAM per spawn/despawn cycle.
+        if (rig_ && !rig_destroyed_) {
+            rig_->destroy();
+            rig_destroyed_ = true;
+        }
     }
     if (mirror_) {
         mirror_->stop();
@@ -291,12 +313,41 @@ void GzGpuOusterLidarSystem::Configure(
         return;
     }
 
-    // Discover world name
+    // sensor_name is used as BOTH the ROS node namespace and the absolute topic
+    // prefix, so it must be a non-empty absolute name. A relative prefix makes
+    // every topic relative — resolved a second time under the node namespace —
+    // so it double-namespaces (e.g. "lidar0" → /lidar0/lidar0/lidar_packets).
+    // An empty name is fatal (like an empty metadata_path): the pose-anchor
+    // lookup would never match and the plugin would run forever publishing
+    // nothing — disable it loudly instead of limping. A relative name is
+    // normalised.
+    if (sensor_name_.empty()) {
+        RCLCPP_ERROR(kLogger,
+            "'sensor_name' SDF parameter is required (e.g. "
+            "/sensor/lidar/lidar0); plugin disabled");
+        return;
+    }
+    if (sensor_name_.front() != '/') {
+        RCLCPP_WARN(kLogger,
+            "sensor_name '%s' is relative; prefixing '/' so the plugin's topics "
+            "stay absolute (a relative prefix double-namespaces every topic "
+            "under the node).", sensor_name_.c_str());
+        sensor_name_ = "/" + sensor_name_;
+    }
+
+    // Discover world name + gravity. The Gravity component is created from
+    // the world SDF before systems are configured, so a one-time read here
+    // covers non-standard worlds (reduced/tilted gravity); the member default
+    // (standard gravity) stands if the component is somehow absent.
     auto worldEntity = ::gz::sim::worldEntity(ecm);
     if (worldEntity != ::gz::sim::kNullEntity) {
         auto * nameComp = ecm.Component<::gz::sim::components::Name>(worldEntity);
         if (nameComp) {
             world_name_ = nameComp->Data();
+        }
+        if (const auto gravity =
+                ::gz::sim::World(worldEntity).Gravity(ecm)) {
+            world_gravity_ = *gravity;
         }
     }
 
@@ -425,6 +476,12 @@ void GzGpuOusterLidarSystem::Configure(
     if (ray_mode_ == "panels") {
         render_conn_ = event_mgr.Connect<::gz::sim::events::Render>(
             std::bind(&GzGpuOusterLidarSystem::OnRender, this));
+        // Destroy the depth-camera rig on the render thread (owning GL
+        // context) when gz-sim tears rendering down, rather than from the
+        // dtor on the server thread.
+        render_teardown_conn_ =
+            event_mgr.Connect<::gz::sim::events::RenderTeardown>(
+                std::bind(&GzGpuOusterLidarSystem::OnRenderTeardown, this));
     }
 
     RCLCPP_INFO(kLogger,
@@ -486,13 +543,26 @@ void GzGpuOusterLidarSystem::OnRender()
     onrender_entries_.fetch_add(1, std::memory_order_relaxed);
 
     if (sensor_initialized_.load(std::memory_order_acquire)) {
-        // ── Throttle to lidar_hz_ ───────────────────────────────────────────
-        auto now = std::chrono::steady_clock::now();
-        const auto period = std::chrono::duration_cast<
-            std::chrono::steady_clock::duration>(
-                std::chrono::duration<double>(1.0 / lidar_hz_));
-        if (now - last_render_time_ < period) return;
-        last_render_time_ = now;
+        // Skip scan renders while the sim is paused: PostUpdate won't consume
+        // a frame until unpause, and a mid-pause render could capture a scene
+        // the user is editing in the GUI, publishing a stale world as the
+        // first post-resume cloud. (Rig creation below is NOT gated — building
+        // the cameras while paused is cheap and desirable.)
+        if (paused_.load(std::memory_order_acquire)) return;
+
+        // ── Throttle to lidar_hz_ on SIM time ───────────────────────────────
+        // Pace on sim time (published by PostUpdate) rather than wall-clock so
+        // the panels scan rate tracks lidar_hz at any real-time factor and
+        // matches the sim-time packet timestamps. Rendering when the sim time
+        // has rewound (world reset: sim_ns < last) re-arms instead of stalling
+        // until the clock catches back up.
+        const int64_t sim_ns = latest_sim_ns_.load(std::memory_order_acquire);
+        const int64_t period_ns = static_cast<int64_t>(1e9 / lidar_hz_);
+        if (last_render_sim_ns_ >= 0 && sim_ns >= last_render_sim_ns_ &&
+            sim_ns - last_render_sim_ns_ < period_ns) {
+            return;
+        }
+        last_render_sim_ns_ = sim_ns;
 
         ::gz::math::Pose3d pose;
         {
@@ -511,6 +581,21 @@ void GzGpuOusterLidarSystem::OnRender()
             "[%.1f, %.1f] deg, %s model",
             rig_->resampleParams().n_panels, meta_->min_alt, meta_->max_alt,
             rig_->hemispherical() ? "hemispherical" : "cylindrical");
+    }
+}
+
+// ── Rendering-thread teardown callback ───────────────────────────────────────
+// Fired by gz-sim on the render thread (events::RenderTeardown) while the ogre2
+// engine/scene are still valid, so the depth cameras' GL resources are freed on
+// the thread that owns the GL context. Doing this from the dtor (server thread)
+// would free GL resources off their owning thread — corruption / segfault.
+
+void GzGpuOusterLidarSystem::OnRenderTeardown()
+{
+    std::lock_guard<std::recursive_mutex> render_lk(render_busy_mtx_);
+    if (rig_ && !rig_destroyed_) {
+        rig_->destroy();
+        rig_destroyed_ = true;
     }
 }
 
@@ -551,43 +636,85 @@ void GzGpuOusterLidarSystem::PostUpdate(
         }
     }
 
+    // Publish the paused state for the render thread: OnRender skips scan
+    // renders while paused. A mid-pause render could only capture a world the
+    // user is editing in the GUI, and PostUpdate would not consume the frame
+    // until unpause anyway — so it would publish as a stale first post-resume
+    // cloud. Stored before the early-return so the flag tracks every tick.
+    paused_.store(info.paused, std::memory_order_release);
     if (info.paused) {
-        was_paused_ = true;
         return;
     }
 
-    // Reset timing state after sim resumes to prevent stale data burst.
-    if (was_paused_) {
-        was_paused_ = false;
-        last_imu_sim_time_ = std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
-        last_render_time_ = std::chrono::steady_clock::now();
-    }
+    // Publish the current sim time for the render thread's sim-time throttle
+    // (panels mode). No unpause re-anchoring is needed for the sim-time
+    // throttles: sim time does not advance while paused, and a world-reset
+    // rewind is handled by each throttle's own rewind guard.
+    const auto sim_now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+    latest_sim_ns_.store(sim_now_ns.count(), std::memory_order_release);
 
     if (!sensor_initialized_.load(std::memory_order_acquire)) return;
     if (!ros_) return;
 
+    // Sim-thread work here can throw — rclcpp publishes (an RCLError if the
+    // context is torn down mid-step) and, on the "scan" path, the GPU backend
+    // (a CUDA/HIP error surfacing as an exception). gz-sim does not wrap
+    // ISystemPostUpdate in a try/catch, so an escaping exception aborts the
+    // whole server. Swallow + throttle-log instead: a persistent failure logs
+    // every 5 s (identifying the failing stage) while the sim keeps running.
+    // catch (...) is deliberate — an unknown exception type crossing into
+    // gz-sim would abort just the same.
+    auto guarded = [this](const char * what, auto && fn) {
+        try {
+            fn();
+        } catch (const std::exception & e) {
+            if (ros_ && ros_->clock()) {
+                RCLCPP_ERROR_THROTTLE(kLogger, *ros_->clock(), 5000,
+                    "%s: %s stage failed: %s",
+                    sensor_name_.c_str(), what, e.what());
+            }
+        } catch (...) {
+            if (ros_ && ros_->clock()) {
+                RCLCPP_ERROR_THROTTLE(kLogger, *ros_->clock(), 5000,
+                    "%s: %s stage failed (non-std exception)",
+                    sensor_name_.c_str(), what);
+            }
+        }
+    };
+
     // ── Metadata (re)publish — sim-thread, works in both ray modes ──────────
-    ros_->publishMetadataIfNeeded(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime));
+    guarded("metadata", [&] {
+        ros_->publishMetadataIfNeeded(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime));
+    });
 
     // ── Locate the gpu_lidar sensor entity (once) ────────────────────────────
     // Gazebo merges fixed-joint child links into the parent, so
     // "lidar0/lidar_frame" does not exist as a Link entity.  The <sensor>
     // element placed on that frame DOES survive and carries the accumulated
     // fixed-joint pose, giving us the correct world position.
+    //
+    // Scope the search to the plugin's own top-level model so a same-named
+    // sensor on a *different* model (a second robot carrying its own "lidar0")
+    // cannot bind here and feed this plugin the wrong pose.
     if (!lidar_frame_found_) {
+        const ::gz::sim::Entity lidar_model =
+            ::gz::sim::topLevelModel(sensor_entity_, ecm);
         ecm.Each<::gz::sim::components::Name, ::gz::sim::components::Sensor>(
-            [this](const ::gz::sim::Entity & ent,
+            [this, &ecm, lidar_model](const ::gz::sim::Entity & ent,
                    const ::gz::sim::components::Name * name,
                    const ::gz::sim::components::Sensor *) -> bool {
-                if (name->Data() == lidar_frame_name_) {
-                    lidar_frame_entity_ = ent;
-                    lidar_frame_found_ = true;
-                    RCLCPP_INFO(kLogger, "Found sensor entity: %s (id=%lu)",
-                        lidar_frame_name_.c_str(), static_cast<unsigned long>(ent));
-                    return false;  // stop iteration
+                if (name->Data() != lidar_frame_name_) return true;
+                if (lidar_model != ::gz::sim::kNullEntity &&
+                    ::gz::sim::topLevelModel(ent, ecm) != lidar_model) {
+                    return true;  // same name, different model — skip
                 }
-                return true;  // continue
+                lidar_frame_entity_ = ent;
+                lidar_frame_found_ = true;
+                RCLCPP_INFO(kLogger, "Found sensor entity: %s (id=%lu)",
+                    lidar_frame_name_.c_str(), static_cast<unsigned long>(ent));
+                return false;  // stop iteration
             });
     }
 
@@ -673,12 +800,14 @@ void GzGpuOusterLidarSystem::PostUpdate(
         const auto stamp_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 info.simTime).count();
-        encodeAndPublish(stamp_ns, process_buf_.data(), local_n);
+        guarded("scan", [&] {
+            encodeAndPublish(stamp_ns, process_buf_.data(), local_n);
+        });
     }
 
     // ── Publish IMU at configured rate ──────────────────────────────────────
     if (imu_enabled_ && imu_entity_found_) {
-        publishImu(info, ecm);
+        guarded("imu", [&] { publishImu(info, ecm); });
     }
 }
 
@@ -804,7 +933,10 @@ void GzGpuOusterLidarSystem::publishImu(
     const auto imu_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(1.0 / imu_hz_));
 
-    if (sim_now - last_imu_sim_time_ < imu_period) return;
+    // Skip until a full imu_period has elapsed — but if sim time has rewound
+    // (world reset), fall through and re-anchor instead of stalling until the
+    // clock catches back up.
+    if (sim_now >= last_imu_sim_time_ && sim_now - last_imu_sim_time_ < imu_period) return;
     last_imu_sim_time_ = sim_now;
 
     // ── Read IMU data from ECM ───────────────────────────────────────────
@@ -830,10 +962,14 @@ void GzGpuOusterLidarSystem::publishImu(
     // Without this step the rover appears to be in free fall (la = 0),
     // Madgwick cannot find a gravity reference, and downstream localization
     // (Sierra, robot_localization, etc.) never publishes odom->base_footprint.
+    //
+    // world_gravity_ is the WORLD's actual gravity vector (read once in
+    // Configure) rather than a hardcoded 9.80665 down-Z, so non-standard
+    // worlds (reduced/tilted gravity, e.g. lunar or inclined test rigs) still
+    // produce a correct proper-acceleration reference.
     const auto imu_world_pose = ::gz::sim::worldPose(imu_entity_, ecm);
     const auto & R = imu_world_pose.Rot();
-    const ::gz::math::Vector3d gravity_world(0.0, 0.0, -9.80665);
-    const auto gravity_body = R.RotateVectorReverse(gravity_world);
+    const auto gravity_body = R.RotateVectorReverse(world_gravity_);
     const ::gz::math::Vector3d la_proper = la_raw - gravity_body;
 
     // ── IMU noise + bias model ───────────────────────────────────────────

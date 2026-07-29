@@ -101,7 +101,14 @@ void RaycastMirror::start(const Params & p, RayProcessor * proc,
 
 void RaycastMirror::stop()
 {
-    shutdown_.store(true, std::memory_order_release);
+    // Set shutdown_ under mtx_ so it can't be missed between the worker's
+    // predicate check and its cv_.wait() — otherwise a stop() racing that
+    // window would notify before the worker blocks, and the worker would sleep
+    // forever, hanging the join below.
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        shutdown_.store(true, std::memory_order_release);
+    }
     cv_.notify_all();
     if (thread_.joinable()) {
         thread_.join();
@@ -313,6 +320,14 @@ void RaycastMirror::postUpdate(
     if (params_.motion_distortion) {
         const auto now =
             std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+        // Sim-time rewind (world reset): the history holds poses stamped ahead
+        // of `now`, so the append gate below would never admit new samples and
+        // the trim delta would go negative — buildColumnPoses would then clamp
+        // every column to the stale pre-reset pose for the whole rewound span.
+        // Drop the history and start fresh from the post-reset pose.
+        if (!pose_history_.empty() && now < pose_history_.back().first) {
+            pose_history_.clear();
+        }
         if (pose_history_.empty() || pose_history_.back().first < now) {
             pose_history_.emplace_back(now, sensor_pose);
         }
@@ -344,7 +359,11 @@ void RaycastMirror::postUpdate(
         std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(1.0 / params_.lidar_hz));
-    if (last_scan_time_.count() >= 0 && sim_now - last_scan_time_ < period) {
+    // Throttle to lidar_hz on sim time. Guard on sim_now >= last_scan_time_ so
+    // a sim-time rewind (world reset) re-arms immediately instead of stalling
+    // output until sim time climbs back past the pre-reset value.
+    if (last_scan_time_.count() >= 0 && sim_now >= last_scan_time_ &&
+        sim_now - last_scan_time_ < period) {
         return;
     }
     last_scan_time_ = sim_now;

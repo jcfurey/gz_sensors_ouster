@@ -278,6 +278,7 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `worlds/ouster_demo.sdf` | Demo world (physics + altimeter + IMU systems, ground + obstacles). GPU-free: raycast mode, no rendering Sensors system |
 | `worlds/ouster_demo_panels.sdf` | Panels-mode counterpart of `ouster_demo.sdf` (loads gz-sim-sensors-system/ogre2). Selected automatically by example launches when `ray_mode:=panels` |
 | `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
+| `worlds/ouster_showcase.sdf` | **Guided tour of the sensor model** — labelled zones for range, reflectance, retroreflectors, the detection limit, specular/mirror ghosts, glass, curvature, sun/NEAR_IR and a moving beacon. Raycast (GPU-free), built only from primitives so it needs no downloads. See [Showcase world](#showcase-world) |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
 | `launch/turtlebot3_ouster.launch.py` | Bring up the TurtleBot3 waffle + Ouster (drivable, raycast by default) |
@@ -303,14 +304,85 @@ plugin via `rclcpp`, so they need no bridge).
 `lidar_packets` are assembled into a `PointCloud2` on
 `/sensor/lidar/lidar0/points`, exactly as for a real Ouster — verify with
 `ros2 topic hz /sensor/lidar/lidar0/points`. `os_cloud` is configured with
-`point_cloud_frame:=lidar0/lidar_frame` and `pub_static_tf:=true`, so it
-broadcasts the sensor's own static TF subtree
-(`lidar0/lidar_frame → lidar0/os_lidar`/`os_imu`) and the cloud lands in the
-`robot_state_publisher` TF tree (RViz fixed frame `base_footprint`). A small
-`static_transform_publisher` redundantly mirrors the URDF mount joint
-(`base_link → lidar0/lidar_frame`) so the cloud still reaches `base_link`
-even when `robot_state_publisher` is not running. The
-RViz config includes a `PointCloud` display for that topic.
+`point_cloud_frame:=lidar0/lidar_frame` (the cloud is stamped in the URDF lidar
+frame) and a **distinct** `sensor_frame:=lidar0/os_sensor` so the driver uses the
+identity XYZ LUT — see [Frames vs `os_cloud`](#frames-vs-ouster_ros-os_cloud) for
+why that pairing matters — and the cloud lands in the `robot_state_publisher` TF
+tree (RViz fixed frame `base_footprint`). A small `static_transform_publisher`
+redundantly mirrors the URDF mount joint (`base_link → lidar0/lidar_frame`) so
+the cloud still reaches `base_link` even when `robot_state_publisher` is not
+running. The RViz config includes a `PointCloud` display for that topic.
+
+### Showcase world
+
+`worlds/ouster_showcase.sdf` is the "see everything the model does" world. Where
+`ouster_demo.sdf` answers *does it produce points*, the showcase answers *what
+does each part of the sensor model actually look like* — each effect gets its
+own labelled zone, laid out radially around the origin so one 360° scan sweeps
+through all of them:
+
+```bash
+ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
+    world:=ouster_showcase.sdf
+# headless (WSL/SSH/CI):  ... world:=ouster_showcase.sdf headless:=true
+# with RViz:              ... world:=ouster_showcase.sdf rviz:=true
+```
+
+| Azimuth | Zone | What to look for |
+|---------|------|------------------|
+| 0° | Range ladder | Six identical 80%-reflectance targets at 6–105 m: range-noise σ ramps with distance, signal falls as 1/r², the far pair thins out from `dropout_rate_far` |
+| 45° | Reflectance ladder | Seven panels at one range, `laser_retro` 0.02→1.0: an even staircase across the 0–100 reflectivity band; dark panels are noisier and drop out more |
+| 58–72° | Retroreflector ladder | Nine posts, `laser_retro` 1.3→300 → the calibrated log band walked end to end (bytes 108, 130, 151, 173, 195, 220, 242, 255, 255), like signs and retro tape |
+| 82–129° | **Signal / intensity ladder** | Nine posts at *fixed* reflectivity walking in from 19.2 m to 1.2 m. SIGNAL is `base_signal·ρ/r²`, so the 1/r² term — not reflectivity — is what sweeps it; the closest post saturates the channel outright |
+| 135° | Detection limit | A dark (ρ=0.10) target at 34 m returns; its twin at 52 m is past `max_range·√(ρ/0.8)` = 42 m and **always** drops — while a bright target at the same 52 m returns fine. The miss is reflectance-driven, not a range cutoff |
+| 180° | Specular / gloss | Matte (kₛ 0.10), glossy (0.45) and mirror (0.95) faces: the specular lobe, and above the mirror threshold a **ghost return** behind the mirror (the orange post's reflection) |
+| 215° | Glass | Panes at τ=0.60 and τ=0.92 with walls behind: the pane wins on the first, the wall behind wins on the second — "lidar sees through the window" |
+| 270° | Curvature | Spheres and cylinders of several radii: apparent reflectance ρ·cos(α) falls off toward each silhouette |
+| 305° | Sun / NEAR_IR | Four identical panels at different tilts. NEAR_IR is reflected *ambient*, so orientation alone separates them while range and reflectivity do not |
+| 330° | Moving beacon | A rotating arm with a retroreflective paddle — exercises dynamic transforms, and honestly shows that `motion_distortion` corrects **ego** motion only, not moving targets |
+| — | Perimeter + ground | Walls at 60 m for long-range structure; a straight wall spanning many columns makes any azimuth/encoder-convention error obvious (it would break into arcs) |
+
+#### Channel coverage
+
+The zones are sized so that **one scan drives every Ouster channel across its
+whole domain**, not a narrow slice — a consumer that only ever sees a thin band
+of values can look correct in sim and fall over on real data. Measured from the
+`PointCloud2` that `os_cloud` assembles (12 scans, OS1-64 defaults):
+
+| Channel | min | max | Coverage |
+|---------|-----|-----|----------|
+| `intensity` (SIGNAL) | 0 | **65535** | 4.8 decades, ~7800 distinct values |
+| `reflectivity` | 0 | **255** | ~206 distinct values across 0–255 |
+| `ambient` (NEAR_IR) | 0 | **65535** | saturates on the sun-facing retro panel |
+| `range` | 0 | **113977 mm** | out to the 110 m perimeter (OS1 window is 120 m) |
+
+Two design points make the hard channels reachable:
+
+- **SIGNAL is the one a naive scene starves.** It goes as `ρ/r²`, so with
+  nothing closer than 6 m it never leaves single digits — before the intensity
+  ladder existed this world peaked at **195** of a possible 65535 (0.3% of the
+  channel), with a third of objects returning literally 0. The ladder walks in
+  to 1.2 m at *constant* `laser_retro`, so range alone sweeps it.
+- **Occlusion and detection limits are load-bearing.** The perimeter sits at
+  110 m rather than 60 m, because at 60 m it silently blocked the 70 m and
+  105 m range targets (max observed range was 69 m). Its `laser_retro` is 0.75
+  so that its own detection limit `120·√(0.75/0.8) = 116 m` stays beyond its
+  110 m distance — at the earlier 0.45 the wall would have been dropped by the
+  reflectance model instead of returning.
+
+Two further properties worth knowing:
+
+- **Self-contained.** Built entirely from `box`/`sphere`/`cylinder`/`plane`
+  primitives — no Fuel downloads, no external meshes. That is also a
+  correctness requirement: the raycast mirror only handles those plus `mesh`,
+  and silently skips `capsule`/`ellipsoid`/`heightmap`/`polyline`, which would
+  be visible in the GUI but invisible to the lidar. A structural test
+  (`test_worlds.py::test_visual_geometry_is_mirrorable`) enforces this for every
+  shipped world. The mesh/BVH path is covered by the TurtleBot3 example instead.
+- **Raycast mode.** It loads no render engine, so it runs headless anywhere. The
+  startup log should read `raycast scene mirror v1: 59 instances (0 meshes,
+  0 visuals skipped) from 59 visuals` — a non-zero "skipped" count means
+  something in the world is invisible to the sensor.
 
 ### How the URDF wires to the plugin
 
@@ -351,21 +423,32 @@ therefore configure `os_cloud` so the cloud's full TF chain to `base_link`
 is explicit:
 
 - `point_cloud_frame:=<name>/lidar_frame` — the `PointCloud2` is stamped in the
-  robot's lidar frame. It is **not** put in `os_lidar`: the metadata's
-  `lidar_to_sensor_transform` is the real Ouster 180° + 36 mm offset, which
-  would rotate the simulated cloud. (Set `point_cloud_frame:=<name>/os_lidar`
-  if you want that physical offset applied.)
-- `pub_static_tf:=true` with `sensor_frame:=<name>/lidar_frame` — the ouster
-  driver broadcasts its own `<name>/lidar_frame → <name>/os_lidar` and
-  `→ <name>/os_imu` static transforms from the metadata.
+  robot's lidar frame. The plugin's ranges are calibrated to the **standard
+  (identity) Ouster XYZ LUT**, so the cloud must be reconstructed **without** the
+  metadata's `lidar_to_sensor_transform` (the real Ouster 180° + 36 mm housing
+  offset) — applying it would rotate/shift the whole cloud.
+- The catch: `ouster_ros` applies `lidar_to_sensor_transform` **iff
+  `point_cloud_frame == sensor_frame`**
+  (`os_transforms_broadcaster.h::apply_lidar_to_sensor_transform()`). So the
+  launches keep the two **different** — `sensor_frame:=<name>/os_sensor` — to get
+  the identity LUT, and set `lidar_frame:=<name>/lidar_frame` equal to
+  `point_cloud_frame` so the driver's frame validation keeps the requested frame
+  (an unrecognised `point_cloud_frame` is otherwise reset to `lidar_frame` with a
+  warning). Setting `point_cloud_frame == sensor_frame` instead would apply the
+  housing rotation — the opposite of what a sim cloud aligned to the URDF frame
+  wants.
+- `pub_static_tf:=false` — with `sensor_frame != lidar_frame` the driver would
+  broadcast `sensor_frame → lidar_frame`, giving `<name>/lidar_frame` a second
+  parent on top of the `base_link → <name>/lidar_frame` mount, a TF-tree
+  conflict. The unused `os_lidar`/`os_imu` leaf frames are dropped; RSP and the
+  mount publisher own the tree.
 - A `static_transform_publisher` publishes `base_link → <name>/lidar_frame`
   (matching the URDF mount joint), so the cloud reaches `base_link` even if
   `robot_state_publisher` is not running. When RSP is up it publishes the same
   edge, which is harmless (a one-time `TF_REPEATED_DATA` warning).
 
 Net TF chain: `points (<name>/lidar_frame) → base_link → base_footprint`, via
-both the launch stack (RSP / the mount `static_transform_publisher`) and the
-ouster driver.
+the launch stack (RSP / the mount `static_transform_publisher`).
 
 ## Docker (standalone test)
 
@@ -562,7 +645,7 @@ All noise model parameters can be changed at runtime via
 |-----------|---------|-------|-------------|
 | `lidar_hz` | 10.0 | > 0 | Scan rate in Hz. |
 | `max_range` | *auto* | >= 1 | Max sensing range in metres. Auto-derived from metadata `prod_line` if not set (OS0: 50, OS1: 120, OS2: 240). Also sets the GPU far clip plane. |
-| `visibility_mask` | 4294967295 | 0 to 4294967295 | Gazebo render visibility mask applied to the panel cameras. Use to include or exclude visuals from raycasting. |
+| `visibility_mask` | 4294967295 | 0 to 4294967295 | **Panels mode only.** Gazebo render visibility mask applied to the panel depth cameras (a visual is seen when `visual.visibility_flags & visibility_mask != 0`), so it can include/exclude visuals from the rendered scan. Has **no effect in `raycast` mode**, which casts against every mirrored visual regardless. |
 | `ray_mode` | `panels` | `panels` \| `raycast` | `panels` renders a perspective depth-panel rig on the GPU and resamples each beam from it. `raycast` casts every beam exactly (calibrated direction, true beam-origin parallax) against an ECM scene mirror — zero interpolation error, with a per-visual material model: `laser_retro × cos(incidence)` diffuse + a specular lobe from the material `<specular>` (glossy/black paint signature) + see-through `<transparency>` (glass: pane vs object-behind, strongest return wins). Extended-Lambertian lidar equation per [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md); no rendering involved (no anchor-sensor requirement). CPU/OpenMP; mirrors box/sphere/cylinder/plane/mesh visuals. |
 | `panel_oversample` | 2.0 | 1 to 4 | Panels mode only. Panel angular resolution as a multiple of the sensor's finest angular resolution. Higher = sharper edges, more VRAM and render time. |
 | `panel_sampling` | `bilinear` | `bilinear` \| `nearest` | `bilinear` interpolates the 4 neighbouring rendered rays (smooth surfaces, but silhouettes blend fore/background range). `nearest` takes the single closest rendered ray — a true raycast with direction quantised to the pixel grid (≤ 1/(2·oversample) of the beam spacing) and no range blending at depth edges. |
