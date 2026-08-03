@@ -48,7 +48,11 @@ if(GZ_GPU_OUSTER_ENABLE_CUDA)
   )
   # CUDA target architectures. Honour an explicit -DCMAKE_CUDA_ARCHITECTURES /
   # CUDAARCHS (the Docker CUDA_ARCH build-arg maps to the former); otherwise
-  # default to a portable Volta→Ada list. Two traps this avoids:
+  # default to a portable architecture list supported by the active toolkit.
+  # CUDA 13 dropped Volta (SM 70), while CUDA 12.8 added Blackwell (SM 100).
+  # Keep those endpoints conditional so the default works across both toolkit
+  # generations without changing an explicit user-provided architecture list.
+  # Two traps this avoids:
   #  - the "all-major" keyword requires CMake >= 3.23 while this project
   #    declares a 3.18 minimum, and hardcoding it as a target property would
   #    override the documented CUDA_ARCH knob;
@@ -58,8 +62,16 @@ if(GZ_GPU_OUSTER_ENABLE_CUDA)
   #    user's actual intent as GZ_OUSTER_CUDA_ARCHS_USER_SET before any CUDA
   #    enablement, and that is what must be tested.
   if(NOT GZ_OUSTER_CUDA_ARCHS_USER_SET)
+    set(_gz_ouster_cuda_architectures 70 75 80 86 89)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+      list(REMOVE_ITEM _gz_ouster_cuda_architectures 70)
+    endif()
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
+      list(APPEND _gz_ouster_cuda_architectures 100)
+    endif()
     set_target_properties(gz_gpu_ouster_lidar_cuda PROPERTIES
-      CUDA_ARCHITECTURES "70;75;80;86;89")
+      CUDA_ARCHITECTURES "${_gz_ouster_cuda_architectures}")
+    unset(_gz_ouster_cuda_architectures)
   endif()
   target_link_libraries(gz_gpu_ouster_lidar_cuda CUDA::curand)
 endif()
