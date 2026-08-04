@@ -176,7 +176,9 @@ def generate_launch_description():
                 # lidar0/lidar_frame under sensor_frame (it already has the
                 # base_link mount parent from RSP / the static_transform_publisher).
                 'pub_static_tf': False,
-                'timestamp_mode': 'TIME_FROM_ROS_TIME',
+                # Preserve the plugin's sim-time acquisition stamps; receipt
+                # time varies with scheduling, RTF, and rosbag playback rate.
+                'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
             }],
         ),
 
@@ -194,7 +196,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': True,
-                'timestamp_mode': 'TIME_FROM_ROS_TIME',
+                'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
                 # Stamp images/camera_info in the URDF lidar frame. The os_image
                 # default 'os_lidar' is broadcast by nothing in this launch
                 # (pub_static_tf is false), so TF-consuming uses of the images

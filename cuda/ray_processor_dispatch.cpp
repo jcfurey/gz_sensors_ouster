@@ -147,6 +147,33 @@ void RayProcessor::castScan(
                        sp, range_out, retro_out, col_r, col_t, nir_out);
 }
 
+void RayProcessor::castScanProcessed(
+    const rc::SceneView & scene,
+    uint64_t scene_version,
+    const rc::InstanceXform * xforms,
+    const float * beam_alt_deg,
+    const float * beam_az_deg,
+    const float sensor_r[9],
+    const float sensor_t[3],
+    const rc::ScanParams & sp,
+    uint32_t * range_out,
+    uint16_t * signal_out,
+    uint8_t * reflectivity_out,
+    uint16_t * nearir_out,
+    const RayProcessParams & pp,
+    float * depth_scratch,
+    float * retro_scratch,
+    float * nir_scratch,
+    const float * col_r,
+    const float * col_t)
+{
+    backend_->castScanProcessed(
+        scene, scene_version, xforms,
+        beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+        range_out, signal_out, reflectivity_out, nearir_out, pp,
+        depth_scratch, retro_scratch, nir_scratch, col_r, col_t);
+}
+
 bool RayProcessor::usesCpuFallback() const
 {
     return backend_ && std::strcmp(backend_->name(), "cpu") == 0;

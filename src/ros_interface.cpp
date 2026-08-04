@@ -87,10 +87,14 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
         return q.keep_last(depth);
     };
 
-    // Packet publisher: SensorDataQoS (BEST_EFFORT). High-rate raw stream;
-    // a dropped packet is recoverable by os_cloud and never blocks the
-    // realtime path. Not user-overridable.
-    const auto pkt_qos = rclcpp::SensorDataQoS();
+    // Packet publisher: SensorDataQoS (BEST_EFFORT), with enough writer
+    // history for one complete scan. The default depth of five represents
+    // only ~8 ms for a 64-packet/10 Hz sensor; transient executor or transport
+    // contention could then discard a packet and make os_cloud reject the
+    // entire scan. BEST_EFFORT preserves the non-blocking realtime contract,
+    // while a full-scan writer queue absorbs that short contention.
+    const auto pkt_qos = rclcpp::SensorDataQoS().keep_last(
+        cfg_.lidar_packet_qos_depth);
     pkt_pub_ = node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
         abs_prefix + "/lidar_packets", pkt_qos);
 

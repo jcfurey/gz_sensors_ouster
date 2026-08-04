@@ -172,6 +172,30 @@ public:
         const float * col_t = nullptr,
         float * nir_out = nullptr);
 
+    /// Fused full-raycast + noise/channel synthesis. GPU backends keep the
+    /// depth/retro/NIR planes device-resident between kernels, then transfer
+    /// only the final channel arrays. The scratch planes are used by fallback
+    /// backends whose raycaster and processor communicate through host memory.
+    void castScanProcessed(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        uint32_t * range_out,
+        uint16_t * signal_out,
+        uint8_t * reflectivity_out,
+        uint16_t * nearir_out,
+        const RayProcessParams & pp,
+        float * depth_scratch,
+        float * retro_scratch,
+        float * nir_scratch,
+        const float * col_r = nullptr,
+        const float * col_t = nullptr);
+
     /// Returns true when the active backend is the CPU fallback (no GPU
     /// path is compiled in, or all GPU probes failed at construction).
     bool usesCpuFallback() const;

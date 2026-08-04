@@ -66,3 +66,11 @@ def test_panels_world_referenced(name):
 def test_no_anchor_type_launch_arg(name):
     """anchor_type is now derived from ray_mode inside the URDF; no launch arg."""
     assert "DeclareLaunchArgument('anchor_type'" not in (LAUNCHES / name).read_text()
+
+
+@pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
+def test_ouster_consumers_preserve_packet_acquisition_time(name):
+    """Cloud/image stamps must be invariant to executor and playback rate."""
+    src = (LAUNCHES / name).read_text()
+    assert 'TIME_FROM_ROS_TIME' not in src
+    assert 'TIME_FROM_INTERNAL_OSC' in src

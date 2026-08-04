@@ -85,7 +85,9 @@ def _os_cloud(name):
             'lidar_frame': name + '/lidar_frame',  # == point_cloud_frame → no frame reset
             'imu_frame': name + '/os_imu',
             'pub_static_tf': False,
-            'timestamp_mode': 'TIME_FROM_ROS_TIME',
+            # The plugin writes sim acquisition time into every column.
+            # Preserve it across executor jitter and bag rate scaling.
+            'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
         }],
     )
 
@@ -108,7 +110,7 @@ def _os_image(name):
         output='screen',
         parameters=[{
             'use_sim_time': True,
-            'timestamp_mode': 'TIME_FROM_ROS_TIME',
+            'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
             'sensor_frame': name + '/lidar_frame',
         }],
         condition=IfCondition(LaunchConfiguration('images')),

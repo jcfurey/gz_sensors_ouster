@@ -191,9 +191,10 @@ def generate_launch_description():
                 # static_transform_publisher below) — a TF-tree conflict. RSP +
                 # that mount publisher own the tree instead.
                 'pub_static_tf': False,
-                # Stamp on receipt with ROS (sim) time, sidestepping any epoch
-                # mismatch between the packet column timestamps and /clock.
-                'timestamp_mode': 'TIME_FROM_ROS_TIME',
+                # Preserve the packet's simulated acquisition timestamps.
+                # Receipt-time stamping depends on executor latency and changes
+                # when simulation or rosbag playback rate changes.
+                'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
             }],
         ),
 
@@ -214,7 +215,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': True,
-                'timestamp_mode': 'TIME_FROM_ROS_TIME',
+                'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
                 # Stamp images/camera_info in the URDF lidar frame. The os_image
                 # default is 'os_lidar', a frame nothing broadcasts here
                 # (pub_static_tf is false), which breaks TF-consuming uses

@@ -463,7 +463,7 @@ public:
         CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 
-    void castScan(
+    void launchCastScan(
         const rc::SceneView & scene,
         uint64_t scene_version,
         const rc::InstanceXform * xforms,
@@ -472,14 +472,12 @@ public:
         const float sensor_r[9],
         const float sensor_t[3],
         const rc::ScanParams & sp,
-        float * range_out,
-        float * retro_out,
         const float * col_r,
         const float * col_t,
-        float * nir_out) override
+        bool write_nir)
     {
         const int out_n = sp.H * sp.W;
-        if (nir_out) ensureNirBuffer(out_n);
+        if (write_nir) ensureNirBuffer(out_n);
         ensureBuffers(out_n);
         ensureRetroBuffer(out_n);
         ensureSceneBuffers(scene, scene_version);
@@ -552,13 +550,34 @@ public:
             static_cast<float *>(d_retro_),
             have_cols ? static_cast<const float *>(d_col_r_) : nullptr,
             have_cols ? static_cast<const float *>(d_col_t_) : nullptr,
-            nir_out ? static_cast<float *>(d_nir_f_) : nullptr,
+            write_nir ? static_cast<float *>(d_nir_f_) : nullptr,
             n_tlas_nodes > 0
                 ? static_cast<const rc::MeshBvhNode *>(d_tlas_nodes_) : nullptr,
             n_tlas_nodes > 0
                 ? static_cast<const int *>(d_tlas_order_) : nullptr,
             n_tlas_nodes);
         CUDA_CHECK(cudaGetLastError());
+    }
+
+    void castScan(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        float * range_out,
+        float * retro_out,
+        const float * col_r,
+        const float * col_t,
+        float * nir_out) override
+    {
+        const int out_n = sp.H * sp.W;
+        launchCastScan(scene, scene_version, xforms,
+                       beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+                       col_r, col_t, nir_out != nullptr);
 
         CUDA_CHECK(cudaMemcpyAsync(range_out, d_depth_,
             static_cast<size_t>(out_n) * sizeof(float),
@@ -571,6 +590,49 @@ public:
                 static_cast<size_t>(out_n) * sizeof(float),
                 cudaMemcpyDeviceToHost, stream_));
         }
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
+
+    void castScanProcessed(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        uint32_t * range_out,
+        uint16_t * signal_out,
+        uint8_t * reflectivity_out,
+        uint16_t * nearir_out,
+        const RayProcessParams & pp,
+        float * /*depth_scratch*/,
+        float * /*retro_scratch*/,
+        float * /*nir_scratch*/,
+        const float * col_r,
+        const float * col_t) override
+    {
+        const int out_n = sp.H * sp.W;
+        launchCastScan(scene, scene_version, xforms,
+                       beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+                       col_r, col_t, true);
+
+        const bool need_rand = noiseEnabled(pp);
+        if (need_rand) ensureRandStates(out_n);
+        launchRayProcessKernel(
+            static_cast<const float *>(d_depth_),
+            static_cast<const float *>(d_retro_),
+            static_cast<uint32_t *>(d_range_),
+            static_cast<uint16_t *>(d_signal_),
+            static_cast<uint8_t *>(d_refl_),
+            static_cast<uint16_t *>(d_nearir_),
+            pp,
+            need_rand ? d_rand_states_ : nullptr,
+            stream_,
+            static_cast<const float *>(d_nir_f_));
+
+        d2hResults(range_out, signal_out, reflectivity_out, nearir_out, out_n);
         CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 

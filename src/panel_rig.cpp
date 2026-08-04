@@ -133,7 +133,8 @@ bool PanelRig::ensureCreated(double max_range, uint32_t visibility_mask)
 }
 
 void PanelRig::renderScan(const ::gz::math::Pose3d & pose,
-                          FrameExchange & exch)
+                          FrameExchange & exch,
+                          const FrameMetadata & metadata)
 {
     if (cams_.empty()) return;
 
@@ -156,7 +157,7 @@ void PanelRig::renderScan(const ::gz::math::Pose3d & pose,
         // pending previous frame means PostUpdate didn't drain in time —
         // surface the drop so a sustained problem (sim-time stall,
         // post-pause burst) is visible in logs instead of silent.
-        if (exch.publish(pending_buf_, layout_.rp.raw_n)) {
+        if (exch.publish(pending_buf_, layout_.rp.raw_n, metadata)) {
             RCLCPP_WARN_THROTTLE(kLogger, throttle_clock_, 5000,
                 "%s: dropped rig frame (PostUpdate didn't drain); "
                 "total dropped=%lu", sensor_name_.c_str(),

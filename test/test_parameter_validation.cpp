@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // Test the parameter validation logic used in Configure().
 // This doesn't instantiate the full plugin — it tests the clamping/validation
@@ -24,6 +25,7 @@ struct ValidatedParams {
     double base_reflectivity   = 50.0;
     double max_range           = 120.0;
     double lidar_hz            = 10.0;
+    double imu_hz              = 100.0;
 
     void validate()
     {
@@ -37,7 +39,8 @@ struct ValidatedParams {
         base_signal           = std::max(0.0, base_signal);
         base_reflectivity     = std::clamp(base_reflectivity, 0.0, 255.0);
         max_range             = std::max(1.0, max_range);
-        if (lidar_hz <= 0.0) lidar_hz = 10.0;
+        if (!std::isfinite(lidar_hz) || lidar_hz <= 0.0) lidar_hz = 10.0;
+        if (!std::isfinite(imu_hz) || imu_hz <= 0.0) imu_hz = 100.0;
     }
 };
 
@@ -143,6 +146,16 @@ TEST(ParameterValidation, PositiveLidarHzUnchanged)
     p.lidar_hz = 0.5;
     p.validate();
     EXPECT_DOUBLE_EQ(p.lidar_hz, 0.5);
+}
+
+TEST(ParameterValidation, NonFiniteSensorRatesResetToDefaults)
+{
+    ValidatedParams p;
+    p.lidar_hz = std::numeric_limits<double>::quiet_NaN();
+    p.imu_hz = std::numeric_limits<double>::infinity();
+    p.validate();
+    EXPECT_DOUBLE_EQ(p.lidar_hz, 10.0);
+    EXPECT_DOUBLE_EQ(p.imu_hz, 100.0);
 }
 
 TEST(ParameterValidation, LargeValuesPassThrough)

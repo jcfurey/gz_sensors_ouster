@@ -31,7 +31,7 @@ public:
     {
         processRawCpu(raw_host, beam_alt_host, beam_az_host, rp,
                       range_out, signal_out, reflectivity_out, nearir_out,
-                      pp, seed_);
+                      pp, frameSeed());
     }
 
     void processDepth(
@@ -46,7 +46,7 @@ public:
     {
         processCpu(depth_host, retro_host,
                    range_out, signal_out, reflectivity_out, nearir_out,
-                   pp, seed_, nir_host);
+                   pp, frameSeed(), nir_host);
     }
 
     void castScan(
@@ -82,7 +82,19 @@ public:
     const char * name() const override { return "cpu"; }
 
 private:
+    uint64_t frameSeed()
+    {
+        if (seed_ == 0) return 0;
+        // Explicit seeds define a reproducible sequence, not a frozen frame.
+        // SplitMix's Weyl increment makes adjacent frame seeds independent.
+        uint64_t x = seed_ + frame_counter_++ * 0x9E3779B97F4A7C15ULL;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+        return x ^ (x >> 31);
+    }
+
     uint64_t seed_;
+    uint64_t frame_counter_ = 0;
     rc::Tlas tlas_;   // per-scan top-level BVH; capacity reused
 };
 

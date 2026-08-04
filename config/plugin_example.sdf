@@ -143,8 +143,9 @@
   <!-- <accel_bias_walk>1.0e-5</accel_bias_walk> -->  <!-- m/s³/√Hz -->
 
   <!-- ─── QoS overrides (optional) ─────────────────────────────────── -->
-  <!-- lidar_packets always uses SensorDataQoS (BEST_EFFORT) — that's what
-       os_cloud expects and is not user-overridable. For everything else,
+  <!-- lidar_packets always uses SensorDataQoS (BEST_EFFORT), with one full
+       scan of writer history — that's what os_cloud expects and is not
+       user-overridable. For everything else,
        choose the QoS that matches your downstream subscribers. On
        rmw_zenoh_cpp publisher and subscriber QoS must match exactly
        (neither BE-pub-to-RELIABLE-sub nor the reverse work). Accepted

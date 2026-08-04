@@ -133,4 +133,38 @@ TEST(Dispatch, ProcessRawThroughWrapperProducesUniformRange)
     }
 }
 
+TEST(Dispatch, SeededCpuNoiseIsReproducibleButNotFrozenAcrossFrames)
+{
+    BackendEnvGuard guard("cpu");
+    constexpr int H = 16, W = 64;
+    const int n = H * W;
+    std::vector<float> depth(n, 20.0f);
+
+    RayProcessParams pp{};
+    pp.H = H;
+    pp.W = W;
+    pp.base_signal = 800.0f;
+    pp.base_reflectivity = 50.0f;
+    pp.max_range = 120.0f;
+    pp.range_noise_min_std = 0.05f;
+    pp.range_noise_max_std = 0.05f;
+
+    auto run = [&](RayProcessor & proc, std::vector<uint32_t> & range) {
+        std::vector<uint16_t> signal(n), nearir(n);
+        std::vector<uint8_t> refl(n);
+        proc.processDepth(depth.data(), nullptr, range.data(), signal.data(),
+                          refl.data(), nearir.data(), pp);
+    };
+
+    RayProcessor a{9876u};
+    RayProcessor b{9876u};
+    std::vector<uint32_t> a_first(n), a_second(n), b_first(n);
+    run(a, a_first);
+    run(a, a_second);
+    run(b, b_first);
+
+    EXPECT_EQ(a_first, b_first);   // same seed, same first frame
+    EXPECT_NE(a_first, a_second);  // sequence advances between frames
+}
+
 }  // namespace gz_gpu_ouster_lidar

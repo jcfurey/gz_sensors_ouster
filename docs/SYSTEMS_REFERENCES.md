@@ -16,7 +16,7 @@ background thread services parameter callbacks and middleware housekeeping.
 
 | Topic | QoS | Grounding |
 |---|---|---|
-| `lidar_packets` | `SensorDataQoS` (BEST_EFFORT), fixed | Maruyama et al. (EMSOFT 2016) measured BEST_EFFORT outperforming RELIABLE at high rates and larger payloads; a dropped raw packet is recoverable downstream and must never block the sim thread. |
+| `lidar_packets` | `SensorDataQoS` (BEST_EFFORT), one-scan writer history | Maruyama et al. (EMSOFT 2016) measured BEST_EFFORT outperforming RELIABLE at high rates and larger payloads. A full-scan history absorbs short executor / transport stalls without making the simulator block. |
 | images / CameraInfo | RELIABLE `KEEP_LAST(5)`, configurable | Matches the default subscriber QoS of RViz/image_transport; mismatched pub/sub QoS is the canonical silent-failure mode, and `rmw_zenoh_cpp` requires an exact match in both directions (documented at the `qos_from_string` helper). |
 | `metadata` | RELIABLE `TRANSIENT_LOCAL(1)` | Latched config topic — the standard late-joiner pattern. The sim-time-throttled republish loop exists because transient-local replay across processes is unreliable on `rmw_zenoh_cpp` (observed; see code comment). |
 | IMU | `sensor_data`, configurable | Mirrors the ouster_ros driver convention so sim↔hardware topic swaps don't require subscriber changes. |
@@ -89,7 +89,7 @@ subscriber), and messages are `std::move`d into the rmw layer.
 ### Audited and confirmed
 
 - **Single dedicated stream per backend, `cudaMemcpyAsync` + one
-  `cudaStreamSynchronize` per stage** — the canonical small-pipeline
+  `cudaStreamSynchronize` per completed pipeline** — the canonical small-pipeline
   pattern (NVIDIA, *How to Optimize Data Transfers in CUDA C/C++*).
 - **Persistent device buffers and curand/hiprand states** (allocated once,
   re-seeded never; states stride per ray) — avoids the well-known
@@ -103,6 +103,12 @@ subscriber), and messages are `std::move`d into the rmw layer.
 - **Cached beam-table upload**: the per-beam calibration arrays are
   constant for a sensor's lifetime, so all three GPU backends upload them
   once (keyed by host pointer + count) instead of every frame.
+- **Native fused CUDA raycast processing**: the cast and channel/noise kernels
+  run consecutively on the same stream. Depth, reflectance, and near-IR remain
+  device-resident, eliminating three float-plane D2H copies, the matching H2D
+  copies, and an intermediate synchronization (24 bytes of transfer per beam).
+  HIP and SYCL retain the exact host-composed fallback until they receive
+  native fused entries.
 - **Kernel launch count is 1–2 per frame**, so launch-overhead remedies
   (CUDA Graphs, persistent kernels) have nothing to amortise; AstroAccelerate
   (arXiv:2101.00941) shows stream/graph restructuring pays off at tens of

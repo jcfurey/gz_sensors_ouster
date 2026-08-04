@@ -348,6 +348,17 @@ if(BUILD_TESTING)
   target_include_directories(test_frame_exchange PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+  # Test: exact scan-column and sim-time cadence math (header-only)
+  ament_add_gtest(test_scan_timing test/test_scan_timing.cpp)
+  target_include_directories(test_scan_timing PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  ament_add_gtest(test_sim_time_scheduler test/test_sim_time_scheduler.cpp)
+  target_include_directories(test_sim_time_scheduler PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  ament_add_gtest(test_packet_pacing test/test_packet_pacing.cpp)
+  target_include_directories(test_packet_pacing PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
   # Test: IMU noise model (CPU-only, no Gazebo dep)
   ament_add_gtest(test_imu_noise test/test_imu_noise.cpp)
   target_link_libraries(test_imu_noise gz_gpu_ouster_lidar_cuda)

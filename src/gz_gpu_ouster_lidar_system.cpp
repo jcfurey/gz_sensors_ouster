@@ -299,11 +299,11 @@ void GzGpuOusterLidarSystem::Configure(
     };
     validate_qos(image_qos_, "image_qos", "reliable");
     validate_qos(imu_qos_,   "imu_qos",   "sensor_data");
-    if (lidar_hz_ <= 0.0) {
+    if (!std::isfinite(lidar_hz_) || lidar_hz_ <= 0.0) {
         RCLCPP_WARN(kLogger, "lidar_hz must be > 0, got %f; defaulting to 10", lidar_hz_);
         lidar_hz_ = 10.0;
     }
-    if (imu_enabled_ && imu_hz_ <= 0.0) {
+    if (imu_enabled_ && (!std::isfinite(imu_hz_) || imu_hz_ <= 0.0)) {
         RCLCPP_WARN(kLogger, "imu_hz must be > 0, got %f; defaulting to 100", imu_hz_);
         imu_hz_ = 100.0;
     }
@@ -388,6 +388,7 @@ void GzGpuOusterLidarSystem::Configure(
                              static_cast<uint8_t>(base_reflectivity_));
     nearir_buf_.resize(static_cast<size_t>(n), 0);
     exchange_ = std::make_unique<FrameExchange>();
+    processed_exchange_ = std::make_unique<ProcessedFrameExchange>();
     if (imu_enabled_ && meta_->imu_packet_size > 0) {
         imu_pkt_buf_.resize(meta_->imu_packet_size, 0);
     }
@@ -435,6 +436,8 @@ void GzGpuOusterLidarSystem::Configure(
         cfg.metadata_str = meta_->metadata_str;
         cfg.H = meta_->H;
         cfg.W = meta_->W;
+        cfg.lidar_packet_qos_depth = static_cast<size_t>(
+            std::max(5, meta_->W / meta_->cpp));
         cfg.beam_alt_angles = &meta_->beam_alt_angles;
         cfg.lidar_hz = lidar_hz_;
         cfg.max_range = max_range_;
@@ -511,8 +514,7 @@ void GzGpuOusterLidarSystem::Configure(
         mp.motion_distortion = motion_distortion_;
         mp.beam_alt_f = &meta_->beam_alt_f;
         mp.beam_az_f = &meta_->beam_az_f;
-        mirror_->start(mp, ray_processor_.get(), &processor_mtx_,
-                       exchange_.get());
+        mirror_->start(mp, ray_processor_.get(), processed_exchange_.get());
         // Nothing render-side to initialise — unblock PostUpdate immediately.
         sensor_initialized_.store(true, std::memory_order_release);
     }
@@ -556,20 +558,20 @@ void GzGpuOusterLidarSystem::OnRender()
         // matches the sim-time packet timestamps. Rendering when the sim time
         // has rewound (world reset: sim_ns < last) re-arms instead of stalling
         // until the clock catches back up.
-        const int64_t sim_ns = latest_sim_ns_.load(std::memory_order_acquire);
-        const int64_t period_ns = static_cast<int64_t>(1e9 / lidar_hz_);
-        if (last_render_sim_ns_ >= 0 && sim_ns >= last_render_sim_ns_ &&
-            sim_ns - last_render_sim_ns_ < period_ns) {
-            return;
-        }
-        last_render_sim_ns_ = sim_ns;
-
         ::gz::math::Pose3d pose;
+        FrameMetadata metadata;
         {
             std::lock_guard<std::mutex> lk(pose_mtx_);
             pose = cached_pose_;
+            metadata.scan_end_ns = cached_pose_sim_ns_;
+            metadata.epoch = cached_pose_epoch_;
         }
-        rig_->renderScan(pose, *exchange_);
+        const auto gate = panel_scan_gate_.advance(
+            std::chrono::nanoseconds(metadata.scan_end_ns),
+            periodFromHz(lidar_hz_));
+        if (!gate.due) return;
+
+        rig_->renderScan(pose, *exchange_, metadata);
         return;
     }
 
@@ -636,6 +638,16 @@ void GzGpuOusterLidarSystem::PostUpdate(
         }
     }
 
+    const auto sim_now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+    if (last_post_sim_time_.count() >= 0 && sim_now_ns < last_post_sim_time_) {
+        ++sim_epoch_;
+    }
+    last_post_sim_time_ = sim_now_ns;
+    if (encoder_) {
+        encoder_->setSimulationState(info.paused, sim_epoch_);
+    }
+
     // Publish the paused state for the render thread: OnRender skips scan
     // renders while paused. A mid-pause render could only capture a world the
     // user is editing in the GUI, and PostUpdate would not consume the frame
@@ -645,14 +657,6 @@ void GzGpuOusterLidarSystem::PostUpdate(
     if (info.paused) {
         return;
     }
-
-    // Publish the current sim time for the render thread's sim-time throttle
-    // (panels mode). No unpause re-anchoring is needed for the sim-time
-    // throttles: sim time does not advance while paused, and a world-reset
-    // rewind is handled by each throttle's own rewind guard.
-    const auto sim_now_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
-    latest_sim_ns_.store(sim_now_ns.count(), std::memory_order_release);
 
     if (!sensor_initialized_.load(std::memory_order_acquire)) return;
     if (!ros_) return;
@@ -778,6 +782,8 @@ void GzGpuOusterLidarSystem::PostUpdate(
         auto worldPose = ::gz::sim::worldPose(lidar_frame_entity_, ecm);
         std::lock_guard<std::mutex> lk(pose_mtx_);
         cached_pose_ = worldPose;
+        cached_pose_sim_ns_ = sim_now_ns.count();
+        cached_pose_epoch_ = sim_epoch_;
     }
 
     // ── Full raycast mode: mirror the scene and post a scan job ─────────────
@@ -787,7 +793,29 @@ void GzGpuOusterLidarSystem::PostUpdate(
             std::lock_guard<std::mutex> lk(pose_mtx_);
             sensor_pose = cached_pose_;
         }
-        mirror_->postUpdate(info, ecm, sensor_pose);
+        const auto process_params = makeRayProcessParams();
+        if (!memory_logged_) {
+            const size_t n = static_cast<size_t>(meta_->H) * meta_->W;
+            const size_t intermediate_bytes = 3 * n * sizeof(float);
+            const size_t channel_bytes = n *
+                (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t) +
+                 sizeof(uint16_t));
+            const size_t rand_bytes = noiseEnabled(process_params)
+                ? n * 48 : 0;
+            const size_t total =
+                intermediate_bytes + channel_bytes + rand_bytes;
+            RCLCPP_INFO(kLogger,
+                "%s: GPU buffers ~%.1f MiB (%s fused raycast) — "
+                "device intermediates=%.1f channels=%.1f rand=%.1f",
+                sensor_name_.c_str(), total / 1048576.0,
+                ray_processor_->backendName(),
+                intermediate_bytes / 1048576.0,
+                channel_bytes / 1048576.0,
+                rand_bytes / 1048576.0);
+            memory_logged_ = true;
+        }
+        mirror_->postUpdate(
+            info, ecm, sensor_pose, sim_epoch_, process_params);
     }
 
     // ── Process any pending frame ────────────────────────────────────────────
@@ -796,13 +824,40 @@ void GzGpuOusterLidarSystem::PostUpdate(
     // sensors) runs without holding the exchange lock, so the producer is
     // free to hand over a new frame concurrently.
     int local_n = 0;
-    if (exchange_->take(process_buf_, local_n) && !process_buf_.empty()) {
-        const auto stamp_ns =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                info.simTime).count();
-        guarded("scan", [&] {
-            encodeAndPublish(stamp_ns, process_buf_.data(), local_n);
-        });
+    FrameMetadata frame_metadata;
+    if (ray_mode_ == "raycast" && processed_exchange_->take(
+            range_buf_, signal_buf_, reflectivity_buf_, nearir_buf_,
+            local_n, frame_metadata)) {
+        if (frame_metadata.epoch != sim_epoch_) {
+            RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 5000,
+                "%s: dropping stale scan from epoch %lu after reset to %lu",
+                sensor_name_.c_str(),
+                static_cast<unsigned long>(frame_metadata.epoch),
+                static_cast<unsigned long>(sim_epoch_));
+        } else if (local_n != meta_->H * meta_->W) {
+            RCLCPP_ERROR_THROTTLE(kLogger, *ros_->clock(), 5000,
+                "%s: processed raycast frame size %d != expected %d; dropping",
+                sensor_name_.c_str(), local_n, meta_->H * meta_->W);
+        } else {
+            guarded("scan", [&] {
+                publishChannels(frame_metadata.scan_end_ns);
+            });
+        }
+    } else if (ray_mode_ != "raycast" &&
+               exchange_->take(process_buf_, local_n, frame_metadata) &&
+               !process_buf_.empty()) {
+        if (frame_metadata.epoch != sim_epoch_) {
+            RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 5000,
+                "%s: dropping stale scan from epoch %lu after reset to %lu",
+                sensor_name_.c_str(),
+                static_cast<unsigned long>(frame_metadata.epoch),
+                static_cast<unsigned long>(sim_epoch_));
+        } else {
+            guarded("scan", [&] {
+                encodeAndPublish(frame_metadata.scan_end_ns,
+                                 process_buf_.data(), local_n);
+            });
+        }
     }
 
     // ── Publish IMU at configured rate ──────────────────────────────────────
@@ -813,35 +868,12 @@ void GzGpuOusterLidarSystem::PostUpdate(
 
 // ── Encode depth → Ouster packets ───────────────────────────────────────────
 
-void GzGpuOusterLidarSystem::encodeAndPublish(
-    int64_t stamp_ns,
-    const float * raw_data, int raw_n)
+RayProcessParams GzGpuOusterLidarSystem::makeRayProcessParams() const
 {
-    if (stamp_ns <= 0) return;
-    if (!meta_ || !ray_processor_ || !encoder_ || !ros_) return;
-    const int H = meta_->H;
-    const int W = meta_->W;
-    if (H <= 0 || W <= 0) return;
-
-    const bool raycast = (ray_mode_ == "raycast");
-    const int expected_n =
-        raycast ? 3 * H * W
-                : (rig_ ? rig_->resampleParams().raw_n : 0);
-    if (raw_n != expected_n) {
-        if (ros_->clock()) {
-            RCLCPP_ERROR_THROTTLE(kLogger, *ros_->clock(), 5000,
-                "%s: raw frame size %d != expected %d; dropping",
-                sensor_name_.c_str(), raw_n, expected_n);
-        }
-        return;
-    }
-
-    // ── Snapshot noise parameters (may be updated by ROS param callback) ───
     const NoiseParams noise = ros_->noiseSnapshot();
-
-    RayProcessParams pp;
-    pp.H = H;
-    pp.W = W;
+    RayProcessParams pp{};
+    pp.H = meta_->H;
+    pp.W = meta_->W;
     pp.base_signal = static_cast<float>(noise.base_signal);
     pp.base_reflectivity = static_cast<float>(noise.base_reflectivity);
     pp.range_noise_min_std = static_cast<float>(noise.range_noise_min_std);
@@ -854,6 +886,30 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
     pp.false_alarm_rate = static_cast<float>(noise.false_alarm_rate);
     pp.edge_discon_threshold =
         static_cast<float>(noise.edge_discon_threshold);
+    return pp;
+}
+
+void GzGpuOusterLidarSystem::encodeAndPublish(
+    int64_t stamp_ns,
+    const float * raw_data, int raw_n)
+{
+    if (stamp_ns <= 0) return;
+    if (!meta_ || !ray_processor_ || !encoder_ || !ros_) return;
+    const int H = meta_->H;
+    const int W = meta_->W;
+    if (H <= 0 || W <= 0) return;
+
+    const int expected_n = rig_ ? rig_->resampleParams().raw_n : 0;
+    if (raw_n != expected_n) {
+        if (ros_->clock()) {
+            RCLCPP_ERROR_THROTTLE(kLogger, *ros_->clock(), 5000,
+                "%s: raw frame size %d != expected %d; dropping",
+                sensor_name_.c_str(), raw_n, expected_n);
+        }
+        return;
+    }
+
+    const RayProcessParams pp = makeRayProcessParams();
 
     // ── GPU pipeline: resample/cast results → noise → channel outputs ───────
     if (!memory_logged_) {
@@ -882,39 +938,27 @@ void GzGpuOusterLidarSystem::encodeAndPublish(
             rand_bytes / 1048576.0);
         memory_logged_ = true;
     }
-    {
-        // processor_mtx_ serialises against the raycast worker's castScan
-        // (shared backend buffers/stream); uncontended in panels mode.
-        std::lock_guard<std::mutex> proc_lk(processor_mtx_);
-        if (raycast) {
-            // The worker already produced exact per-beam ranges (and
-            // laser_retro for the reflectivity/signal model) — only the
-            // noise/channel stage runs here.
-            ray_processor_->processDepth(
-                raw_data,
-                raw_data + static_cast<size_t>(H) * W,
-                range_buf_.data(),
-                signal_buf_.data(),
-                reflectivity_buf_.data(),
-                nearir_buf_.data(),
-                pp,
-                raw_data + 2 * static_cast<size_t>(H) * W);
-        } else {
-            ray_processor_->processRaw(
-                raw_data,
-                meta_->beam_alt_f.data(),
-                meta_->beam_az_f.data(),
-                rig_->resampleParams(),
-                range_buf_.data(),
-                signal_buf_.data(),
-                reflectivity_buf_.data(),
-                nearir_buf_.data(),
-                pp);
-        }
-    }
+    ray_processor_->processRaw(
+        raw_data,
+        meta_->beam_alt_f.data(),
+        meta_->beam_az_f.data(),
+        rig_->resampleParams(),
+        range_buf_.data(),
+        signal_buf_.data(),
+        reflectivity_buf_.data(),
+        nearir_buf_.data(),
+        pp);
+
+    publishChannels(stamp_ns);
+}
+
+void GzGpuOusterLidarSystem::publishChannels(int64_t stamp_ns)
+{
+    if (stamp_ns <= 0 || !encoder_ || !ros_) return;
 
     // ── Packets + image topics ───────────────────────────────────────────────
-    encoder_->encodeScan(stamp_ns, range_buf_.data(), signal_buf_.data(),
+    encoder_->encodeScan(stamp_ns, sim_epoch_,
+                         range_buf_.data(), signal_buf_.data(),
                          reflectivity_buf_.data(), nearir_buf_.data());
     ros_->publishImages(stamp_ns, range_buf_.data(), signal_buf_.data(),
                         reflectivity_buf_.data(), nearir_buf_.data());
@@ -927,17 +971,6 @@ void GzGpuOusterLidarSystem::publishImu(
     const ::gz::sim::EntityComponentManager & ecm)
 {
     if (!meta_ || !meta_->pw || !ros_) return;
-
-    // ── Rate limiting (sim time) ─────────────────────────────────────────
-    const auto sim_now = std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
-    const auto imu_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::duration<double>(1.0 / imu_hz_));
-
-    // Skip until a full imu_period has elapsed — but if sim time has rewound
-    // (world reset), fall through and re-anchor instead of stalling until the
-    // clock catches back up.
-    if (sim_now >= last_imu_sim_time_ && sim_now - last_imu_sim_time_ < imu_period) return;
-    last_imu_sim_time_ = sim_now;
 
     // ── Read IMU data from ECM ───────────────────────────────────────────
     auto * angVelComp = ecm.Component<::gz::sim::components::AngularVelocity>(imu_entity_);
@@ -972,6 +1005,70 @@ void GzGpuOusterLidarSystem::publishImu(
     const auto gravity_body = R.RotateVectorReverse(world_gravity_);
     const ::gz::math::Vector3d la_proper = la_raw - gravity_body;
 
+    const auto sim_now =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+    const auto imu_period = periodFromHz(imu_hz_);
+    const auto batch = imu_scheduler_.advance(sim_now, imu_period);
+
+    const Vec3 current_av{av.X(), av.Y(), av.Z()};
+    const Vec3 current_la{la_proper.X(), la_proper.Y(), la_proper.Z()};
+
+    if (batch.reset) {
+        // A world reset starts a new stochastic sensor epoch. Carrying a bias
+        // random walk backwards through time makes bag concatenation and
+        // repeatable reset tests physically inconsistent.
+        gyro_bias_ = {0.0, 0.0, 0.0};
+        accel_bias_ = {0.0, 0.0, 0.0};
+        imu_state_valid_ = false;
+    }
+    if (batch.skipped > 0) {
+        RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 5000,
+            "%s: IMU sim time jumped; skipped %lu oldest catch-up samples",
+            sensor_name_.c_str(),
+            static_cast<unsigned long>(batch.skipped));
+    }
+
+    const Vec3 previous_av = imu_state_valid_ ? imu_prev_av_ : current_av;
+    const Vec3 previous_la = imu_state_valid_ ? imu_prev_la_ : current_la;
+    const auto previous_time = imu_state_valid_ ? imu_prev_state_time_ : sim_now;
+    const int64_t span_ns = (sim_now - previous_time).count();
+    const double sample_dt =
+        static_cast<double>(imu_period.count()) / 1.0e9;
+
+    auto interpolate = [](const Vec3 & a, const Vec3 & b, double t) {
+        return Vec3{
+            a.x + (b.x - a.x) * t,
+            a.y + (b.y - a.y) * t,
+            a.z + (b.z - a.z) * t};
+    };
+    for (size_t i = 0; i < batch.size; ++i) {
+        const double alpha = (span_ns > 0)
+            ? std::clamp(
+                static_cast<double>((batch.deadlines[i] - previous_time).count()) /
+                    static_cast<double>(span_ns),
+                0.0, 1.0)
+            : 1.0;
+        publishImuSample(
+            batch.deadlines[i].count(),
+            interpolate(previous_av, current_av, alpha),
+            interpolate(previous_la, current_la, alpha),
+            sample_dt);
+    }
+
+    imu_prev_state_time_ = sim_now;
+    imu_prev_av_ = current_av;
+    imu_prev_la_ = current_la;
+    imu_state_valid_ = true;
+}
+
+void GzGpuOusterLidarSystem::publishImuSample(
+    int64_t stamp_ns,
+    const Vec3 & nominal_av,
+    const Vec3 & nominal_la,
+    double sample_dt)
+{
+    if (!meta_ || !meta_->pw || !ros_) return;
+
     // ── IMU noise + bias model ───────────────────────────────────────────
     // Math lives in cuda/imu_noise.{hpp,cpp} so it's testable without
     // spinning Gazebo. Defaults match Ouster Os1 datasheet; downstream
@@ -981,21 +1078,17 @@ void GzGpuOusterLidarSystem::publishImu(
         imu_rng_seeded_ = true;
     }
     const NoiseParams noise = ros_->noiseSnapshot();
-    const Vec3 nominal_av = {av.X(), av.Y(), av.Z()};
-    const Vec3 nominal_la = {la_proper.X(), la_proper.Y(), la_proper.Z()};
     const ImuNoiseSample noisy = applyImuNoise(
         nominal_av, nominal_la,
         gyro_bias_, accel_bias_,
         noise.gyro_noise_std, noise.accel_noise_std,
         noise.gyro_bias_walk, noise.accel_bias_walk,
-        1.0 / imu_hz_,
+        sample_dt,
         imu_rng_);
-    const ::gz::math::Vector3d av_meas(noisy.av.x, noisy.av.y, noisy.av.z);
-    const ::gz::math::Vector3d la(noisy.la.x, noisy.la.y, noisy.la.z);
+    const Vec3 & av_meas = noisy.av;
+    const Vec3 & la = noisy.la;
     const double gyro_white  = noisy.gyro_white_std;   // for covariance below
     const double accel_white = noisy.accel_white_std;
-
-    const int64_t stamp_ns = sim_now.count();
 
     // ── Encode Ouster IMU PacketMsg ──────────────────────────────────────
     if (ros_->imuPacketWanted() && !imu_pkt_buf_.empty()) {
@@ -1022,12 +1115,12 @@ void GzGpuOusterLidarSystem::publishImu(
         }
 
         // Accel/gyro values — PacketWriter writes at profile-correct offsets.
-        meta_->pw->set_imu_la_x(buf, static_cast<float>(la.X()));
-        meta_->pw->set_imu_la_y(buf, static_cast<float>(la.Y()));
-        meta_->pw->set_imu_la_z(buf, static_cast<float>(la.Z()));
-        meta_->pw->set_imu_av_x(buf, static_cast<float>(av_meas.X()));
-        meta_->pw->set_imu_av_y(buf, static_cast<float>(av_meas.Y()));
-        meta_->pw->set_imu_av_z(buf, static_cast<float>(av_meas.Z()));
+        meta_->pw->set_imu_la_x(buf, static_cast<float>(la.x));
+        meta_->pw->set_imu_la_y(buf, static_cast<float>(la.y));
+        meta_->pw->set_imu_la_z(buf, static_cast<float>(la.z));
+        meta_->pw->set_imu_av_x(buf, static_cast<float>(av_meas.x));
+        meta_->pw->set_imu_av_y(buf, static_cast<float>(av_meas.y));
+        meta_->pw->set_imu_av_z(buf, static_cast<float>(av_meas.z));
 
         ros_->publishImuPacket(imu_pkt_buf_);
     }
@@ -1039,13 +1132,13 @@ void GzGpuOusterLidarSystem::publishImu(
         msg.header.stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000LL);
         msg.header.frame_id = imu_frame_id_;
 
-        msg.angular_velocity.x = av_meas.X();
-        msg.angular_velocity.y = av_meas.Y();
-        msg.angular_velocity.z = av_meas.Z();
+        msg.angular_velocity.x = av_meas.x;
+        msg.angular_velocity.y = av_meas.y;
+        msg.angular_velocity.z = av_meas.z;
 
-        msg.linear_acceleration.x = la.X();
-        msg.linear_acceleration.y = la.Y();
-        msg.linear_acceleration.z = la.Z();
+        msg.linear_acceleration.x = la.x;
+        msg.linear_acceleration.y = la.y;
+        msg.linear_acceleration.z = la.z;
 
         // Covariance derived from the actual noise model: diagonal = σ²
         // where σ is the per-sample white-noise standard deviation. Falls

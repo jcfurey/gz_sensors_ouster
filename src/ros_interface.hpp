@@ -40,6 +40,7 @@ struct RosInterfaceConfig {
     std::string metadata_str;
     int H = 0;
     int W = 0;
+    size_t lidar_packet_qos_depth = 5;
     const std::vector<double> * beam_alt_angles = nullptr;  ///< CameraInfo fy
     double lidar_hz = 10.0;
     double max_range = 120.0;

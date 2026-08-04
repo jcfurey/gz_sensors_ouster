@@ -77,6 +77,37 @@ public:
         const float * col_t,
         float * nir_out) = 0;
 
+    /// Fused entry. The default is the exact two-stage host path, so every
+    /// backend remains correct; discrete GPU backends override this to keep
+    /// intermediate float planes resident on-device.
+    virtual void castScanProcessed(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        uint32_t * range_out,
+        uint16_t * signal_out,
+        uint8_t * reflectivity_out,
+        uint16_t * nearir_out,
+        const RayProcessParams & pp,
+        float * depth_scratch,
+        float * retro_scratch,
+        float * nir_scratch,
+        const float * col_r,
+        const float * col_t)
+    {
+        castScan(scene, scene_version, xforms,
+                 beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+                 depth_scratch, retro_scratch, col_r, col_t, nir_scratch);
+        processDepth(depth_scratch, retro_scratch,
+                     range_out, signal_out, reflectivity_out, nearir_out,
+                     pp, nir_scratch);
+    }
+
     /// Short identifier: "cuda", "hip", "sycl", or "cpu".
     virtual const char * name() const = 0;
 };

@@ -6,6 +6,7 @@
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 
 #include <cstring>
+#include <exception>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -90,11 +91,10 @@ RaycastMirror::~RaycastMirror()
 }
 
 void RaycastMirror::start(const Params & p, RayProcessor * proc,
-                          std::mutex * proc_mtx, FrameExchange * exch)
+                          ProcessedFrameExchange * exch)
 {
     params_ = p;
     proc_ = proc;
-    proc_mtx_ = proc_mtx;
     exch_ = exch;
     thread_ = std::thread(&RaycastMirror::threadFunc, this);
 }
@@ -312,7 +312,9 @@ void RaycastMirror::buildColumnPoses(std::chrono::nanoseconds scan_end,
 void RaycastMirror::postUpdate(
     const ::gz::sim::UpdateInfo & info,
     const ::gz::sim::EntityComponentManager & ecm,
-    const ::gz::math::Pose3d & sensor_pose)
+    const ::gz::math::Pose3d & sensor_pose,
+    uint64_t epoch,
+    const RayProcessParams & process_params)
 {
     // Record the sensor pose every tick (cheap) so per-column poses can be
     // interpolated over the scan period; trim history older than one period
@@ -339,51 +341,77 @@ void RaycastMirror::postUpdate(
         }
     }
 
-    // Rebuild the geometry mirror when the visual population changes
-    // (spawn/despawn). Pure pose changes are handled per scan below.
-    size_t visual_count = 0;
-    ecm.Each<::gz::sim::components::Visual,
-             ::gz::sim::components::Geometry>(
-        [&visual_count](const ::gz::sim::Entity &,
-                        const ::gz::sim::components::Visual *,
-                        const ::gz::sim::components::Geometry *) -> bool {
-            ++visual_count;
-            return true;
-        });
-    if (!scene_ || visual_count != visual_count_) {
-        rebuildScene(ecm, visual_count);
-    }
-
-    // ── Throttle to lidar_hz on sim time ────────────────────────────────────
+    // Gate on sim time before traversing the scene. The deadline advances
+    // from its previous target rather than re-anchoring at the current tick,
+    // so a physics step that does not divide the scan period produces bounded
+    // 8/12 ms-style jitter instead of a permanently low average rate. The
+    // frame is stamped with sim_now because that is when geometry is captured.
     const auto sim_now =
         std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
-    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::duration<double>(1.0 / params_.lidar_hz));
-    // Throttle to lidar_hz on sim time. Guard on sim_now >= last_scan_time_ so
-    // a sim-time rewind (world reset) re-arms immediately instead of stalling
-    // output until sim time climbs back past the pre-reset value.
-    if (last_scan_time_.count() >= 0 && sim_now >= last_scan_time_ &&
-        sim_now - last_scan_time_ < period) {
-        return;
+    const auto gate = scan_gate_.advance(sim_now, periodFromHz(params_.lidar_hz));
+    if (!gate.due) return;
+
+    // Rebuild when visual identity or geometry/material state changes. A
+    // count-only trigger misses a despawn+spawn pair between scans and edits
+    // that replace geometry without changing the number of visuals.
+    size_t visual_count = 0;
+    uint64_t visual_signature = 0;
+    bool visual_data_changed = false;
+    ecm.Each<::gz::sim::components::Visual,
+             ::gz::sim::components::Geometry>(
+        [&](const ::gz::sim::Entity & ent,
+                        const ::gz::sim::components::Visual *,
+                        const ::gz::sim::components::Geometry * geom) -> bool {
+            ++visual_count;
+            uint64_t x = static_cast<uint64_t>(ent) ^
+                (static_cast<uint64_t>(geom->Data().Type()) << 56);
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+            visual_signature ^= x ^ (x >> 31);
+
+            auto changed = [&](::gz::sim::ComponentTypeId type) {
+                return ecm.ComponentState(ent, type) !=
+                    ::gz::sim::ComponentState::NoChange;
+            };
+            visual_data_changed = visual_data_changed ||
+                changed(::gz::sim::components::Geometry::typeId) ||
+                changed(::gz::sim::components::LaserRetro::typeId) ||
+                changed(::gz::sim::components::Material::typeId) ||
+                changed(::gz::sim::components::Transparency::typeId);
+            return true;
+        });
+    if (!scene_ || visual_count != visual_count_ ||
+        visual_signature != visual_signature_ || visual_data_changed) {
+        rebuildScene(ecm, visual_count);
+        visual_signature_ = visual_signature;
     }
-    last_scan_time_ = sim_now;
 
     // ── Per-scan transforms + sensor pose ────────────────────────────────────
-    std::vector<rc::InstanceXform> xforms(refs_.size());
+    // Reclaim the worker's previous storage when the job slot is idle.
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (!job_ready_) {
+            if (post_xforms_.empty()) post_xforms_.swap(job_xforms_);
+            if (post_col_r_.empty()) post_col_r_.swap(job_col_r_);
+            if (post_col_t_.empty()) post_col_t_.swap(job_col_t_);
+        }
+    }
+    post_xforms_.resize(refs_.size());
     for (size_t i = 0; i < refs_.size(); ++i) {
         const auto pose =
             ::gz::sim::worldPose(refs_[i].entity, ecm) *
             ::gz::math::Pose3d(::gz::math::Vector3d::Zero, refs_[i].offset);
         float r[9], t[3];
         poseToRT(pose, r, t);
-        scene_->computeXform(static_cast<int>(i), r, t, xforms[i]);
+        scene_->computeXform(static_cast<int>(i), r, t, post_xforms_[i]);
     }
 
     // Per-column poses for motion distortion (needs ≥ 2 history samples to
     // interpolate; falls back to the snapshot pose otherwise).
-    std::vector<float> col_r, col_t;
+    post_col_r_.clear();
+    post_col_t_.clear();
     if (params_.motion_distortion && pose_history_.size() >= 2) {
-        buildColumnPoses(sim_now, col_r, col_t);
+        buildColumnPoses(sim_now, post_col_r_, post_col_t_);
     }
 
     // Sun for the NEAR_IR ambient model: first directional light in the
@@ -414,26 +442,46 @@ void RaycastMirror::postUpdate(
             return false;  // first directional light wins
         });
 
+    bool overwrote_job = false;
+    uint64_t dropped_jobs = 0;
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        overwrote_job = job_ready_;
+        if (overwrote_job) {
+            dropped_jobs = dropped_jobs_.fetch_add(
+                1, std::memory_order_relaxed) + 1;
+        }
         job_scene_ = scene_;
         job_scene_version_ = scene_version_;
-        job_xforms_ = std::move(xforms);
+        job_xforms_.swap(post_xforms_);
         poseToRT(sensor_pose, job_sensor_r_, job_sensor_t_);
-        job_col_r_ = std::move(col_r);
-        job_col_t_ = std::move(col_t);
+        job_col_r_.swap(post_col_r_);
+        job_col_t_.swap(post_col_t_);
+        job_metadata_ = FrameMetadata{sim_now.count(), epoch};
+        job_process_params_ = process_params;
         std::memcpy(job_sun_, sun, sizeof(sun));
         job_ready_ = true;
     }
     cv_.notify_one();
+    if (overwrote_job) {
+        RCLCPP_WARN_THROTTLE(kLogger, throttle_clock_, 5000,
+            "%s: raycast worker replaced a complete pending job; "
+            "total dropped=%lu", sensor_name_.c_str(),
+            static_cast<unsigned long>(dropped_jobs));
+    }
 }
 
 void RaycastMirror::threadFunc()
 {
+    // Persistent locals exchange storage with the single job slot. Together
+    // with the producer staging vectors this becomes an allocation-free
+    // triple-buffer after the first two scans.
+    std::vector<rc::InstanceXform> xforms;
+    std::vector<float> col_r, col_t;
     while (!shutdown_.load(std::memory_order_acquire)) {
         std::shared_ptr<const rc::Scene> scene;
-        std::vector<rc::InstanceXform> xforms;
-        std::vector<float> col_r, col_t;
+        FrameMetadata metadata;
+        RayProcessParams process_params;
         uint64_t version = 0;
         float sr[9], st[3], sun[5];
         {
@@ -446,50 +494,73 @@ void RaycastMirror::threadFunc()
             job_ready_ = false;
             scene = job_scene_;
             version = job_scene_version_;
-            xforms = std::move(job_xforms_);
-            col_r = std::move(job_col_r_);
-            col_t = std::move(job_col_t_);
+            xforms.swap(job_xforms_);
+            col_r.swap(job_col_r_);
+            col_t.swap(job_col_t_);
+            metadata = job_metadata_;
+            process_params = job_process_params_;
             std::memcpy(sr, job_sensor_r_, sizeof(sr));
             std::memcpy(st, job_sensor_t_, sizeof(st));
             std::memcpy(sun, job_sun_, sizeof(sun));
         }
         if (!scene || !proc_) continue;
 
-        const int n = params_.H * params_.W;
-        out_.resize(static_cast<size_t>(3 * n));
+        try {
+            const int n = params_.H * params_.W;
+            range_out_.resize(static_cast<size_t>(n));
+            signal_out_.resize(static_cast<size_t>(n));
+            reflectivity_out_.resize(static_cast<size_t>(n));
+            nearir_out_.resize(static_cast<size_t>(n));
+            scratch_.resize(static_cast<size_t>(3 * n));
 
-        rc::ScanParams sp;
-        sp.H = params_.H;
-        sp.W = params_.W;
-        sp.max_range = static_cast<float>(params_.max_range);
-        sp.near_clip = static_cast<float>(kNearClip);
-        sp.beam_origin_m = static_cast<float>(params_.beam_origin_mm / 1000.0);
-        sp.sun_dir[0] = sun[0];
-        sp.sun_dir[1] = sun[1];
-        sp.sun_dir[2] = sun[2];
-        sp.sun_diffuse = sun[3];
-        sp.sun_ambient = sun[4];
+            rc::ScanParams sp;
+            sp.H = params_.H;
+            sp.W = params_.W;
+            sp.max_range = static_cast<float>(params_.max_range);
+            sp.near_clip = static_cast<float>(kNearClip);
+            sp.beam_origin_m =
+                static_cast<float>(params_.beam_origin_mm / 1000.0);
+            sp.sun_dir[0] = sun[0];
+            sp.sun_dir[1] = sun[1];
+            sp.sun_dir[2] = sun[2];
+            sp.sun_diffuse = sun[3];
+            sp.sun_ambient = sun[4];
 
-        // Cast on the active backend — CUDA/HIP/SYCL kernel, or the
-        // OpenMP CPU fallback (identical shared math). proc_mtx_
-        // serialises against the sim thread's processDepth call.
-        {
-            std::lock_guard<std::mutex> proc_lk(*proc_mtx_);
-            proc_->castScan(scene->view(), version, xforms.data(),
-                            params_.beam_alt_f->data(),
-                            params_.beam_az_f->data(),
-                            sr, st, sp,
-                            out_.data(), out_.data() + n,
-                            col_r.empty() ? nullptr : col_r.data(),
-                            col_t.empty() ? nullptr : col_t.data(),
-                            out_.data() + 2 * n);
-        }
+            // CUDA launches raycast and channel/noise kernels back-to-back on
+            // one stream, with no host round trip for depth/retro/NIR. Other
+            // backends use the exact fallback composition through scratch_
+            // until they grow a native fused override.
+            proc_->castScanProcessed(
+                scene->view(), version, xforms.data(),
+                params_.beam_alt_f->data(), params_.beam_az_f->data(),
+                sr, st, sp,
+                range_out_.data(), signal_out_.data(),
+                reflectivity_out_.data(), nearir_out_.data(),
+                process_params,
+                scratch_.data(), scratch_.data() + n,
+                scratch_.data() + 2 * n,
+                col_r.empty() ? nullptr : col_r.data(),
+                col_t.empty() ? nullptr : col_t.data());
 
-        if (exch_->publish(out_, 3 * n)) {
-            RCLCPP_WARN_THROTTLE(kLogger, throttle_clock_, 5000,
-                "%s: dropped raycast frame (PostUpdate didn't drain); "
-                "total dropped=%lu", sensor_name_.c_str(),
-                static_cast<unsigned long>(exch_->dropped()));
+            if (exch_->publish(range_out_, signal_out_, reflectivity_out_,
+                               nearir_out_, n, metadata)) {
+                RCLCPP_WARN_THROTTLE(kLogger, throttle_clock_, 5000,
+                    "%s: dropped raycast frame (PostUpdate didn't drain); "
+                    "total dropped=%lu", sensor_name_.c_str(),
+                    static_cast<unsigned long>(exch_->dropped()));
+            }
+        } catch (const std::exception & e) {
+            // Moving fused GPU work off PostUpdate also moves it outside that
+            // callback's exception guard. Never let a device/allocation error
+            // escape a std::thread entry point: that would call std::terminate
+            // and kill the whole Gazebo server.
+            RCLCPP_ERROR_THROTTLE(kLogger, throttle_clock_, 5000,
+                "%s: raycast worker failed: %s",
+                sensor_name_.c_str(), e.what());
+        } catch (...) {
+            RCLCPP_ERROR_THROTTLE(kLogger, throttle_clock_, 5000,
+                "%s: raycast worker failed (non-std exception)",
+                sensor_name_.c_str());
         }
     }
 }

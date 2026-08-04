@@ -50,7 +50,8 @@ public:
 
     /// Render thread: render every panel at `pose` and assemble the packed
     /// frame into `exch` (drops are surfaced with throttled warnings).
-    void renderScan(const ::gz::math::Pose3d & pose, FrameExchange & exch);
+    void renderScan(const ::gz::math::Pose3d & pose, FrameExchange & exch,
+                    const FrameMetadata & metadata);
 
     /// Destroy the cameras (idempotent). Caller guarantees no concurrent
     /// render-thread activity (the plugin dtor flushes its barrier first).

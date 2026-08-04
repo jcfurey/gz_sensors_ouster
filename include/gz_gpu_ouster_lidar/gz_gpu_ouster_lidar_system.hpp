@@ -4,6 +4,7 @@
 #pragma once
 
 #include "imu_noise.hpp"  // Vec3 (used for IMU bias state members)
+#include "gz_gpu_ouster_lidar/sim_time_scheduler.hpp"
 
 #include <gz/sim/System.hh>
 #include <gz/common/Event.hh>
@@ -24,10 +25,12 @@ namespace gz_gpu_ouster_lidar {
 // them through unique_ptr + the out-of-line destructor, so this public
 // header needs only forward declarations.
 class FrameExchange;
+class ProcessedFrameExchange;
 class OusterMetadata;
 class PacketEncoder;
 class PanelRig;
 class RayProcessor;
+struct RayProcessParams;
 class RaycastMirror;
 class RosInterface;
 
@@ -117,7 +120,11 @@ private:
     std::mt19937_64 imu_rng_;
     bool imu_rng_seeded_ = false;
     std::vector<uint8_t> imu_pkt_buf_;
-    std::chrono::nanoseconds last_imu_sim_time_{0};
+    PeriodicDeadlineScheduler imu_scheduler_;
+    bool imu_state_valid_ = false;
+    std::chrono::nanoseconds imu_prev_state_time_{0};
+    Vec3 imu_prev_av_{0.0, 0.0, 0.0};
+    Vec3 imu_prev_la_{0.0, 0.0, 0.0};
     // World gravity vector (world frame), read once in Configure from the
     // world's Gravity component. Used to turn kinematic acceleration into the
     // proper acceleration a real accelerometer reports. Defaults to standard
@@ -131,12 +138,9 @@ private:
     std::unique_ptr<RaycastMirror> mirror_;
     std::unique_ptr<PacketEncoder> encoder_;
     std::unique_ptr<FrameExchange> exchange_;
+    std::unique_ptr<ProcessedFrameExchange> processed_exchange_;
 
     // ── Ray processor (vendor-neutral; CUDA/HIP/SYCL/CPU at runtime) ────────
-    // processor_mtx_ serialises backend calls: in raycast mode the mirror's
-    // worker (castScan) and the sim thread (processDepth) would otherwise
-    // race on the backend's shared device buffers and stream.
-    std::mutex processor_mtx_;
     std::unique_ptr<RayProcessor> ray_processor_;
 
     // ── Channel buffers (filled by the backend, consumed by the encoder) ────
@@ -154,6 +158,8 @@ private:
     bool lidar_frame_found_ = false;
     std::mutex pose_mtx_;
     ::gz::math::Pose3d cached_pose_;
+    int64_t cached_pose_sim_ns_ = 0;
+    uint64_t cached_pose_epoch_ = 0;
     ::gz::sim::Entity imu_entity_{::gz::sim::kNullEntity};
     bool imu_entity_found_ = false;
     std::string image_frame_id_;
@@ -175,13 +181,13 @@ private:
     // dtor fallback). Written on the render thread (OnRenderTeardown) and the
     // main thread (dtor), both under render_busy_mtx_.
     bool rig_destroyed_ = false;
-    // Panels-mode scan cadence is throttled on SIM time (not wall-clock) so
-    // the scan rate matches lidar_hz regardless of the real-time factor and
-    // stays consistent with the sim-time packet timestamps. PostUpdate (sim
-    // thread) publishes the latest sim time here; OnRender (render thread)
-    // reads it. last_render_sim_ns_ is touched only by OnRender.
-    std::atomic<int64_t> latest_sim_ns_{0};
-    int64_t last_render_sim_ns_ = -1;
+    // Panels-mode cadence is evaluated on the render thread from the coherent
+    // pose/time/epoch snapshot protected by pose_mtx_.
+    SimTimeGate panel_scan_gate_;
+    // PostUpdate owns these. A backwards clock step starts a new acquisition
+    // epoch; producer metadata prevents pre-reset work crossing that boundary.
+    std::chrono::nanoseconds last_post_sim_time_{-1};
+    uint64_t sim_epoch_ = 0;
     // Paused state published by PostUpdate for OnRender: scan renders are
     // skipped while paused (PostUpdate won't consume a frame until unpause,
     // and a mid-pause render could capture a half-edited GUI scene that then
@@ -220,8 +226,14 @@ private:
     void OnRender();
     void OnRenderTeardown();
     void encodeAndPublish(int64_t stamp_ns, const float * raw_data, int raw_n);
+    RayProcessParams makeRayProcessParams() const;
+    void publishChannels(int64_t stamp_ns);
     void publishImu(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm);
+    void publishImuSample(int64_t stamp_ns,
+                          const Vec3 & nominal_av,
+                          const Vec3 & nominal_la,
+                          double sample_dt);
 };
 
 }  // namespace gz_gpu_ouster_lidar

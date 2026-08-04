@@ -672,6 +672,59 @@ TEST(Raycast, ProcessDepthThroughRayProcessor)
     }
 }
 
+TEST(Raycast, FusedCastAndProcessMatchesTwoStageCpuPath)
+{
+    ::setenv("GZ_OUSTER_BACKEND", "cpu", 1);
+    constexpr int H = 2, W = 8;
+    const int n = H * W;
+
+    rc::Scene scene;
+    const float sphere_size[3] = {1.0f, 0.0f, 0.0f};
+    const int si = scene.addInstance(
+        rc::GeomType::kSphere, sphere_size, 0.8f);
+    std::vector<rc::InstanceXform> xf = {
+        xformAt(scene, si, 5.0f, 0.0f, 0.0f)};
+    std::vector<float> alt(H, 0.0f), az(H, 0.0f);
+    const auto sp = scanParams(H, W);
+
+    RayProcessParams pp{};
+    pp.H = H;
+    pp.W = W;
+    pp.base_signal = 800.0f;
+    pp.base_reflectivity = 50.0f;
+    pp.max_range = 120.0f;
+
+    std::vector<float> depth(n), retro(n), nir(n);
+    std::vector<uint32_t> expected_range(n), fused_range(n);
+    std::vector<uint16_t> expected_signal(n), fused_signal(n);
+    std::vector<uint8_t> expected_refl(n), fused_refl(n);
+    std::vector<uint16_t> expected_nir(n), fused_nir(n);
+
+    RayProcessor two_stage{123u};
+    two_stage.castScan(
+        scene.view(), 1u, xf.data(), alt.data(), az.data(),
+        kIdentityR, kZeroT, sp, depth.data(), retro.data(),
+        nullptr, nullptr, nir.data());
+    two_stage.processDepth(
+        depth.data(), retro.data(), expected_range.data(),
+        expected_signal.data(), expected_refl.data(), expected_nir.data(),
+        pp, nir.data());
+
+    std::vector<float> scratch(3 * static_cast<size_t>(n));
+    RayProcessor fused{123u};
+    fused.castScanProcessed(
+        scene.view(), 1u, xf.data(), alt.data(), az.data(),
+        kIdentityR, kZeroT, sp,
+        fused_range.data(), fused_signal.data(), fused_refl.data(),
+        fused_nir.data(), pp,
+        scratch.data(), scratch.data() + n, scratch.data() + 2 * n);
+
+    EXPECT_EQ(fused_range, expected_range);
+    EXPECT_EQ(fused_signal, expected_signal);
+    EXPECT_EQ(fused_refl, expected_refl);
+    EXPECT_EQ(fused_nir, expected_nir);
+}
+
 TEST(Raycast, ApparentReflectanceCombinedKdKs)
 {
     // Dead-centre hit: cos_inc=1, c2=1, lobe=1^8=1.

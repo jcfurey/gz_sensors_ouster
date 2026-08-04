@@ -5,14 +5,16 @@
 // into an immutable rc::Scene (rebuilt on spawn/despawn, shared with the
 // worker via shared_ptr snapshots so a rebuild never races an in-flight
 // cast), refreshes per-instance transforms every scan, and runs a worker
-// thread that casts the scan on the active backend and hands the
-// [depth|retro|nir] frame through the FrameExchange.
+// thread that fuses casting + channel synthesis on the active backend and
+// hands typed output channels through the ProcessedFrameExchange.
 
 #pragma once
 
 #include "frame_exchange.hpp"
+#include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "lidar_common.hpp"
 #include "raycast_scene.hpp"
+#include "gz_gpu_ouster_lidar/sim_time_scheduler.hpp"
 
 #include <gz/math/Pose3.hh>
 #include <gz/math/Quaternion.hh>
@@ -34,8 +36,6 @@
 
 namespace gz_gpu_ouster_lidar {
 
-class RayProcessor;
-
 class RaycastMirror {
 public:
     explicit RaycastMirror(std::string sensor_name);
@@ -55,18 +55,18 @@ public:
         const std::vector<float> * beam_az_f = nullptr;
     };
 
-    /// Start the cast worker. `proc_mtx` serialises backend access against
-    /// the sim thread's processDepth (shared device buffers/stream); the
-    /// pointed-to objects must outlive stop().
-    void start(const Params & p, RayProcessor * proc, std::mutex * proc_mtx,
-               FrameExchange * exch);
+    /// Start the cast worker. Pointed-to objects must outlive stop().
+    void start(const Params & p, RayProcessor * proc,
+               ProcessedFrameExchange * exch);
 
     /// Sim thread, every PostUpdate: rebuild the mirror on visual-population
     /// changes, and at the scan cadence post a cast job (per-instance
     /// transforms + sensor pose) to the worker.
     void postUpdate(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm,
-                    const ::gz::math::Pose3d & sensor_pose);
+                    const ::gz::math::Pose3d & sensor_pose,
+                    uint64_t epoch,
+                    const RayProcessParams & process_params);
 
     /// Stop and join the worker. Idempotent.
     void stop();
@@ -79,8 +79,7 @@ private:
     std::string sensor_name_;
     Params params_;
     RayProcessor * proc_ = nullptr;
-    std::mutex * proc_mtx_ = nullptr;
-    FrameExchange * exch_ = nullptr;
+    ProcessedFrameExchange * exch_ = nullptr;
 
     // Immutable scene geometry, shared with the worker via shared_ptr so a
     // rebuild (entity spawned/removed) never races an in-flight cast.
@@ -94,7 +93,8 @@ private:
     };
     std::vector<Ref> refs_;          // parallel to scene_->instances
     size_t visual_count_ = 0;        // rebuild trigger
-    std::chrono::nanoseconds last_scan_time_{-1};
+    uint64_t visual_signature_ = 0;  // detects same-count entity replacement
+    SimTimeGate scan_gate_;
 
     // Sensor pose history (sim time, sensor→world pose), recorded every
     // PostUpdate tick; spans at least one scan period so per-column poses
@@ -114,6 +114,7 @@ private:
     std::condition_variable cv_;
     std::atomic<bool> shutdown_{false};
     bool job_ready_ = false;
+    std::atomic<uint64_t> dropped_jobs_{0};
     std::shared_ptr<const rc::Scene> job_scene_;
     uint64_t job_scene_version_ = 0;
     std::vector<rc::InstanceXform> job_xforms_;
@@ -121,11 +122,24 @@ private:
     float job_sensor_t_[3] = {0, 0, 0};
     std::vector<float> job_col_r_;   // per-column poses (motion distortion;
     std::vector<float> job_col_t_;   // empty = static snapshot pose)
+    // Sim-thread staging buffers. Storage circulates through the job slot and
+    // the worker's persistent locals, avoiding allocations after warmup.
+    std::vector<rc::InstanceXform> post_xforms_;
+    std::vector<float> post_col_r_;
+    std::vector<float> post_col_t_;
+    FrameMetadata job_metadata_;
+    RayProcessParams job_process_params_{};
     // Sun illumination for the NEAR_IR ambient model: world-frame
     // propagation direction + diffuse/ambient weights (no directional light
     // in the world → ambient-only, nir = albedo).
     float job_sun_[5] = {0.0f, 0.0f, -1.0f, 0.0f, 1.0f};
-    std::vector<float> out_;         // worker-local [depth|retro|nir] planes
+    // Final host channels plus fallback scratch. CUDA's fused entry ignores
+    // the scratch and transfers only the compact final arrays.
+    std::vector<uint32_t> range_out_;
+    std::vector<uint16_t> signal_out_;
+    std::vector<uint8_t> reflectivity_out_;
+    std::vector<uint16_t> nearir_out_;
+    std::vector<float> scratch_;     // [depth|retro|nir], non-fused backends
 
     // Standalone clock for throttled logs (no ROS node dependency).
     rclcpp::Clock throttle_clock_;

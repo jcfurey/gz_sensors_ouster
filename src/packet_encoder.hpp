@@ -14,6 +14,7 @@
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -38,10 +39,14 @@ public:
     /// Stop and join the drain thread. Idempotent.
     void stop();
 
+    /// Sim thread: publish pause/reset state to the drain thread. No packets
+    /// are emitted while paused; a new epoch cancels any pre-reset batch.
+    void setSimulationState(bool paused, uint64_t epoch);
+
     /// Sim thread: build the scan's packets from the channel buffers and
     /// wake the drain thread. (Pointers are non-const to match the SDK
     /// PacketWriter block API; the buffers are not modified.)
-    void encodeScan(int64_t stamp_ns,
+    void encodeScan(int64_t stamp_ns, uint64_t epoch,
                     uint32_t * range, uint16_t * signal,
                     uint8_t * refl, uint16_t * nearir);
 
@@ -60,10 +65,16 @@ private:
     // sides so steady state allocates nothing per scan.
     std::vector<ouster_sensor_msgs::msg::PacketMsg> encode_pkts_;
     std::vector<ouster_sensor_msgs::msg::PacketMsg> drain_pkts_;
+    std::chrono::steady_clock::time_point drain_produced_at_{};
+    uint64_t drain_epoch_ = 0;
     std::thread drain_thread_;
     std::mutex drain_mtx_;
     std::condition_variable drain_cv_;
-    std::atomic<bool> drain_ready_{false};
+    bool drain_ready_ = false;
+    bool paused_ = false;
+    uint64_t simulation_epoch_ = 0;
+    uint64_t state_generation_ = 0;
+    std::atomic<uint64_t> dropped_batches_{0};
     std::atomic<bool> shutdown_{false};
 };
 
