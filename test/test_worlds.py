@@ -203,6 +203,18 @@ def test_smoke_world_ladder_is_monotonic():
         f'density ladder has duplicate or non-monotonic rungs: {rungs}')
 
 
+def test_smoke_world_ladder_exercises_default_reflectivity():
+    """Zone A deliberately omits laser_retro so smoke competes with the
+    physical fallback, not a zero placeholder or an explicitly tagged wall."""
+    doc = xml.dom.minidom.parse(str(WORLDS / 'ouster_smoke.sdf'))
+    walls = [model for model in doc.getElementsByTagName('model')
+             if model.getAttribute('name').startswith('A_wall_')]
+    assert len(walls) >= 4, 'density ladder is suspiciously short'
+    tagged = [model.getAttribute('name') for model in walls
+              if model.getElementsByTagName('laser_retro')]
+    assert not tagged, f'fallback ladder walls unexpectedly tagged: {tagged}'
+
+
 def test_smoke_world_covers_every_emitter_shape():
     """Each emitter type takes a different branch in the volume conversion
     (src/obscurants.cpp); the gallery zone exists to exercise all of them."""

@@ -87,11 +87,13 @@ public:
     /// Append an instance. For kMesh pass the root node from addMesh().
     /// `retro` is the diffuse reflectance (laser_retro), `spec` the specular
     /// coefficient (visual material specular), `transmit` the transmittance
-    /// (visual transparency) — see rcApparentReflectance / rcCastOneRay.
+    /// (visual transparency). Set `has_retro` false only when the SDF omitted
+    /// laser_retro; this keeps omission distinct from an explicitly authored
+    /// zero during ray casting. See rcApparentReflectance / rcCastOneRay.
     /// Returns the instance index.
     int addInstance(GeomType type, const float size[3], float retro,
                     int root_node = -1, float spec = 0.0f,
-                    float transmit = 0.0f);
+                    float transmit = 0.0f, bool has_retro = true);
 
     SceneView view() const;
 
@@ -135,8 +137,8 @@ private:
 /// value r such that the standard XYZ LUT xyz = (r−n)·d̂ + n·[cosθ,sinθ,0]
 /// reconstructs the true hit point. retro_out[H×W] (optional, may be null):
 /// APPARENT reflectance of the reported return — kd·cos(α) + ks·cos(2α)⁸,
-/// transmission-weighted for glass (see rcCastOneRay) — 0 when the material
-/// is unset or on a miss.
+/// transmission-weighted for glass (see rcCastOneRay); an omitted material
+/// uses ScanParams::fallback_retro, while a miss is 0.
 /// `tlas_nodes`/`tlas_order` (optional): top-level BVH from buildTlas(); when
 /// null or empty the caster falls back to the linear instance scan.
 void castScan(const SceneView & scene,

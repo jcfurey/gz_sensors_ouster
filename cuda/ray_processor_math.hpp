@@ -342,10 +342,24 @@ GZ_OUSTER_HD inline float signalFromRange(float d, float intensity, float base_s
     return base_signal * intensity / r_sq;
 }
 
+/// Convert an Ouster calibrated reflectivity byte back to the physical
+/// reflectance used by the ray caster. This is the inverse of
+/// reflectivityToByte() apart from the byte quantisation.
+GZ_OUSTER_HD inline float reflectivityByteToRetro(float value)
+{
+    const float b = gzm::fmin_(gzm::fmax_(value, 0.0f), kReflByteMax);
+    if (b <= kLambertianMax) {
+        return b / kLambertianMax;
+    }
+    constexpr float kLn2 = 0.6931471805599453f;
+    return gzm::exp_((b - kLambertianMax) * kLn2 / kRetroLogSlope);
+}
+
 /// Map a Gazebo retro value to the Ouster reflectivity byte:
 ///   rv ∈ [0,1]  → linear  [0,100]      (Lambertian diffuse)
 ///   rv > 1      → log map  [101,255]    (retroreflective)
-/// Callers handle the "no retro channel" case with base_reflectivity.
+/// Missing laser_retro values are resolved to physical reflectance by the ray
+/// caster before incidence, obscurant attenuation and return arbitration.
 GZ_OUSTER_HD inline uint8_t reflectivityToByte(float rv)
 {
     if (rv <= 1.0f) {

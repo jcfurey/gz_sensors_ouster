@@ -10,6 +10,7 @@
 
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "ray_processor_cpu_impl.hpp"
+#include "ray_processor_math.hpp"
 
 namespace gz_gpu_ouster_lidar {
 
@@ -174,6 +175,19 @@ TEST(NoiseModel, ReflectivityRetroScale)
     EXPECT_EQ(refl[0], 122u);
     // 100 + log2(4) * 22 = 100 + 44 = 144
     EXPECT_EQ(refl[1], 144u);
+}
+
+TEST(NoiseModel, ReflectivityByteInverseCoversBothBands)
+{
+    for (float b : {0.0f, 50.0f, 100.0f, 122.0f, 144.0f, 254.0f}) {
+        const float retro = rpmath::reflectivityByteToRetro(b);
+        EXPECT_EQ(rpmath::reflectivityToByte(retro), static_cast<uint8_t>(b))
+            << "byte=" << b << " retro=" << retro;
+    }
+    EXPECT_FLOAT_EQ(rpmath::reflectivityByteToRetro(-10.0f), 0.0f);
+    EXPECT_EQ(rpmath::reflectivityToByte(
+                  rpmath::reflectivityByteToRetro(300.0f)),
+              255u);
 }
 
 TEST(NoiseModel, NullRetroUsesDefaults)

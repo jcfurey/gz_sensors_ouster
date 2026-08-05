@@ -74,7 +74,8 @@
          uses (signal, reflectivity byte, noise weighting and the
          sqrt(retro/0.8) detection limit — docs/MODEL_REFERENCES.md). Panels
          mode has no retro channel and ignores it. Values span bright (0.8),
-         mid (0.5) and dark (0.1) so the reflectivity image shows contrast. -->
+         mid (the omitted tag uses base_reflectivity=50, physical rho 0.5),
+         and dark (0.1) so the reflectivity image shows contrast. -->
     <model name="box_near">
       <static>true</static>
       <pose>4 0 0.5 0 0 0</pose>
@@ -93,7 +94,6 @@
       <link name="link">
         <collision name="c"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry></collision>
         <visual name="v">
-          <laser_retro>0.5</laser_retro>
           <geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry>
           <material><diffuse>0.2 0.8 0.2 1</diffuse></material></visual>
       </link>

@@ -45,9 +45,10 @@ struct MeshBvhNode {
 struct RcInstance {
     GeomType type = GeomType::kBox;
     float size[3] = {0, 0, 0};
-    float retro = 0.0f;     ///< laser_retro: diffuse reflectance kd (0 = unset)
+    float retro = 0.0f;     ///< laser_retro: diffuse reflectance kd
     float spec = 0.0f;      ///< specular coefficient ks (visual material specular)
     float transmit = 0.0f;  ///< transmittance τ ∈ [0,1] (visual transparency)
+    int has_retro = 0;      ///< 1 when laser_retro was explicitly authored
     int root_node = -1;     ///< kMesh: global BVH root node index
 };
 
@@ -151,6 +152,10 @@ struct ScanParams {
     float sun_dir[3] = {0.0f, 0.0f, -1.0f};  ///< propagation direction (unit)
     float sun_diffuse = 0.0f;  ///< sun term weight (0 = no sun)
     float sun_ambient = 1.0f;  ///< ambient term weight
+    /// Physical diffuse reflectance used when a visual omits laser_retro.
+    /// Derived once per scan from ProcessParams::base_reflectivity so missing
+    /// materials participate correctly in incidence/extinction/arbitration.
+    float fallback_retro = rpmath::kDefaultRetro;
 
     // ── Participating media (smoke / dust / fog) ─────────────────────────
     RcObscurant obscurants[kMaxObscurants];
@@ -541,9 +546,11 @@ GZ_OUSTER_HD inline float rcCosIncidence(const RcInstance & inst,
 /// fixed lobe width (≈ half-power at ~9° off normal), chosen qualitative:
 /// real lobe widths vary per material and are not exposed by SDF.
 GZ_OUSTER_HD inline float rcApparentReflectance(const RcInstance & inst,
-                                                float cos_inc)
+                                                float cos_inc,
+                                                float fallback_retro)
 {
-    float rho = inst.retro * cos_inc;
+    const float diffuse = inst.has_retro ? inst.retro : fallback_retro;
+    float rho = diffuse * cos_inc;
     if (inst.spec > 0.0f) {
         const float c2 = 2.0f * cos_inc * cos_inc - 1.0f;  // cos(2α)
         if (c2 > 0.0f) {
@@ -645,14 +652,14 @@ GZ_OUSTER_HD inline float rcNearestHit(
 GZ_OUSTER_HD inline float rcHitReflectance(
     const RcInstance * instances, const InstanceXform * xforms,
     const float * verts, const int * tris,
-    RcV3 o, RcV3 d, float t, int inst, int tri)
+    RcV3 o, RcV3 d, float t, int inst, int tri, float fallback_retro)
 {
     const InstanceXform & x = xforms[inst];
     const RcV3 o_l = rcXformPoint(x.r, x.t, o);
     const RcV3 d_l = rcRotate(x.r, d);
     const float cos_inc =
         rcCosIncidence(instances[inst], verts, tris, o_l, d_l, t, tri);
-    return rcApparentReflectance(instances[inst], cos_inc);
+    return rcApparentReflectance(instances[inst], cos_inc, fallback_retro);
 }
 
 // ── Participating media: smoke / dust / fog obscuration ─────────────────────
@@ -1110,13 +1117,14 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     // P ∝ ρ_app/R² plus the monostatic specular lobe. Folding the angular
     // terms in here makes the downstream signal, reflectivity byte and
     // noise weighting all respond to oblique/glossy surfaces the way a real
-    // return does. laser_retro == 0 with no specular stays 0 and keeps its
-    // base_reflectivity fallback downstream.
+    // return does. A missing laser_retro is resolved here to fallback_retro;
+    // an explicitly authored zero remains zero.
     const float tau =
         rpmath::gzm::fmin_(rpmath::gzm::fmax_(instances[inst0].transmit, 0.0f),
                            1.0f);
     float rho = rcHitReflectance(instances, xforms, verts, tris,
-                                 o, d, t0, inst0, tri0) * (1.0f - tau);
+                                 o, d, t0, inst0, tri0, sp.fallback_retro) *
+                (1.0f - tau);
     float range = t0 + n_off;
 
     // Transparent surface (glass): continue one segment behind it. The
@@ -1138,7 +1146,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                       tlas_nodes, tlas_order, n_tlas_nodes);
         if (inst1 >= 0) {
             const float rho1 = rcHitReflectance(instances, xforms, verts,
-                                                tris, p, d, t1, inst1, tri1) *
+                                                tris, p, d, t1, inst1, tri1,
+                                                sp.fallback_retro) *
                                tau * tau;
             const float range1 = seg_start + t1 + n_off;
             if (rho1 * range * range > rho * range1 * range1) {
@@ -1191,7 +1200,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                 const float mirror_eff = (1.0f - tau) * instances[inst0].spec;
                 const float rho2 =
                     rcHitReflectance(instances, xforms, verts, tris,
-                                     g0, refl, t2, inst2, tri2) *
+                                     g0, refl, t2, inst2, tri2,
+                                     sp.fallback_retro) *
                     mirror_eff * mirror_eff;
                 const float range2 = t0 + kRcSegEps + t2 + n_off;
                 if (rho2 * range * range > rho * range2 * range2) {
@@ -1231,7 +1241,9 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                     n_w.z * sp.sun_dir[2]);
             illum += sp.sun_diffuse * rpmath::gzm::fmax_(lambert, 0.0f);
         }
-        nir_val = instances[w_inst].retro * illum;
+        const float nir_albedo = instances[w_inst].has_retro
+            ? instances[w_inst].retro : sp.fallback_retro;
+        nir_val = nir_albedo * illum;
     }
 
     // Smoke / dust / fog along the path: extinction of this return, a

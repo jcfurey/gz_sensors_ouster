@@ -98,10 +98,11 @@ RayResult castOne(const rc::Scene & scene,
 
 /// A wall: a box instance whose front face sits at x = `face_x`.
 void makeWall(rc::Scene & scene, std::vector<rc::InstanceXform> & xf,
-              float face_x, float retro)
+              float face_x, float retro, bool has_retro = true)
 {
     const float half[3] = {0.5f, 8.0f, 8.0f};
-    const int idx = scene.addInstance(rc::GeomType::kBox, half, retro);
+    const int idx = scene.addInstance(rc::GeomType::kBox, half, retro,
+                                      -1, 0.0f, 0.0f, has_retro);
     const float t[3] = {face_x + 0.5f, 0.0f, 0.0f};
     rc::InstanceXform x;
     scene.computeXform(idx, kIdentityR, t, x);
@@ -266,6 +267,42 @@ TEST(ObscurantOpticalDepth, DepthInversionClampsToFarEndWhenUnreachable)
 }
 
 // ── Extinction of a hard target ──────────────────────────────────────────────
+
+TEST(ObscurantExtinction, MissingRetroUsesPhysicalFallbackBeforeMedia)
+{
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    // The zero is only storage: has_retro=false models an omitted SDF tag.
+    makeWall(scene, xf, 20.0f, 0.0f, false);
+
+    rc::ScanParams clear = baseParams();
+    clear.fallback_retro = 0.5f;
+    const RayResult a = castOne(scene, xf, clear);
+    ASSERT_NEAR(a.range, 20.0f, 1e-3f);
+    EXPECT_NEAR(a.retro, 0.5f, 1e-6f);
+    EXPECT_NEAR(a.nir, 0.5f, 1e-6f);
+
+    rc::ScanParams smoky = clear;
+    addObscurant(smoky, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                    2.0f, 5.0f, 5.0f, 0.05f,
+                                    kNoBackscatter));
+    const RayResult b = castOne(scene, xf, smoky);
+    EXPECT_NEAR(b.range, 20.0f, 1e-3f);
+    EXPECT_NEAR(b.retro, 0.5f * std::exp(-0.4f), 1e-5f);
+}
+
+TEST(ObscurantExtinction, FallbackSupportsRetroreflectiveByteRange)
+{
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makeWall(scene, xf, 20.0f, 0.0f, false);
+
+    rc::ScanParams sp = baseParams();
+    sp.fallback_retro = rpmath::reflectivityByteToRetro(144.0f);
+    const RayResult r = castOne(scene, xf, sp);
+    EXPECT_GT(r.retro, 1.0f);
+    EXPECT_EQ(rpmath::reflectivityToByte(r.retro), 144u);
+}
 
 TEST(ObscurantExtinction, MatchesClosedFormBeerLambert)
 {
@@ -544,7 +581,8 @@ TEST(ObscurantBackscatter, DenseSmokeReturnsFromItsNearFace)
 {
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
-    makeWall(scene, xf, 30.0f, 0.9f);
+    // An untagged wall still loses to a genuinely dense cloud.
+    makeWall(scene, xf, 30.0f, 0.0f, false);
 
     rc::ScanParams sp = baseParams();
     // σ = 2 /m over [5, 15]: two-way optical depth 40, so the wall is gone
@@ -567,7 +605,9 @@ TEST(ObscurantBackscatter, ThinHazeLetsTheTargetThrough)
 {
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
-    makeWall(scene, xf, 30.0f, 0.9f);
+    // Regression: an omitted laser_retro used to enter arbitration as zero,
+    // allowing any positive smoke return to beat the hard target.
+    makeWall(scene, xf, 30.0f, 0.0f, false);
 
     rc::ScanParams sp = baseParams();
     addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,

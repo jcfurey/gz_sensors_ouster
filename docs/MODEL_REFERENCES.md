@@ -313,6 +313,12 @@ places, and it is worth being explicit about which:
 
 Three properties fall out rather than being coded:
 
+- A visual without `<laser_retro>` gets the configured `base_reflectivity`
+  converted from the calibrated Ouster byte scale back to physical reflectance
+  *before* incidence, extinction and strongest-return arbitration. Untagged
+  hard targets therefore attenuate and compete with smoke exactly like authored
+  materials; an explicitly authored zero is not mistaken for omission during
+  ray casting.
 - Because extinction multiplies the *apparent reflectance*, the whole
   downstream pipeline responds with no knowledge that smoke exists: SIGNAL
   dims by exp(−2τ), the calibrated REFLECTIVITY byte drops, range noise
@@ -381,10 +387,11 @@ Two coupling caveats worth knowing when tuning:
 Panels mode has no equivalent path (it only ever sees a rendered depth
 image), and the plugin warns if obscurants are configured there. Verified
 in-tree by `test_obscurants` (closed-form Beer–Lambert, exact inversion of
-the optical-depth profile, the sampled amplitude against the lidar equation)
-and `test_obscurant_config`; `examples/worlds/ouster_smoke.sdf` demonstrates
-it, and its header table's predicted reflectivity bytes match the measured
-point cloud rung for rung.
+the optical-depth profile, fallback-material extinction/arbitration, and the
+sampled amplitude against the lidar equation) and `test_obscurant_config`;
+`examples/worlds/ouster_smoke.sdf` demonstrates it with an untagged-wall
+density ladder whose first three rungs preserve the wall and last two report
+the medium.
 
 ## Known gaps (deliberately not modeled)
 

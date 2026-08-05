@@ -234,7 +234,8 @@ void RaycastMirror::rebuildScene(
                 transmit = static_cast<float>(tr->Data());
             }
 
-            scene->addInstance(type, size, retro, root_node, spec, transmit);
+            scene->addInstance(type, size, retro, root_node, spec, transmit,
+                               lr != nullptr);
             refs.push_back(ref);
             return true;
         });
@@ -554,6 +555,8 @@ void RaycastMirror::threadFunc()
             sp.sun_dir[2] = sun[2];
             sp.sun_diffuse = sun[3];
             sp.sun_ambient = sun[4];
+            sp.fallback_retro =
+                rpmath::reflectivityByteToRetro(process_params.base_reflectivity);
             sp.n_obscurants = n_obscurants;
             std::copy_n(obscurants, n_obscurants, sp.obscurants);
             sp.rng_salt = rng_salt;

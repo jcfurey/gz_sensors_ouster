@@ -583,7 +583,10 @@
          <transparency> makes a surface see-through to the beam: the pane
          itself returns a weak (1-tau)-weighted echo while the object behind
          returns a tau^2-weighted one (the pulse crosses the pane twice), and
-         single-return mode reports whichever is stronger. Two pairs:
+         single-return mode reports whichever is stronger. Both panes omit
+         laser_retro and use the default base_reflectivity=50 (rho 0.5), which
+         also exercises fallback reflectance through the transparency path.
+         Two pairs:
            tau 0.60 - pane still wins on the front face
            tau 0.92 - nearly clear; the wall behind dominates
          This is the classic "lidar sees through the window" case. -->
@@ -591,7 +594,7 @@
       <static>true</static><pose>-7.37 -5.16 1.2 0 0 0.6</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>0.08 2.4 2.4</size></box></geometry></collision>
-        <visual name="v"><laser_retro>0.50</laser_retro>
+        <visual name="v">
           <transparency>0.60</transparency>
           <geometry><box><size>0.08 2.4 2.4</size></box></geometry>
           <material><diffuse>0.6 0.8 0.9 0.4</diffuse><specular>0.6 0.6 0.6 1</specular></material></visual>
@@ -610,7 +613,7 @@
       <static>true</static><pose>-5.16 -7.37 1.2 0 0 0.97</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>0.08 2.4 2.4</size></box></geometry></collision>
-        <visual name="v"><laser_retro>0.50</laser_retro>
+        <visual name="v">
           <transparency>0.92</transparency>
           <geometry><box><size>0.08 2.4 2.4</size></box></geometry>
           <material><diffuse>0.7 0.9 1.0 0.15</diffuse><specular>0.6 0.6 0.6 1</specular></material></visual>

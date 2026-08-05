@@ -91,7 +91,10 @@
        0 = off, 1.0 = physical. -->
   <!-- <nearir_noise_scale>1.0</nearir_noise_scale> -->
 
-  <!-- Default reflectivity value (0-255) when surface has no retro material. -->
+  <!-- Default calibrated reflectivity byte (0-255) when no retro channel is
+       available. In raycast mode an omitted laser_retro is converted to
+       physical reflectance before incidence, smoke attenuation,
+       strongest-return arbitration, signal and noise. -->
   <!-- <base_reflectivity>50.0</base_reflectivity> -->
 
   <!-- Random dropouts: probability of a missed return, increasing with

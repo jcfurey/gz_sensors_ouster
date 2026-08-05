@@ -690,7 +690,7 @@ targets produce weaker returns.
 | `signal_noise_scale` | 1.0 | >= 0 | -- | Poisson shot noise on signal channel. 0 = off, 1 = physical. |
 | `nearir_noise_scale` | 1.0 | >= 0 | -- | Poisson noise on near-IR channel (both packet and image). |
 | `base_signal` | 800.0 | >= 0 | photon m^2 | Baseline for 1/r^2 signal model. OS0: ~400, OS1: ~800. |
-| `base_reflectivity` | 50.0 | 0-255 | -- | Default reflectivity when no retro data available. |
+| `base_reflectivity` | 50.0 | 0-255 | -- | Default calibrated reflectivity byte when no retro channel is available. In raycast mode, an omitted `laser_retro` is converted to physical reflectance before incidence, smoke attenuation and return arbitration. |
 | `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
 | `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at max_range. Returns past the reflectance-dependent detection limit `max_range·√(ρ/0.8)` always drop. |
 | `false_alarm_rate` | 0.0 | 0-1 | probability | Solar-background false alarms: each no-return pixel becomes a spurious point (uniform range, noise-floor signal) with this probability per frame. 0 = off. Try 0.0005-0.002 for bright daylight. |
@@ -700,7 +700,8 @@ targets produce weaker returns.
 ### Smoke, dust and fog obscuration (raycast mode)
 
 Beams are integrated through participating media: targets behind smoke dim by
-`exp(−2·η·τ)` and eventually drop out, the smoke itself produces competing
+`exp(−2·η·τ)` and eventually drop out (including untagged surfaces using
+`base_reflectivity`), the smoke itself produces competing
 returns, and NEAR_IR *brightens* while the laser channels darken. See
 [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §11 for the physics, and
 `examples/worlds/ouster_smoke.sdf` for a demo of all of it.

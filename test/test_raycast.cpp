@@ -365,6 +365,24 @@ TEST(Raycast, RetroAttenuatedByIncidenceCosine)
     EXPECT_NEAR(retro[0], 0.8f, 1e-4f);
 }
 
+TEST(Raycast, MissingRetroFallbackIsAttenuatedByIncidenceCosine)
+{
+    rc::Scene scene;
+    const float ssize[3] = {0.5f, 0.0f, 0.0f};
+    const int si = scene.addInstance(rc::GeomType::kSphere, ssize, 0.0f,
+                                     -1, 0.0f, 0.0f, false);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, si, 3.0f, 0.3f, 0.0f)};
+
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> retro;
+    rc::ScanParams sp = scanParams(1, 4);
+    sp.fallback_retro = 0.5f;
+    const auto range = cast(scene, xf, alt, az, sp, &retro);
+
+    EXPECT_NEAR(range[0], 2.6f, 1e-4f);
+    EXPECT_NEAR(retro[0], 0.5f * 0.8f, 1e-4f);
+}
+
 TEST(Raycast, SpecularLobePeaksAtNormalIncidence)
 {
     // Monostatic specular return ks·cos(2α)⁸ (rcApparentReflectance):
