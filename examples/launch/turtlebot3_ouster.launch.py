@@ -51,6 +51,7 @@ def generate_launch_description():
 
     ray_mode = LaunchConfiguration('ray_mode')
     lidar_profile = LaunchConfiguration('lidar_profile')
+    hardware_revision = LaunchConfiguration('hardware_revision')
     headless = LaunchConfiguration('headless')
 
     # raycast (default) uses the GPU-free headless world; panels switches to the
@@ -75,6 +76,7 @@ def generate_launch_description():
         Command([
             'xacro ', urdf,
             ' metadata_lidar0:=', metadata,
+            ' hardware_revision:=', hardware_revision,
             ' ray_mode:=', ray_mode,
         ]),
         value_type=str,
@@ -97,6 +99,8 @@ def generate_launch_description():
         DeclareLaunchArgument('lidar_profile', default_value='modern',
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16) | legacy.'),
+        DeclareLaunchArgument('hardware_revision', default_value='rev07',
+                              description='Ouster hardware physics revision.'),
         DeclareLaunchArgument('headless', default_value='false',
                               description='Run gz server-only (no GUI client).'),
         DeclareLaunchArgument('rviz', default_value='false',

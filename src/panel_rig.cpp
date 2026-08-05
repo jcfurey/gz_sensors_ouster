@@ -70,7 +70,8 @@ bool PanelRig::buildLayout(const OusterMetadata & meta, double oversample,
     return true;
 }
 
-bool PanelRig::ensureCreated(double max_range, uint32_t visibility_mask)
+bool PanelRig::ensureCreated(double min_range, double max_range,
+                             uint32_t visibility_mask)
 {
     if (created()) return true;
     if (layout_.n_panels == 0) return false;
@@ -109,7 +110,7 @@ bool PanelRig::ensureCreated(double max_range, uint32_t visibility_mask)
         cam->SetAspectRatio(
             static_cast<double>(cs.width) / static_cast<double>(cs.height));
         cam->SetHFOV(::gz::math::Angle(cs.hfov_rad));
-        cam->SetNearClipPlane(kNearClip);
+        cam->SetNearClipPlane(min_range);
         cam->SetFarClipPlane(max_range);
         cam->SetVisibilityMask(visibility_mask);
         cam->CreateDepthTexture();

@@ -25,11 +25,6 @@ inline const rclcpp::Logger & lidarLogger()
 // bilinear corners of the edge beams inside rendered pixels.
 constexpr double kBeamMarginDeg = 1.0;
 
-// Near clip plane for the panel depth cameras and the raycast mode
-// (metres). Matches the real sensor's minimum range region where returns
-// are unreliable anyway.
-constexpr double kNearClip = 0.3;
-
 /// Dynamically reconfigurable noise-model parameters. SDF supplies the
 /// initial values (parsed by the plugin); the live store sits in
 /// RosInterface, written by the ROS parameter callback and snapshotted by

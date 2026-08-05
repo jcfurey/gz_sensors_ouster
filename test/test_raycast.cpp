@@ -505,7 +505,7 @@ TEST(Raycast, NearClipSeesThroughCloseHit)
     const int ci = scene.addInstance(rc::GeomType::kSphere, close_size, 0.0f);
     const int fi = scene.addInstance(rc::GeomType::kSphere, far_size, 0.0f);
 
-    // Close sphere inside the 0.3 m near clip (the sensor housing case);
+    // Close sphere inside this test's configured near range (sensor housing);
     // the beam must report the far target instead.
     std::vector<rc::InstanceXform> xf = {
         xformAt(scene, ci, 0.2f, 0.0f, 0.0f),

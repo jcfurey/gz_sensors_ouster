@@ -68,7 +68,6 @@ constexpr float kRangeRetroFloor   = 0.25f;   ///< retro floor → up to 2× ran
 constexpr float kRangeRetroMax     = 2.0f;
 constexpr float kDefaultRetro      = 0.5f;    ///< assumed retro when the channel is absent
 constexpr float kMaxRangeFloor     = 0.1f;    ///< guards the d / max_range ratio
-constexpr float kRefReflectance    = 0.8f;    ///< reflectance vendor range specs are quoted at (80% Lambertian)
 
 // ── Math shim ────────────────────────────────────────────────────────────────
 namespace gzm {
@@ -290,29 +289,68 @@ GZ_OUSTER_HD inline float retroForNoise(const float * retro, int idx)
     return kDefaultRetro;
 }
 
-/// Dropout probability, clamped to [0,1]. Rises with range and falls with
-/// reflectivity (dark targets drop out up to 3× more often).
-///
-/// Beyond the reflectance-dependent detection limit
-/// d_max(ρ) = max_range·√(ρ/0.8) the return is always dropped: detection
-/// SNR ∝ ρ/d², so the threshold range scales with √ρ, and vendor range
-/// specs are quoted at 80% Lambertian reflectance — e.g. the Ouster OS1 is
-/// specced 120 m @ 80% and ~45 m @ 10%; the √ law predicts 42 m. (Same
-/// detection-limit construct as the reflectance limit function RL(d) in
-/// "Physical LiDAR Simulation in Real-Time Engine", arXiv:2208.10295 §II-D,
-/// with the √ρ form from the 1/d² lidar equation.) Active only when
-/// dropout is enabled, so noise-free runs stay deterministic-exact.
-GZ_OUSTER_HD inline float dropoutProbability(float d, float retro_val,
-    float drop_close, float drop_far, float max_range)
+/// Power-law interpolation of the vendor's 10% and 80% Lambertian range
+/// points.  Unlike the old fixed sqrt(rho) law, this preserves both published
+/// calibration anchors for every Ouster product/revision.
+GZ_OUSTER_HD inline float calibratedRangeAtReflectivity(
+    float retro_val, float range_10, float range_80)
 {
-    const float d_max_eff = gzm::fmax_(max_range, kMaxRangeFloor) *
-                            gzm::sqrt_(retro_val / kRefReflectance);
-    if (d > d_max_eff) return 1.0f;
+    if (range_10 <= 0.0f || range_80 <= range_10) return 0.0f;
+    const float rho = gzm::fmax_(retro_val, 0.01f);
+    const float exponent = gzm::log_(range_80 / range_10) / gzm::log_(8.0f);
+    return range_10 * gzm::exp_(exponent * gzm::log_(rho / 0.1f));
+}
+
+/// Product-calibrated detection probability. D90 is exact at both vendor
+/// reflectivity anchors. Historical profiles also supply measured D50 points;
+/// newer datasheets publish only D90, so D50 is placed `rolloff` beyond D90
+/// (15% by default) to avoid the old non-physical hard discontinuity.
+GZ_OUSTER_HD inline float detectionProbability(
+    float d, float retro_val,
+    float range_10_d90, float range_80_d90,
+    float range_10_d50, float range_80_d50,
+    float rolloff, float max_range)
+{
+    if (d <= 0.0f || d >= max_range) return 0.0f;
+    const float d90 = calibratedRangeAtReflectivity(
+        retro_val, range_10_d90, range_80_d90);
+    if (d90 <= 0.0f) return 1.0f;  // profile detection disabled
+
+    float d50 = calibratedRangeAtReflectivity(
+        retro_val, range_10_d50, range_80_d50);
+    if (d50 <= d90) d50 = d90 * (1.0f + gzm::fmax_(rolloff, 0.01f));
+    d50 = gzm::fmin_(d50, max_range);
+    if (d50 <= d90) return d <= d90 ? 0.9f : 0.0f;
+
+    constexpr float kLn9 = 2.19722457733622f;
+    const float slope = kLn9 / (d50 - d90);
+    return 1.0f / (1.0f + gzm::exp_(slope * (d - d50)));
+}
+
+/// Total dropout probability, clamped to [0,1].  The calibrated detection
+/// probability is combined with the user-tunable stochastic miss term.
+GZ_OUSTER_HD inline float dropoutProbability(float d, float retro_val,
+    float drop_close, float drop_far, float max_range,
+    float range_10_d90, float range_80_d90,
+    float range_10_d50, float range_80_d50, float rolloff)
+{
     const float t = rangeFraction(d, max_range);
     const float p = drop_close + t * (drop_far - drop_close);
     const float refl = gzm::fmin_(1.0f / gzm::fmax_(retro_val, kDropoutRetroFloor),
                                   kDropoutRetroMax);
-    return gzm::fmin_(p * refl, 1.0f);
+    const float random_keep = 1.0f - gzm::fmin_(p * refl, 1.0f);
+    const float calibrated_keep = detectionProbability(
+        d, retro_val, range_10_d90, range_80_d90,
+        range_10_d50, range_80_d50, rolloff, max_range);
+    return 1.0f - random_keep * calibrated_keep;
+}
+
+/// Quantise a range to the active Ouster UDP/product resolution. A zero step
+/// keeps the legacy exact-depth test/debug path unchanged.
+GZ_OUSTER_HD inline float quantizeRange(float d, float resolution)
+{
+    if (resolution <= 0.0f) return d;
+    return gzm::floor_(d / resolution + 0.5f) * resolution;
 }
 
 /// Gaussian range-noise σ. Interpolated over range, then scaled by inverse
@@ -326,9 +364,9 @@ GZ_OUSTER_HD inline float dropoutProbability(float d, float retro_val,
 /// min→max ramp: datasheet precision-vs-range curves fold in firmware
 /// filtering that a pure r/√ρ law does not capture.
 GZ_OUSTER_HD inline float rangeNoiseSigma(float d, float retro_val,
-    float min_std, float max_std, float max_range)
+    float min_std, float max_std, float reference_range)
 {
-    const float t = rangeFraction(d, max_range);
+    const float t = rangeFraction(d, reference_range);
     float sigma = min_std + t * (max_std - min_std);
     sigma *= gzm::fmin_(1.0f / gzm::sqrt_(gzm::fmax_(retro_val, kRangeRetroFloor)),
                         kRangeRetroMax);

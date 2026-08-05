@@ -24,6 +24,7 @@ static RayProcessParams noNoiseParams(int H, int W)
     p.base_reflectivity = 50.0f;
     p.range_noise_min_std = 0.0f;
     p.range_noise_max_std = 0.0f;
+    p.range_noise_reference_range = 120.0f;
     p.max_range = 120.0f;
     p.signal_noise_scale = 0.0f;
     p.nearir_noise_scale = 0.0f;
@@ -265,8 +266,8 @@ TEST(NoiseModel, DropoutsReduceValidCount)
 {
     constexpr int H = 1, W = 50000;
     const int n = H * W;
-    // 90 m: far, but inside the retro-0.5 detection limit
-    // d_max = 120·sqrt(0.5/0.8) ≈ 94.9 m (see dropoutProbability).
+    // Detection calibration is disabled in this generic dropout-only test;
+    // isolate the user-tunable random miss term at a far range.
     std::vector<float> depth(n, 90.0f);
     std::vector<float> retro(n, 0.5f);
     std::vector<uint32_t> range(n);
@@ -297,31 +298,35 @@ TEST(NoiseModel, DropoutsReduceValidCount)
     EXPECT_LT(drop_rate, 0.180);
 }
 
-TEST(NoiseModel, DetectionLimitDropsDarkFarTargets)
+TEST(NoiseModel, ProductDetectionCurvePreservesD90Anchors)
 {
-    // d_max(ρ) = max_range·sqrt(ρ/0.8): at 100 m with max_range 120,
-    // ρ = 0.5 is past its 94.9 m limit (all returns dropped) while ρ = 0.8
-    // has d_max = 120 m and survives at the ordinary dropout rate.
+    // Rev7 OS1 is specified at >90% detection at 90 m on a 10% target and
+    // 170 m on an 80% target. At the dark-target D90 anchor, approximately
+    // 90% should survive; the bright target at the same distance is well
+    // inside its envelope and should be nearly complete.
     constexpr int H = 1, W = 20000;
     const int n = H * W;
-    std::vector<float> depth(n, 100.0f);
+    std::vector<float> depth(n, 90.0f);
     std::vector<uint32_t> range(n);
     std::vector<uint16_t> signal(n);
     std::vector<uint8_t>  refl(n);
     std::vector<uint16_t> nearir(n);
 
     auto p = noNoiseParams(H, W);
-    p.dropout_rate_close = 0.0f;
-    p.dropout_rate_far = 0.10f;
-    p.max_range = 120.0f;
+    p.max_range = 233.0f;
+    p.detection_range_10 = 90.0f;
+    p.detection_range_80 = 170.0f;
+    p.detection_rolloff = 0.15f;
 
-    std::vector<float> dark(n, 0.5f);
+    std::vector<float> dark(n, 0.1f);
     processCpu(depth.data(), dark.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
+    int dark_valid = 0;
     for (int i = 0; i < n; ++i) {
-        ASSERT_EQ(range[i], 0u) << "dark target beyond its detection limit "
-                                   "must drop (i=" << i << ")";
+        if (range[i] > 0) ++dark_valid;
     }
+    EXPECT_GT(static_cast<double>(dark_valid) / n, 0.87);
+    EXPECT_LT(static_cast<double>(dark_valid) / n, 0.93);
 
     std::vector<float> bright(n, 0.8f);
     processCpu(depth.data(), bright.data(),
@@ -330,8 +335,7 @@ TEST(NoiseModel, DetectionLimitDropsDarkFarTargets)
     for (int i = 0; i < n; ++i) {
         if (range[i] > 0) ++valid;
     }
-    // Expected rate ≈ 0.833·0.10·min(1/0.8, 3) ≈ 0.104 → most survive.
-    EXPECT_GT(static_cast<double>(valid) / n, 0.85);
+    EXPECT_GT(static_cast<double>(valid) / n, 0.99);
 }
 
 TEST(NoiseModel, FalseAlarmsInventReturnsOnMisses)
@@ -526,44 +530,39 @@ TEST(NoiseModel, DropoutCapFloorEqualizesVeryDarkTargets)
         << "very_dark=" << rate_very_dark << " at_floor=" << rate_at_floor;
 }
 
-TEST(NoiseModel, DetectionLimitBoundaryExact)
+TEST(NoiseModel, CalibratedDetectionIsSmoothAndMonotonic)
 {
-    // d_max(ρ) = max_range·√(ρ/0.8).
-    // With max_range=100, retro=0.64: d_max = 100·√0.8 ≈ 89.44 m.
-    //
-    // The detection limit lives inside dropoutProbability(), which is only
-    // evaluated when dropout is enabled (drop_close > 0 or drop_far > 0).
-    // Use drop_far=1e-6 to enable the code path with negligible base rate:
-    //   At depth=89m: base_p ≈ 8.9e-7 · weight ≈ 1.4e-6 → ~0 drops in N=1000.
-    //   At depth=90m: d > d_max → dropout=1.0 (hard limit) → all drop.
-    constexpr int H = 1, W = 1000;
-    const int n = H * W;
-    std::vector<float> retro(n, 0.64f);
-    std::vector<uint32_t> range(n);
-    std::vector<uint16_t> signal(n);
-    std::vector<uint8_t>  refl(n);
-    std::vector<uint16_t> nearir(n);
+    const float p80 = rpmath::detectionProbability(
+        80.0f, 0.1f, 90.0f, 170.0f, 0.0f, 0.0f, 0.15f, 233.0f);
+    const float p90 = rpmath::detectionProbability(
+        90.0f, 0.1f, 90.0f, 170.0f, 0.0f, 0.0f, 0.15f, 233.0f);
+    const float p100 = rpmath::detectionProbability(
+        100.0f, 0.1f, 90.0f, 170.0f, 0.0f, 0.0f, 0.15f, 233.0f);
+    EXPECT_GT(p80, p90);
+    EXPECT_NEAR(p90, 0.9f, 1e-5f);
+    EXPECT_GT(p90, p100);
+    EXPECT_GT(p100, 0.0f);  // no hard cliff immediately beyond D90
+}
+
+TEST(NoiseModel, MinimumRangeAndResolutionAreProductSpecific)
+{
+    constexpr int H = 1, W = 3;
+    std::vector<float> depth = {0.49f, 0.5014f, 0.5061f};
+    std::vector<float> retro(W, 0.8f);
+    std::vector<uint32_t> range(W);
+    std::vector<uint16_t> signal(W);
+    std::vector<uint8_t> refl(W);
+    std::vector<uint16_t> nearir(W);
 
     auto p = noNoiseParams(H, W);
-    p.max_range = 100.0f;
-    p.dropout_rate_close = 0.0f;
-    p.dropout_rate_far   = 1e-6f;  // tiny but non-zero: enables dropout code path
+    p.min_range = 0.5f;
+    p.range_resolution = 0.008f;  // Ouster low-data profile
+    processCpu(depth.data(), retro.data(), range.data(), signal.data(),
+               refl.data(), nearir.data(), p, 7u);
 
-    std::vector<float> depth_near(n, 89.0f);
-    processCpu(depth_near.data(), retro.data(),
-                 range.data(), signal.data(), refl.data(), nearir.data(), p, 1u);
-    for (int i = 0; i < n; ++i) {
-        EXPECT_GT(range[i], 0u)
-            << "depth=89m is inside d_max; pixel " << i << " must survive";
-    }
-
-    std::vector<float> depth_far(n, 90.0f);
-    processCpu(depth_far.data(), retro.data(),
-                 range.data(), signal.data(), refl.data(), nearir.data(), p, 2u);
-    for (int i = 0; i < n; ++i) {
-        EXPECT_EQ(range[i], 0u)
-            << "depth=90m exceeds d_max; pixel " << i << " must be dropped";
-    }
+    EXPECT_EQ(range[0], 0u);
+    EXPECT_EQ(range[1], 504u);
+    EXPECT_EQ(range[2], 504u);
 }
 
 TEST(NoiseModel, SignalFloorDoesNotCrashAtVeryShortRange)

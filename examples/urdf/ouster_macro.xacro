@@ -38,6 +38,7 @@
 
   <xacro:macro name="ouster_sensor"
     params="name parent metadata_path
+            hardware_revision:=rev07
             topic_prefix:=''
             xyz:='0 0 0' rpy:='0 0 0'
             lidar_hz:=10.0
@@ -150,6 +151,10 @@
       <plugin filename="libgz_sensors_ouster.so"
               name="gz_gpu_ouster_lidar::GzGpuOusterLidarSystem">
         <metadata_path>${metadata_path}</metadata_path>
+        <!-- auto | gen1 | revC | revD | rev05 | rev06 | rev06.2 |
+             rev07 | rev07.1 | rev08. Explicit is preferred when metadata
+             carries a synthetic or pre-standard product part number. -->
+        <hardware_revision>${hardware_revision}</hardware_revision>
         <sensor_name>${ns}</sensor_name>
         <lidar_hz>${lidar_hz}</lidar_hz>
         <!-- panels (GPU render rig) | raycast (CPU per-beam, no rendering). -->

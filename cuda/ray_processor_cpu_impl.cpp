@@ -54,7 +54,10 @@ void processCpu(
             // floor.
             if (has_noise && p.false_alarm_rate > 0.f &&
                 uni(rng) < p.false_alarm_rate) {
-                const float d_fa = uni(rng) * p.max_range;
+                const float d_fa = rpmath::quantizeRange(
+                    p.min_range + uni(rng) *
+                        std::max(p.max_range - p.min_range, 0.0f),
+                    p.range_resolution);
                 range_out[idx] =
                     static_cast<uint32_t>(d_fa * rpmath::kRangeToMm);
                 signal_out[idx] = 1u;
@@ -63,6 +66,17 @@ void processCpu(
                 nearir_out[idx] = 0u;
                 continue;
             }
+            range_out[idx] = 0u;
+            signal_out[idx] = 0u;
+            reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+            nearir_out[idx] = 0u;
+            continue;
+        }
+
+        // Product/firmware minimum-range threshold. The raycaster also uses
+        // this as its near clip, but keep the channel-stage gate for panel
+        // mode and for noise that crosses the threshold.
+        if (d < p.min_range || d >= p.max_range) {
             range_out[idx] = 0u;
             signal_out[idx] = 0u;
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
@@ -85,10 +99,15 @@ void processCpu(
         }
 
         // Random dropouts — probability scales with range and inverse reflectivity
-        if (has_noise && (p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f)) {
+        if (has_noise &&
+            (p.dropout_rate_close > 0.f || p.dropout_rate_far > 0.f ||
+             (p.detection_range_10 > 0.f && p.detection_range_80 > 0.f))) {
             const float retro_val = rpmath::retroForNoise(retro_host, idx);
             const float p_drop = rpmath::dropoutProbability(
-                d, retro_val, p.dropout_rate_close, p.dropout_rate_far, p.max_range);
+                d, retro_val, p.dropout_rate_close, p.dropout_rate_far,
+                p.max_range, p.detection_range_10, p.detection_range_80,
+                p.detection_range_10_d50, p.detection_range_80_d50,
+                p.detection_rolloff);
             if (uni(rng) < p_drop) {
                 range_out[idx] = 0u;
                 signal_out[idx] = 0u;
@@ -102,10 +121,19 @@ void processCpu(
         if (has_noise && (p.range_noise_min_std > 0.f || p.range_noise_max_std > 0.f)) {
             const float retro_val = rpmath::retroForNoise(retro_host, idx);
             const float sigma = rpmath::rangeNoiseSigma(
-                d, retro_val, p.range_noise_min_std, p.range_noise_max_std, p.max_range);
+                d, retro_val, p.range_noise_min_std, p.range_noise_max_std,
+                p.range_noise_reference_range);
             d = std::max(d + norm(rng) * sigma, 0.0f);
         }
 
+        d = rpmath::quantizeRange(d, p.range_resolution);
+        if (d < p.min_range || d >= p.max_range) {
+            range_out[idx] = 0u;
+            signal_out[idx] = 0u;
+            reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+            nearir_out[idx] = 0u;
+            continue;
+        }
         range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
         // Signal with Poisson shot noise

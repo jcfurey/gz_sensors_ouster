@@ -23,6 +23,7 @@ OusterMetadata::OusterMetadata() = default;
 OusterMetadata::~OusterMetadata() = default;
 
 bool OusterMetadata::load(const std::string & path, bool imu_enabled,
+                          const std::string & hardware_revision,
                           bool max_range_explicit, double & max_range)
 {
     // Reject pathological metadata files up-front: Ouster metadata is ~10 KB
@@ -106,16 +107,52 @@ bool OusterMetadata::load(const std::string & path, bool imu_enabled,
                 "imu_packets topic will be inactive.");
         }
 
-        // Derive max_range from product line if not explicitly set via SDF.
-        if (!max_range_explicit && !info.prod_line.empty()) {
-            const auto & pl = info.prod_line;
-            if (pl.find("OS0") != std::string::npos)      max_range = 50.0;
-            else if (pl.find("OS1") != std::string::npos)  max_range = 120.0;
-            else if (pl.find("OS2") != std::string::npos)  max_range = 240.0;
-            // OSDome and others keep the default 120m
-            RCLCPP_INFO(kLogger, "Derived max_range=%.0fm from prod_line=%s",
-                max_range, pl.c_str());
+        const auto fw = info.get_version();
+        const auto udp_profile = info.format.udp_profile_lidar;
+        const bool low_data_profile =
+            udp_profile == ouster::sdk::core::UDPProfileLidar::RNG15_RFL8_NIR8 ||
+            udp_profile == ouster::sdk::core::UDPProfileLidar::RNG15_RFL8_NIR8_DUAL ||
+            udp_profile == ouster::sdk::core::UDPProfileLidar::FUSA_RNG15_RFL8_NIR8_DUAL;
+        OusterProfileRequest profile_request;
+        profile_request.prod_line = info.prod_line;
+        profile_request.prod_pn = info.prod_pn;
+        profile_request.hardware_revision = hardware_revision;
+        profile_request.firmware_major = static_cast<int>(fw.major);
+        profile_request.firmware_minor = static_cast<int>(fw.minor);
+        profile_request.beam_count = H;
+        profile_request.low_data_profile = low_data_profile;
+        profile = resolveOusterLidarProfile(profile_request);
+
+        if (profile.model == OusterModel::Unknown) {
+            RCLCPP_ERROR(kLogger,
+                "Unsupported Ouster prod_line='%s'; set metadata prod_line to "
+                "OS0, OS1, OS2, OSDome, or OS1MAX.", info.prod_line.c_str());
+            return false;
         }
+        if (!profile.supported) {
+            RCLCPP_ERROR(kLogger,
+                "Unsupported Ouster product/revision combination: %s %s. "
+                "Check metadata prod_line/prod_pn or set a compatible "
+                "<hardware_revision>.",
+                toString(profile.model), toString(profile.revision));
+            return false;
+        }
+        if (profile.fallback_revision) {
+            RCLCPP_WARN(kLogger,
+                "Cannot infer hardware revision from prod_pn='%s' and "
+                "firmware='%s'; using %s fallback for %s. Set "
+                "<hardware_revision> explicitly for calibrated physics.",
+                info.prod_pn.c_str(), info.image_rev.c_str(),
+                toString(profile.revision), toString(profile.model));
+        }
+        if (!max_range_explicit) max_range = profile.representable_range_m;
+        RCLCPP_INFO(kLogger,
+            "Ouster profile: %s generation=%s revision=%s D90[10%%=%.0fm,"
+            "80%%=%.0fm] min=%.2fm representable=%.0fm resolution=%.1fmm",
+            profile.id.c_str(), toString(profile.generation),
+            toString(profile.revision), profile.detection_range_10_d90_m,
+            profile.detection_range_80_d90_m, profile.minimum_range_m,
+            max_range, profile.range_resolution_m * 1000.0);
 
         // Beam intrinsics are available directly on SensorInfo.
         beam_alt_angles = info.beam_altitude_angles;

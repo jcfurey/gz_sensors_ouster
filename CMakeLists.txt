@@ -269,6 +269,7 @@ add_subdirectory(cuda)
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/gz_gpu_ouster_lidar_system.cpp
   src/obscurants.cpp
+  src/ouster_lidar_profile.cpp
   src/ouster_metadata.cpp
   src/packet_encoder.cpp
   src/panel_rig.cpp
@@ -329,6 +330,12 @@ if(BUILD_TESTING)
   target_compile_definitions(test_metadata_parsing PRIVATE
     TEST_METADATA_DIR="${_test_metadata_dir}"
   )
+
+  # Test: generation/revision/model physics profile catalog and inference.
+  ament_add_gtest(test_ouster_lidar_profile
+    test/test_ouster_lidar_profile.cpp src/ouster_lidar_profile.cpp)
+  target_include_directories(test_ouster_lidar_profile PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
   # Test: bilinear resampling (CPU fallback)
   ament_add_gtest(test_resample test/test_resample.cpp)

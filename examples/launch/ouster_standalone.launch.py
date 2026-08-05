@@ -49,6 +49,7 @@ def generate_launch_description():
     rviz_cfg = os.path.join(pkg_share, 'examples', 'rviz', 'ouster.rviz')
 
     lidar_profile = LaunchConfiguration('lidar_profile')
+    hardware_revision = LaunchConfiguration('hardware_revision')
     ray_mode = LaunchConfiguration('ray_mode')
     headless = LaunchConfiguration('headless')
 
@@ -85,6 +86,7 @@ def generate_launch_description():
         Command([
             'xacro ', urdf,
             ' metadata_lidar0:=', metadata,
+            ' hardware_revision:=', hardware_revision,
             ' ray_mode:=', ray_mode,
             ' obscurant_profile:=', obscurant_profile,
         ]),
@@ -110,6 +112,11 @@ def generate_launch_description():
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '
                                           'legacy (LEGACY profile). Use legacy to simulate '
                                           'pre-3.2 firmware; modern is recommended.'),
+        DeclareLaunchArgument('hardware_revision', default_value='rev07',
+                              description='Ouster hardware physics profile: gen1, revC, '
+                                          'revD, rev05, rev06, rev06.2, rev07, rev07.1, '
+                                          'rev08, or auto. Explicit is preferred for '
+                                          'synthetic / older metadata part numbers.'),
         DeclareLaunchArgument('headless', default_value='false',
                               description='Run gz server-only (no GUI client). '
                                           'Use on WSL, SSH, and any headless host.'),

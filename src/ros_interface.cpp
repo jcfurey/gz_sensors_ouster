@@ -186,7 +186,21 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
     rcl_interfaces::msg::ParameterDescriptor read_only;
     read_only.read_only = true;
     node_->declare_parameter("lidar_hz", cfg_.lidar_hz, read_only);
+    node_->declare_parameter("lidar_profile", cfg_.lidar_profile, read_only);
+    node_->declare_parameter("min_range", cfg_.min_range, read_only);
     node_->declare_parameter("max_range", cfg_.max_range, read_only);
+    node_->declare_parameter(
+        "detection_range_10", cfg_.detection_range_10, read_only);
+    node_->declare_parameter(
+        "detection_range_80", cfg_.detection_range_80, read_only);
+    node_->declare_parameter(
+        "range_resolution", cfg_.range_resolution, read_only);
+    node_->declare_parameter(
+        "range_noise_reference_range", cfg_.range_noise_reference_range,
+        read_only);
+    node_->declare_parameter(
+        "beam_divergence_fwhm_deg", cfg_.beam_divergence_fwhm_deg, read_only);
+    node_->declare_parameter("max_returns", cfg_.max_returns, read_only);
     if (cfg_.imu_enabled) {
         node_->declare_parameter("imu_hz", cfg_.imu_hz, read_only);
     }

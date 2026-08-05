@@ -143,6 +143,8 @@ def generate_launch_description():
     rviz_cfg = os.path.join(pkg_share, 'examples', 'rviz', 'sensor_stack.rviz')
 
     lidar_profile = LaunchConfiguration('lidar_profile')
+    hardware_revision_front = LaunchConfiguration('hardware_revision_front')
+    hardware_revision_rear = LaunchConfiguration('hardware_revision_rear')
     ray_mode = LaunchConfiguration('ray_mode')
     headless = LaunchConfiguration('headless')
 
@@ -162,6 +164,8 @@ def generate_launch_description():
             'xacro ', urdf,
             ' metadata_front:=', metadata_front,
             ' metadata_rear:=', metadata_rear,
+            ' hardware_revision_front:=', hardware_revision_front,
+            ' hardware_revision_rear:=', hardware_revision_rear,
             ' ray_mode:=', ray_mode,
         ]),
         value_type=str,
@@ -185,6 +189,10 @@ def generate_launch_description():
                               description='Ouster generation the metadata simulates: '
                                           'modern (RNG19_RFL8_SIG16_NIR16, FW v3.2.0) | '
                                           'legacy (LEGACY profile). Applies to both sensors.'),
+        DeclareLaunchArgument('hardware_revision_front', default_value='rev07',
+                              description='Front Ouster hardware physics revision.'),
+        DeclareLaunchArgument('hardware_revision_rear', default_value='rev07',
+                              description='Rear Ouster hardware physics revision.'),
         DeclareLaunchArgument('headless', default_value='false',
                               description='Run gz server-only (no GUI client). '
                                           'Use on WSL, SSH, and any headless host.'),

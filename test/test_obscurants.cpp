@@ -6,7 +6,7 @@
 // medium's stochastic range-resolved backscatter return, NEAR_IR airlight,
 // and the downstream consequences the model is
 // supposed to produce for free (dimmer signal, lower reflectivity byte,
-// targets falling past the detection limit).
+// targets moving down the calibrated detection rolloff).
 //
 // All of it runs through the shared rc:: math the CUDA/HIP/SYCL kernels
 // device-compile, so these assertions cover every backend.
@@ -434,7 +434,7 @@ TEST(ObscurantForwardScatter, LowerEtaLetsMoreLightThrough)
 TEST(ObscurantForwardScatter, RecoversTargetsTheSingleScatteringLimitDrops)
 {
     // The point of the correction: at high optical depth η = 1 is pessimistic
-    // enough to push a real target past the detection limit that η < 1 keeps
+    // enough to push a real target down the detection rolloff that η < 1 keeps
     // it inside.
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
@@ -451,10 +451,13 @@ TEST(ObscurantForwardScatter, RecoversTargetsTheSingleScatteringLimitDrops)
 
     const RayResult a = castOne(scene, xf, pessimistic);
     const RayResult b = castOne(scene, xf, corrected);
-    EXPECT_FLOAT_EQ(rpmath::dropoutProbability(a.range, a.retro, 0.0005f,
-                                               0.03f, 120.0f), 1.0f);
-    EXPECT_LT(rpmath::dropoutProbability(b.range, b.retro, 0.0005f, 0.03f,
-                                         120.0f), 1.0f);
+    const float p_a = rpmath::dropoutProbability(
+        a.range, a.retro, 0.0005f, 0.03f, 150.0f,
+        45.0f, 100.0f, 55.0f, 120.0f, 0.15f);
+    const float p_b = rpmath::dropoutProbability(
+        b.range, b.retro, 0.0005f, 0.03f, 150.0f,
+        45.0f, 100.0f, 55.0f, 120.0f, 0.15f);
+    EXPECT_GT(p_a, p_b);
 }
 
 TEST(ObscurantForwardScatter, AmbientChannelIgnoresEta)
@@ -808,28 +811,31 @@ TEST(ObscurantNearIr, BrightTargetBehindSmokeIsWashedTowardTheAirlight)
 
 TEST(ObscurantDownstream, TargetsPastTheDetectionLimitAreDroppedForFree)
 {
-    // The extinction is applied to the apparent reflectance, so the existing
-    // √ρ detection limit in the noise model does the dropping with no
-    // knowledge of smoke. Verify at the exact boundary the model defines.
+    // Extinction is applied to apparent reflectance, so the calibrated product
+    // detection curve performs the dropping without special smoke knowledge.
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
     makeWall(scene, xf, 60.0f, 0.8f);
 
     const rc::ScanParams clear = baseParams();
     const RayResult a = castOne(scene, xf, clear);
-    EXPECT_LT(rpmath::dropoutProbability(a.range, a.retro, 0.0005f, 0.03f,
-                                         120.0f),
-              1.0f) << "a clear 60 m wall is well inside the detection limit";
+    const float clear_drop = rpmath::dropoutProbability(
+        a.range, a.retro, 0.0005f, 0.03f, 150.0f,
+        45.0f, 100.0f, 55.0f, 120.0f, 0.15f);
+    EXPECT_LT(clear_drop, 0.1f)
+        << "a clear 60 m wall is well inside the OS1 envelope";
 
     rc::ScanParams smoky = baseParams();
     addObscurant(smoky, obscurantAt(rc::ObscurantType::kBox, 20.0f,
                                     5.0f, 8.0f, 8.0f, 0.2f, kNoBackscatter));
     const RayResult b = castOne(scene, xf, smoky);
     ASSERT_NEAR(b.range, 60.0f, 1e-3f);
-    EXPECT_FLOAT_EQ(rpmath::dropoutProbability(b.range, b.retro, 0.0005f,
-                                               0.03f, 120.0f),
-                    1.0f)
-        << "through τ=2 smoke the same wall must fall past the limit";
+    const float smoky_drop = rpmath::dropoutProbability(
+        b.range, b.retro, 0.0005f, 0.03f, 150.0f,
+        45.0f, 100.0f, 55.0f, 120.0f, 0.15f);
+    EXPECT_GT(smoky_drop, clear_drop);
+    EXPECT_GT(smoky_drop, 0.9f)
+        << "through tau=2 smoke the wall should be overwhelmingly lost";
 }
 
 TEST(ObscurantDownstream, SignalAndReflectivityByteBothFall)

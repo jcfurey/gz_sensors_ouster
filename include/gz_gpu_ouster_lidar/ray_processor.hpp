@@ -61,8 +61,16 @@ struct RayProcessParams {
 
     // ── Range noise ──────────────────────────────────────────────────────────
     float range_noise_min_std; ///< Min range noise σ at 0 m (metres), e.g. 0.005
-    float range_noise_max_std; ///< Max range noise σ at max_range (metres), e.g. 0.03
-    float max_range;           ///< Sensor max range (metres) for noise scaling
+    float range_noise_max_std; ///< Max profile precision σ at reference range (m)
+    float range_noise_reference_range; ///< Range where max precision σ applies
+    float max_range;           ///< Maximum representable / raycast range (m)
+    float min_range;           ///< Minimum reported range (m)
+    float detection_range_10;  ///< >90% detection range at 10% reflectivity
+    float detection_range_80;  ///< >90% detection range at 80% reflectivity
+    float detection_range_10_d50; ///< 50% detection range; 0 = derive rolloff
+    float detection_range_80_d50; ///< 50% detection range; 0 = derive rolloff
+    float detection_rolloff;   ///< Derived-D50 distance above D90, fraction
+    float range_resolution;    ///< Physical range quantisation step (m)
 
     // ── Photon / signal noise ────────────────────────────────────────────────
     float signal_noise_scale;  ///< Signal Poisson noise scale (0 = off, 1 = physical)

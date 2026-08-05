@@ -87,7 +87,7 @@ TEST_P(MetadataParsingTest, BeamAnglesInRange)
     }
 }
 
-TEST_P(MetadataParsingTest, MaxRangeDerivation)
+TEST_P(MetadataParsingTest, ProductLineIsSupported)
 {
     const std::string path = std::string(TEST_METADATA_DIR) + "/" + GetParam();
     const auto json = readFile(path);
@@ -102,13 +102,6 @@ TEST_P(MetadataParsingTest, MaxRangeDerivation)
                   pl.find("OSDome") != std::string::npos);
     EXPECT_TRUE(known) << "Unknown product line: " << pl;
 
-    // Verify max_range derivation logic
-    double max_range = 120.0;  // default
-    if (pl.find("OS0") != std::string::npos)      max_range = 50.0;
-    else if (pl.find("OS1") != std::string::npos)  max_range = 120.0;
-    else if (pl.find("OS2") != std::string::npos)  max_range = 240.0;
-
-    EXPECT_GT(max_range, 0.0);
 }
 
 TEST_P(MetadataParsingTest, PixelsPerColumnMatchesBeamCount)
@@ -142,9 +135,9 @@ INSTANTIATE_TEST_SUITE_P(
         "os1_128_rev7_legacy.json",
         "os2_128_rev7_legacy.json",
         "osdome_128_rev7_legacy.json"),  // NOLINT(whitespace/parens) — INSTANTIATE_TEST_SUITE_P macro layout
-    [](const ::testing::TestParamInfo<std::string> & info) {
+    [](const ::testing::TestParamInfo<std::string> & test_param) {
         // Sanitise filename for test name (replace dots/hyphens with underscores)
-        std::string name = info.param;
+        std::string name = test_param.param;
         for (auto & c : name) {
             if (c == '.' || c == '-') c = '_';
         }

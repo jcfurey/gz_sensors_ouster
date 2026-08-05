@@ -46,7 +46,8 @@ public:
     /// Render thread: create the depth cameras once the ogre2 scene exists.
     /// Returns true when the rig is live after the call. No-ops (returning
     /// false) until the Sensors system has built the scene.
-    bool ensureCreated(double max_range, uint32_t visibility_mask);
+    bool ensureCreated(double min_range, double max_range,
+                       uint32_t visibility_mask);
 
     /// Render thread: render every panel at `pose` and assemble the packed
     /// frame into `exch` (drops are surfaced with throttled warnings).

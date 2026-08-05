@@ -204,13 +204,18 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("publish_native_images")) {
         publish_native_images_ = sdf->Get<bool>("publish_native_images");
     }
+    if (sdf->HasElement("hardware_revision")) {
+        hardware_revision_ = sdf->Get<std::string>("hardware_revision");
+    }
 
     // Noise model SDF parameters (all optional, with sensible Ouster defaults)
     if (sdf->HasElement("range_noise_min_std")) {
         range_noise_min_std_ = sdf->Get<double>("range_noise_min_std");
+        range_noise_min_std_explicit_ = true;
     }
     if (sdf->HasElement("range_noise_max_std")) {
         range_noise_max_std_ = sdf->Get<double>("range_noise_max_std");
+        range_noise_max_std_explicit_ = true;
     }
     if (sdf->HasElement("signal_noise_scale")) {
         signal_noise_scale_ = sdf->Get<double>("signal_noise_scale");
@@ -242,6 +247,13 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("max_range")) {
         max_range_ = sdf->Get<double>("max_range");
         max_range_explicit_ = true;
+    }
+    if (sdf->HasElement("min_range")) {
+        min_range_ = sdf->Get<double>("min_range");
+        min_range_explicit_ = true;
+    }
+    if (sdf->HasElement("detection_rolloff")) {
+        detection_rolloff_ = sdf->Get<double>("detection_rolloff");
     }
 
     // ── Smoke / dust / fog obscuration (raycast mode) ───────────────────────
@@ -304,6 +316,8 @@ void GzGpuOusterLidarSystem::Configure(
     clamp_warn(base_signal_,           0.0, kInfD, "base_signal");
     clamp_warn(base_reflectivity_,     0.0, 255.0, "base_reflectivity");
     clamp_warn(max_range_,             1.0, kInfD, "max_range");
+    clamp_warn(min_range_,             0.0, kInfD, "min_range");
+    clamp_warn(detection_rolloff_,     0.01, 1.0, "detection_rolloff");
     clamp_warn(gyro_noise_std_,        0.0, kInfD, "gyro_noise_std");
     clamp_warn(accel_noise_std_,       0.0, kInfD, "accel_noise_std");
     clamp_warn(gyro_bias_walk_,        0.0, kInfD, "gyro_bias_walk");
@@ -388,9 +402,35 @@ void GzGpuOusterLidarSystem::Configure(
 
     // Load Ouster metadata and beam angles
     meta_ = std::make_unique<OusterMetadata>();
-    if (!meta_->load(metadata_path_, imu_enabled_, max_range_explicit_,
-                     max_range_)) {
+    if (!meta_->load(metadata_path_, imu_enabled_, hardware_revision_,
+                     max_range_explicit_, max_range_)) {
         RCLCPP_ERROR(kLogger, "Metadata loading failed; plugin disabled");
+        meta_.reset();
+        return;
+    }
+    if (!min_range_explicit_) min_range_ = meta_->profile.minimum_range_m;
+    detection_range_10_d90_ = meta_->profile.detection_range_10_d90_m;
+    detection_range_80_d90_ = meta_->profile.detection_range_80_d90_m;
+    detection_range_10_d50_ = meta_->profile.detection_range_10_d50_m;
+    detection_range_80_d50_ = meta_->profile.detection_range_80_d50_m;
+    range_resolution_ = meta_->profile.range_resolution_m;
+    mode_range_scale_ = ousterModeRangeScale(meta_->profile, meta_->W, lidar_hz_);
+    mode_precision_scale_ =
+        ousterModePrecisionScale(meta_->profile, meta_->W, lidar_hz_);
+    range_noise_reference_range_ =
+        detection_range_10_d90_ * mode_range_scale_;
+    if (!range_noise_min_std_explicit_) {
+        range_noise_min_std_ =
+            meta_->profile.precision_min_std_m * mode_precision_scale_;
+    }
+    if (!range_noise_max_std_explicit_) {
+        range_noise_max_std_ =
+            meta_->profile.precision_max_std_m * mode_precision_scale_;
+    }
+    if (min_range_ >= max_range_) {
+        RCLCPP_ERROR(kLogger,
+            "Invalid product range window [%.3f, %.3f] m: min_range must "
+            "be below max_range; plugin disabled", min_range_, max_range_);
         meta_.reset();
         return;
     }
@@ -473,7 +513,18 @@ void GzGpuOusterLidarSystem::Configure(
             std::max(5, meta_->W / meta_->cpp));
         cfg.beam_alt_angles = &meta_->beam_alt_angles;
         cfg.lidar_hz = lidar_hz_;
+        cfg.lidar_profile = meta_->profile.id;
+        cfg.min_range = min_range_;
         cfg.max_range = max_range_;
+        cfg.detection_range_10 =
+            detection_range_10_d90_ * mode_range_scale_;
+        cfg.detection_range_80 =
+            detection_range_80_d90_ * mode_range_scale_;
+        cfg.range_resolution = range_resolution_;
+        cfg.range_noise_reference_range = range_noise_reference_range_;
+        cfg.beam_divergence_fwhm_deg =
+            meta_->profile.beam_divergence_fwhm_deg;
+        cfg.max_returns = meta_->profile.max_returns;
         cfg.imu_hz = imu_hz_;
         cfg.imu_enabled = imu_enabled_;
         cfg.publish_imu_msg = publish_imu_msg_;
@@ -523,11 +574,13 @@ void GzGpuOusterLidarSystem::Configure(
     RCLCPP_INFO(kLogger,
         "Configured: H=%d W=%d cpp=%d sensor_name=%s gz_sensor=%s hz=%.1f"
         " noise: range_sigma=[%.4f,%.4f]m signal_noise=%.1f"
-        " dropout=[%.4f,%.4f] edge_discon=%.3fm max_range=%.1fm",
+        " dropout=[%.4f,%.4f] edge_discon=%.3fm range=[%.2f,%.1f]m"
+        " mode_scale=[range %.3f, precision %.3f]",
         meta_->H, meta_->W, meta_->cpp, sensor_name_.c_str(),
         lidar_frame_name_.c_str(), lidar_hz_,
         range_noise_min_std_, range_noise_max_std_, signal_noise_scale_,
-        dropout_rate_close_, dropout_rate_far_, edge_discon_threshold_, max_range_);
+        dropout_rate_close_, dropout_rate_far_, edge_discon_threshold_,
+        min_range_, max_range_, mode_range_scale_, mode_precision_scale_);
     if (imu_enabled_) {
         RCLCPP_INFO(kLogger, "  IMU: sensor=%s hz=%.1f publish_imu_msg=%s",
             imu_name_.c_str(), imu_hz_, publish_imu_msg_ ? "true" : "false");
@@ -542,6 +595,7 @@ void GzGpuOusterLidarSystem::Configure(
         mp.H = meta_->H;
         mp.W = meta_->W;
         mp.max_range = max_range_;
+        mp.min_range = min_range_;
         mp.lidar_hz = lidar_hz_;
         mp.beam_origin_mm = meta_->beam_origin_mm;
         mp.motion_distortion = motion_distortion_;
@@ -610,7 +664,7 @@ void GzGpuOusterLidarSystem::OnRender()
     }
 
     // ── Lazy panel-rig initialisation ────────────────────────────────────────
-    if (rig_->ensureCreated(max_range_, visibility_mask_)) {
+    if (rig_->ensureCreated(min_range_, max_range_, visibility_mask_)) {
         sensor_initialized_.store(true, std::memory_order_release);
         RCLCPP_INFO(kLogger,
             "Panel rig created: %d depth cameras, beam altitude span "
@@ -912,7 +966,20 @@ RayProcessParams GzGpuOusterLidarSystem::makeRayProcessParams() const
     pp.base_reflectivity = static_cast<float>(noise.base_reflectivity);
     pp.range_noise_min_std = static_cast<float>(noise.range_noise_min_std);
     pp.range_noise_max_std = static_cast<float>(noise.range_noise_max_std);
+    pp.range_noise_reference_range =
+        static_cast<float>(range_noise_reference_range_);
     pp.max_range = static_cast<float>(max_range_);
+    pp.min_range = static_cast<float>(min_range_);
+    pp.detection_range_10 = static_cast<float>(
+        detection_range_10_d90_ * mode_range_scale_);
+    pp.detection_range_80 = static_cast<float>(
+        detection_range_80_d90_ * mode_range_scale_);
+    pp.detection_range_10_d50 = static_cast<float>(
+        detection_range_10_d50_ * mode_range_scale_);
+    pp.detection_range_80_d50 = static_cast<float>(
+        detection_range_80_d50_ * mode_range_scale_);
+    pp.detection_rolloff = static_cast<float>(detection_rolloff_);
+    pp.range_resolution = static_cast<float>(range_resolution_);
     pp.signal_noise_scale = static_cast<float>(noise.signal_noise_scale);
     pp.nearir_noise_scale = static_cast<float>(noise.nearir_noise_scale);
     pp.dropout_rate_close = static_cast<float>(noise.dropout_rate_close);

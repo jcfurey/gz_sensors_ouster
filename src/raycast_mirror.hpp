@@ -46,6 +46,7 @@ public:
         int H = 0;
         int W = 0;
         double max_range = 120.0;
+        double min_range = 0.3;
         double lidar_hz = 10.0;
         double beam_origin_mm = 0.0;
         /// Rolling-shutter motion distortion: cast each column from the

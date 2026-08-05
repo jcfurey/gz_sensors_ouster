@@ -26,6 +26,7 @@
 <robot name="turtlebot3_ouster" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <xacro:arg name="metadata_lidar0" default="metadata/os1_64_rev7.json"/>
+  <xacro:arg name="hardware_revision" default="rev07"/>
   <!-- raycast (default, GPU-free) | panels (GpuRays, needs a rendering world) -->
   <xacro:arg name="ray_mode" default="raycast"/>
   <xacro:property name="ray_mode" value="$(arg ray_mode)"/>
@@ -46,6 +47,7 @@
     parent="base_link"
     xyz="-0.064 0 0.16" rpy="0 0 0"
     metadata_path="$(arg metadata_lidar0)"
+    hardware_revision="$(arg hardware_revision)"
     lidar_hz="10.0"
     enable_imu="true" imu_hz="100.0"
     ray_mode="${ray_mode}"

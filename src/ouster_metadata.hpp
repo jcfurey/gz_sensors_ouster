@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "ouster_lidar_profile.hpp"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,9 +27,12 @@ public:
 
     /// Load and validate the metadata file. Logs every failure mode and
     /// returns false (the plugin disables itself). `max_range` is in/out:
-    /// derived from prod_line unless `max_range_explicit` (SDF override).
+    /// derived from the resolved product profile unless `max_range_explicit`
+    /// (SDF override). `hardware_revision` is auto or an explicit revision
+    /// selector such as rev06, rev07.1, or rev08.
     /// `imu_enabled` only gates the IMU-profile log lines.
     bool load(const std::string & path, bool imu_enabled,
+              const std::string & hardware_revision,
               bool max_range_explicit, double & max_range);
 
     // ── Products (immutable after a successful load) ─────────────────────
@@ -40,6 +45,7 @@ public:
     std::vector<float> beam_alt_f;          ///< float copies for GPU upload
     std::vector<float> beam_az_f;           ///< (padded to H)
     double beam_origin_mm = 0.0;            ///< lidar_origin_to_beam_origin
+    OusterLidarProfile profile;              ///< resolved product physics
     // Beam altitude bounds including kBeamMarginDeg padding.
     double min_alt = 0.0;
     double max_alt = 0.0;

@@ -547,7 +547,7 @@ void RaycastMirror::threadFunc()
             sp.H = params_.H;
             sp.W = params_.W;
             sp.max_range = static_cast<float>(params_.max_range);
-            sp.near_clip = static_cast<float>(kNearClip);
+            sp.near_clip = static_cast<float>(params_.min_range);
             sp.beam_origin_m =
                 static_cast<float>(params_.beam_origin_mm / 1000.0);
             sp.sun_dir[0] = sun[0];

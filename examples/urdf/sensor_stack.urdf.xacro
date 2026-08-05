@@ -16,6 +16,8 @@
 
   <xacro:arg name="metadata_front" default="metadata/os1_64_rev7.json"/>
   <xacro:arg name="metadata_rear"  default="metadata/os0_128_rev7.json"/>
+  <xacro:arg name="hardware_revision_front" default="rev07"/>
+  <xacro:arg name="hardware_revision_rear"  default="rev07"/>
   <xacro:arg name="ray_mode"       default="raycast"/>
   <xacro:property name="ray_mode" value="$(arg ray_mode)"/>
   <xacro:property name="anchor_type"
@@ -57,6 +59,7 @@
     parent="base_link"
     xyz="0.45 0 0.35" rpy="0 0 0"
     metadata_path="$(arg metadata_front)"
+    hardware_revision="$(arg hardware_revision_front)"
     lidar_hz="10.0"
     enable_imu="true" imu_hz="100.0"
     ray_mode="${ray_mode}"
@@ -68,6 +71,7 @@
     parent="base_link"
     xyz="-0.45 0 0.35" rpy="0 0 ${pi}"
     metadata_path="$(arg metadata_rear)"
+    hardware_revision="$(arg hardware_revision_rear)"
     lidar_hz="10.0"
     enable_imu="false"
     ray_mode="${ray_mode}"

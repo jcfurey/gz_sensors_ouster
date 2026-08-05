@@ -16,6 +16,11 @@
          os2_128_rev7.json    OS2-128 (22.5 VFOV, nominal beam angles)
          osdome_128_rev7.json OSDome  (180 VFOV,  nominal beam angles) -->
   <metadata_path>metadata/os1_64_rev7.json</metadata_path>
+  <!-- Hardware physics profile. Prefer an explicit value because historical
+       and synthetic metadata may not contain a revision-bearing prod_pn.
+       auto | gen1 | revC | revD | rev05 | rev06 | rev06.2 |
+       rev07 | rev07.1 | rev08 -->
+  <hardware_revision>rev07</hardware_revision>
 
   <!-- ROS topic prefix — all topics are published under this namespace.
        Example topics: /sensor/lidar/lidar0/lidar_packets, .../metadata, .../imu -->
@@ -46,10 +51,19 @@
              rendering sensor in the world (see README World requirements). -->
   <!-- <ray_mode>panels</ray_mode> -->
 
-  <!-- Max sensing range in metres. Sets GPU far clip and noise scaling.
-       Auto-derived from metadata prod_line if omitted (OS0→50, OS1→120, OS2→240).
-       Only set this if you need to override the auto-detected value. -->
-  <!-- <max_range>120.0</max_range> -->
+  <!-- Representable range in metres. Defaults to the selected model/revision
+       profile (for example Rev7: OS0/OS1/OSDome 233 m, OS2 404 m; Rev8:
+       500 m). Sets the GPU far clip. Override only for measured/custom units. -->
+  <!-- <max_range>233.0</max_range> -->
+
+  <!-- Minimum reported range. Defaults to the selected hardware profile
+       (for example Rev7 OS1: 0.5 m). Returns outside [min,max) are invalid. -->
+  <!-- <min_range>0.5</min_range> -->
+
+  <!-- When a current datasheet publishes D90 but not D50, place the smooth
+       50%-detection point this fraction beyond D90. Historical products use
+       their published D50 values. Default: 0.15. -->
+  <!-- <detection_rolloff>0.15</detection_rolloff> -->
 
   <!-- Panel-rig angular resolution, as a multiple of the sensor's finest
        angular resolution (beam spacing / column spacing). The rig renders
@@ -70,13 +84,13 @@
              for the tightest direction quantisation. -->
   <!-- <panel_sampling>bilinear</panel_sampling> -->
 
-  <!-- ─── Noise Model (optional, defaults tuned for OS1-64 rev6) ──── -->
+  <!-- ─── Noise Model (optional; precision defaults come from profile) ─ -->
   <!-- All noise parameters can be changed at runtime:
        ros2 param set /gz_gpu_ouster_lidar range_noise_min_std 0.005 -->
 
-  <!-- Range noise: Gaussian, sigma interpolated linearly from min to max
-       with distance. Also scales with reflectivity (dark surfaces = more noise).
-       Validated against ISPRS OS1-64 accuracy study. Units: metres. -->
+  <!-- Range noise: Gaussian, sigma interpolated through the selected
+       hardware/mode precision envelope and scaled by reflectivity. Supplying
+       either value below explicitly overrides that profile endpoint. -->
   <!-- <range_noise_min_std>0.003</range_noise_min_std> -->
   <!-- <range_noise_max_std>0.015</range_noise_max_std> -->
 
@@ -97,12 +111,10 @@
        strongest-return arbitration, signal and noise. -->
   <!-- <base_reflectivity>50.0</base_reflectivity> -->
 
-  <!-- Random dropouts: probability of a missed return, increasing with
-       distance. Also scales with surface reflectivity (dark targets drop more),
-       and returns past the reflectance-dependent detection limit
-       max_range·sqrt(reflectance/0.8) always drop — matching vendor range
-       specs quoted at 80% Lambertian (see docs/MODEL_REFERENCES.md §3).
-       0 = never miss, 1 = always miss. -->
+  <!-- Random dropouts: probability of an additional missed return, increasing
+       with distance and on dark surfaces. This stochastic term is combined
+       with the smooth product-calibrated D90/D50 detection probability
+       (docs/MODEL_REFERENCES.md §3). 0 = no additional random misses. -->
   <!-- <dropout_rate_close>0.0005</dropout_rate_close> -->
   <!-- <dropout_rate_far>0.03</dropout_rate_far> -->
 

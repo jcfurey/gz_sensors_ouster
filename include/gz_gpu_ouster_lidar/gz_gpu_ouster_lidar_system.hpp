@@ -87,8 +87,20 @@ private:
     std::string image_qos_ = "reliable";
     std::string imu_qos_ = "sensor_data";
     bool publish_native_images_ = false;     // os_image is the sim image source
+    std::string hardware_revision_ = "auto"; // auto | gen1 | revC...rev08
     double max_range_ = 120.0;               // metres, default OS1
     bool max_range_explicit_ = false;        // set via SDF (don't auto-derive)
+    double min_range_ = 0.3;
+    bool min_range_explicit_ = false;
+    double detection_range_10_d90_ = 0.0;
+    double detection_range_80_d90_ = 0.0;
+    double detection_range_10_d50_ = 0.0;
+    double detection_range_80_d50_ = 0.0;
+    double detection_rolloff_ = 0.15;
+    double range_resolution_ = 0.001;
+    double range_noise_reference_range_ = 120.0;
+    double mode_range_scale_ = 1.0;
+    double mode_precision_scale_ = 1.0;
     // Smoke / dust / fog obscuration (raycast mode only): mirrored gz
     // <particle_emitter>s plus any authored <obscurant> volumes. Held by
     // pointer like the other src/-private types so this header stays free of
@@ -99,6 +111,8 @@ private:
     // the parsed + clamped initial values handed over at init).
     double range_noise_min_std_ = 0.003;
     double range_noise_max_std_ = 0.015;
+    bool range_noise_min_std_explicit_ = false;
+    bool range_noise_max_std_explicit_ = false;
     double signal_noise_scale_ = 1.0;
     double nearir_noise_scale_ = 1.0;
     double dropout_rate_close_ = 0.0005;

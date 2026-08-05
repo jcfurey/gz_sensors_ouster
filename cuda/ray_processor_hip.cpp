@@ -139,7 +139,15 @@ __global__ void rayProcessKernelHip(
     float base_reflectivity,
     float range_noise_min_std,
     float range_noise_max_std,
+    float range_noise_reference_range,
     float max_range,
+    float min_range,
+    float detection_range_10,
+    float detection_range_80,
+    float detection_range_10_d50,
+    float detection_range_80_d50,
+    float detection_rolloff,
+    float range_resolution,
     float signal_noise_scale,
     float nearir_noise_scale,
     float dropout_rate_close,
@@ -161,8 +169,10 @@ __global__ void rayProcessKernelHip(
         // ray_processor_cpu_impl.cpp for the rationale).
         if (false_alarm_rate > 0.f && rand_states != nullptr &&
             hiprand_uniform(&rand_states[idx]) < false_alarm_rate) {
-            const float d_fa =
-                hiprand_uniform(&rand_states[idx]) * max_range;
+            const float d_fa = rpmath::quantizeRange(
+                min_range + hiprand_uniform(&rand_states[idx]) *
+                    fmaxf(max_range - min_range, 0.0f),
+                range_resolution);
             range_out[idx]  =
                 static_cast<uint32_t>(d_fa * rpmath::kRangeToMm);
             signal_out[idx] = 1u;
@@ -179,6 +189,14 @@ __global__ void rayProcessKernelHip(
 
     hiprandState * rs = (rand_states != nullptr) ? &rand_states[idx] : nullptr;
 
+    if (d < min_range || d >= max_range) {
+        range_out[idx]  = 0u;
+        signal_out[idx] = 0u;
+        refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+        nearir_out[idx] = 0u;
+        return;
+    }
+
     if (edge_discon_threshold > 0.f && rs != nullptr &&
         rpmath::edgeDiscontinuity(depth, idx, H, W, edge_discon_threshold) &&
         hiprand_uniform(rs) < rpmath::kEdgeSuppressProb) {
@@ -189,10 +207,15 @@ __global__ void rayProcessKernelHip(
         return;
     }
 
-    if (rs != nullptr && (dropout_rate_close > 0.f || dropout_rate_far > 0.f)) {
+    if (rs != nullptr &&
+        (dropout_rate_close > 0.f || dropout_rate_far > 0.f ||
+         (detection_range_10 > 0.f && detection_range_80 > 0.f))) {
         const float retro_val = rpmath::retroForNoise(retro, idx);
         const float p_dropout = rpmath::dropoutProbability(
-            d, retro_val, dropout_rate_close, dropout_rate_far, max_range);
+            d, retro_val, dropout_rate_close, dropout_rate_far, max_range,
+            detection_range_10, detection_range_80,
+            detection_range_10_d50, detection_range_80_d50,
+            detection_rolloff);
         if (hiprand_uniform(rs) < p_dropout) {
             range_out[idx]  = 0u;
             signal_out[idx] = 0u;
@@ -205,10 +228,19 @@ __global__ void rayProcessKernelHip(
     if (rs != nullptr && (range_noise_min_std > 0.f || range_noise_max_std > 0.f)) {
         const float retro_val = rpmath::retroForNoise(retro, idx);
         const float sigma = rpmath::rangeNoiseSigma(
-            d, retro_val, range_noise_min_std, range_noise_max_std, max_range);
+            d, retro_val, range_noise_min_std, range_noise_max_std,
+            range_noise_reference_range);
         d = fmaxf(d + hiprand_normal(rs) * sigma, 0.f);
     }
 
+    d = rpmath::quantizeRange(d, range_resolution);
+    if (d < min_range || d >= max_range) {
+        range_out[idx]  = 0u;
+        signal_out[idx] = 0u;
+        refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+        nearir_out[idx] = 0u;
+        return;
+    }
     range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
     float intensity = 1.0f;
@@ -323,7 +355,11 @@ public:
             static_cast<uint16_t *>(d_nearir_),
             pp.H, pp.W,
             pp.base_signal, pp.base_reflectivity,
-            pp.range_noise_min_std, pp.range_noise_max_std, pp.max_range,
+            pp.range_noise_min_std, pp.range_noise_max_std,
+            pp.range_noise_reference_range, pp.max_range,
+            pp.min_range, pp.detection_range_10, pp.detection_range_80,
+            pp.detection_range_10_d50, pp.detection_range_80_d50,
+            pp.detection_rolloff, pp.range_resolution,
             pp.signal_noise_scale, pp.nearir_noise_scale,
             pp.dropout_rate_close, pp.dropout_rate_far,
             pp.false_alarm_rate,
@@ -374,7 +410,11 @@ public:
             static_cast<uint16_t *>(d_nearir_),
             pp.H, pp.W,
             pp.base_signal, pp.base_reflectivity,
-            pp.range_noise_min_std, pp.range_noise_max_std, pp.max_range,
+            pp.range_noise_min_std, pp.range_noise_max_std,
+            pp.range_noise_reference_range, pp.max_range,
+            pp.min_range, pp.detection_range_10, pp.detection_range_80,
+            pp.detection_range_10_d50, pp.detection_range_80_d50,
+            pp.detection_rolloff, pp.range_resolution,
             pp.signal_noise_scale, pp.nearir_noise_scale,
             pp.dropout_rate_close, pp.dropout_rate_far,
             pp.false_alarm_rate,

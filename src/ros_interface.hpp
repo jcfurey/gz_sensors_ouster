@@ -43,7 +43,15 @@ struct RosInterfaceConfig {
     size_t lidar_packet_qos_depth = 5;
     const std::vector<double> * beam_alt_angles = nullptr;  ///< CameraInfo fy
     double lidar_hz = 10.0;
+    std::string lidar_profile;
+    double min_range = 0.3;
     double max_range = 120.0;
+    double detection_range_10 = 0.0;
+    double detection_range_80 = 0.0;
+    double range_resolution = 0.001;
+    double range_noise_reference_range = 120.0;
+    double beam_divergence_fwhm_deg = 0.0;
+    int max_returns = 1;
     double imu_hz = 100.0;
     bool imu_enabled = false;
     bool publish_imu_msg = true;

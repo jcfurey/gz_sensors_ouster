@@ -42,10 +42,15 @@ only to ~20° incidence (Kaasalainen et al.), hence the conservative
 `kRcMinCosInc` clamp; **panels mode** has no per-hit normal (depth images
 only) and does not apply the factor.
 
-### 2. Range precision — photon-budget scaling
+### 2. Range precision — product envelope and photon-budget scaling
 
-**Model:** `σ(R, ρ) = lerp(min_std, max_std; R/max_range) · min(1/√ρ_app, 2)`,
-implemented in `rpmath::rangeNoiseSigma`.
+**Model:**
+`σ(R, ρ) = lerp(σ_near, σ_far; R/R_ref) · min(1/√ρ_app, 2)`,
+implemented in `rpmath::rangeNoiseSigma`. The selected model/revision supplies
+its published precision envelope, `R_ref` is that product's 10%-reflectivity
+D90 range, and the active scan mode scales sigma by the vendor's documented
+`√2` per doubling (or `1/√2` per halving) of gathered points. Explicit SDF
+noise values override the corresponding profile endpoints.
 
 ToF timing precision scales as `σ ∝ 1/√N` for N detected signal photons, and
 N ∝ ρ at fixed range — so the reflectance dependence is `1/√ρ`:
@@ -57,34 +62,59 @@ N ∝ ρ at fixed range — so the reflectance dependence is `1/√ρ`:
 - *Performance Bounds of Ranging Precision in SPAD-Based dToF LiDAR*,
   arXiv:2507.11404 (optimal precision ∝ 1/√N bounds for SPAD detection).
 
-The *range* dependence stays a configurable linear ramp rather than the pure
-`R/√ρ` law: published datasheet precision-vs-range curves (e.g. Ouster OS1,
-±0.7–5 cm band) fold in firmware filtering that an analytic law does not
-capture, so the ramp endpoints are left to the user (see the Sensor Tuning
-Guide in the README).
+The *range* dependence remains a bounded linear interpolation rather than the
+pure `R/√ρ` law: published precision-vs-range envelopes fold in firmware
+filtering that an analytic law does not capture. The envelope now comes from
+the exact hardware profile instead of one OS1-wide default.
 
-### 3. Dropout — detection failure on weak returns
+### 3. Dropout — calibrated detection probability on weak returns
 
-**Model:** `P_drop = lerp(close, far; R/max_range) · min(1/max(ρ_app, ⅓), 3)`,
-implemented in `rpmath::dropoutProbability`.
+**Model:** each hardware profile carries its vendor D90 range at 10% and 80%
+Lambertian reflectivity. At intermediate apparent reflectivity ρ, the plugin
+uses the unique power law through both measured anchors:
 
-Detection probability falls when the return signal approaches the detector
-threshold; received signal ∝ ρ/R², so miss probability rises with range and
-inverse reflectance. The `1/ρ` weighting follows the first-order `1/SNR`
-heuristic; intensity-thresholded ray dropping is the standard treatment in
-simulation. Additionally, beyond the **reflectance-dependent detection
-limit** `d_max(ρ) = max_range·√(ρ/0.8)` the return is always dropped: the
-1/R² lidar equation makes the threshold range scale with √ρ, and vendor
-range specs are quoted at 80% Lambertian — the OS1's published 120 m @ 80% /
-~45 m @ 10% pair matches the √ law's 42 m prediction. (Same construct as
-the reflectance limit function `RL(d)` of arXiv:2208.10295 §II-D.)
+```
+a       = ln(D90,80 / D90,10) / ln(8)
+D90(ρ)  = D90,10 · (ρ / 0.1)^a
+Pdet(R) = 1 / (1 + exp(k · (R − D50)))
+k       = ln(9) / (D50 − D90)
+```
+
+so `Pdet(D90) = 0.9` exactly. Gen1/Gen2 profiles use their published D50
+anchors; where Rev7/Rev8 datasheets publish only D90, the configurable
+`detection_rolloff` places `D50 = D90·(1 + rolloff)` (default 15%). Detection
+range is multiplied by Ouster's documented 1.19 factor for each halving of
+the active point-gathering rate. The calibrated probability is then combined
+with the pre-existing user/environment miss term:
+
+```
+Pkeep = Pdet · (1 − P_random_drop)
+```
+
+implemented in `rpmath::calibratedRangeAtReflectivity`,
+`rpmath::detectionProbability`, and `rpmath::dropoutProbability`.
+
+This replaces the former `max_range·√(ρ/0.8)` hard cutoff. The old expression
+used only one anchor, confused the UDP representable window with optical
+detection range, and made point clouds end at an implausibly sharp surface.
+The logistic tail now thins returns around the actual product specification
+while still enforcing the profile's finite representable range.
 
 - Hahner et al. — *LiDAR Snowfall Simulation for Robust 3D Object Detection*,
   CVPR 2022 (returns culled when attenuated intensity falls below the
   detection threshold). <https://arxiv.org/abs/2203.15118>
 
-This is a heuristic, not a calibrated detection model — a rigorous treatment
-would integrate the full detection statistics (see §2 references).
+Product values come from Ouster's revision-specific datasheets, including the
+[Rev8 OS0](https://data.ouster.io/downloads/datasheets/datasheet-rev8-v4p0-os0.pdf),
+[Rev8 OS1](https://data.ouster.io/downloads/datasheets/datasheet-rev8-v4p0-os1.pdf),
+[Rev8 OSDome](https://data.ouster.io/downloads/datasheets/datasheet-rev8-v4p0-osdome.pdf),
+[Rev8 OS1 MAX](https://data.ouster.io/downloads/datasheets/datasheet-rev8-v4p0-os1-max.pdf),
+and their archived Gen1/Gen2/Rev7 counterparts. Representable range and
+point-gathering factors follow Ouster's
+[operating-mode documentation](https://static.ouster.dev/sensor-docs/image_route1/image_route3/sensor_operations/sensor-operations.html).
+The interpolation between vendor anchors and logistic tail beyond them are
+explicit modeling choices; Ouster does not publish the full detector response
+curve.
 
 ### 3b. Solar-background false alarms
 
@@ -324,8 +354,9 @@ Three properties fall out rather than being coded:
 - Because extinction multiplies the *apparent reflectance*, the whole
   downstream pipeline responds with no knowledge that smoke exists: SIGNAL
   dims by exp(−2τ), the calibrated REFLECTIVITY byte drops, range noise
-  widens on the √ρ weighting, and once ρ·exp(−2τ) falls past the √(ρ/0.8)
-  detection limit of §3 the return disappears entirely.
+  widens on the √ρ weighting, and calibrated detection probability from §3
+  falls smoothly as the attenuated return approaches the product's D90/D50
+  envelope.
 - A beam that hits nothing can still return, because the medium is a target,
   but only when its integrated backscatter produces a nonzero Poisson count.
   That creates sparse phantom points without drawing the whole volume as a

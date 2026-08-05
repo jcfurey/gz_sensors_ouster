@@ -359,7 +359,15 @@ private:
         const float base_refl = p.base_reflectivity;
         const float rmin = p.range_noise_min_std;
         const float rmax = p.range_noise_max_std;
+        const float noise_reference_range = p.range_noise_reference_range;
         const float maxr = p.max_range;
+        const float minr = p.min_range;
+        const float detect10 = p.detection_range_10;
+        const float detect80 = p.detection_range_80;
+        const float detect10d50 = p.detection_range_10_d50;
+        const float detect80d50 = p.detection_range_80_d50;
+        const float detect_rolloff = p.detection_rolloff;
+        const float range_resolution = p.range_resolution;
         const float sig_scale = p.signal_noise_scale;
         const float nir_scale = p.nearir_noise_scale;
         const float drop_close = p.dropout_rate_close;
@@ -379,8 +387,10 @@ private:
                     // ray_processor_cpu_impl.cpp for the rationale).
                     if (fa_rate > 0.f &&
                         uniform01(counter, seed, idx) < fa_rate) {
-                        const float d_fa =
-                            uniform01(counter, seed, idx) * maxr;
+                        const float d_fa = rpmath::quantizeRange(
+                            minr + uniform01(counter, seed, idx) *
+                                sycl::fmax(maxr - minr, 0.0f),
+                            range_resolution);
                         range_out[idx]  = static_cast<uint32_t>(
                             d_fa * rpmath::kRangeToMm);
                         signal_out[idx] = 1u;
@@ -388,6 +398,14 @@ private:
                         nearir_out[idx] = 0u;
                         return;
                     }
+                    range_out[idx]  = 0u;
+                    signal_out[idx] = 0u;
+                    refl_out[idx]   = static_cast<uint8_t>(base_refl);
+                    nearir_out[idx] = 0u;
+                    return;
+                }
+
+                if (d < minr || d >= maxr) {
                     range_out[idx]  = 0u;
                     signal_out[idx] = 0u;
                     refl_out[idx]   = static_cast<uint8_t>(base_refl);
@@ -407,10 +425,13 @@ private:
                 }
 
                 // Dropouts
-                if (drop_close > 0.f || drop_far > 0.f) {
+                if (drop_close > 0.f || drop_far > 0.f ||
+                    (detect10 > 0.f && detect80 > 0.f)) {
                     const float retro_val = rpmath::retroForNoise(retro, static_cast<int>(idx));
                     const float p_drop = rpmath::dropoutProbability(
-                        d, retro_val, drop_close, drop_far, maxr);
+                        d, retro_val, drop_close, drop_far, maxr,
+                        detect10, detect80, detect10d50, detect80d50,
+                        detect_rolloff);
                     if (uniform01(counter, seed, idx) < p_drop) {
                         range_out[idx]  = 0u;
                         signal_out[idx] = 0u;
@@ -423,10 +444,19 @@ private:
                 // Range noise
                 if (rmin > 0.f || rmax > 0.f) {
                     const float retro_val = rpmath::retroForNoise(retro, static_cast<int>(idx));
-                    const float sigma = rpmath::rangeNoiseSigma(d, retro_val, rmin, rmax, maxr);
+                    const float sigma = rpmath::rangeNoiseSigma(
+                        d, retro_val, rmin, rmax, noise_reference_range);
                     d = sycl::fmax(d + normal01(counter, seed, idx) * sigma, 0.f);
                 }
 
+                d = rpmath::quantizeRange(d, range_resolution);
+                if (d < minr || d >= maxr) {
+                    range_out[idx]  = 0u;
+                    signal_out[idx] = 0u;
+                    refl_out[idx]   = static_cast<uint8_t>(base_refl);
+                    nearir_out[idx] = 0u;
+                    return;
+                }
                 range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
                 // Signal 1/r² + shot noise

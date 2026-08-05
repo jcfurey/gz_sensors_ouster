@@ -1,8 +1,9 @@
 # gz_sensors_ouster
 
 Gazebo system plugin (Harmonic / Ionic / Jetty) that simulates Ouster
-LiDAR sensors (OS0, OS1, OS2) with GPU-accelerated ray casting, realistic noise
-models, and native Ouster packet output. Downstream nodes like
+LiDAR sensors (OS0, OS1, OS2, OSDome and OS1 MAX) across Gen1 through Rev8,
+with GPU-accelerated ray casting, product-calibrated detection and noise, and
+native Ouster packet output. Downstream nodes like
 `ouster_ros` `os_cloud` consume the packets identically to real
 hardware -- no driver changes needed.
 
@@ -278,7 +279,7 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `worlds/ouster_demo.sdf` | Demo world (physics + altimeter + IMU systems, ground + obstacles). GPU-free: raycast mode, no rendering Sensors system |
 | `worlds/ouster_demo_panels.sdf` | Panels-mode counterpart of `ouster_demo.sdf` (loads gz-sim-sensors-system/ogre2). Selected automatically by example launches when `ray_mode:=panels` |
 | `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
-| `worlds/ouster_showcase.sdf` | **Guided tour of the sensor model** — labelled zones for range, reflectance, retroreflectors, the detection limit, specular/mirror ghosts, glass, curvature, sun/NEAR_IR and a moving beacon. Raycast (GPU-free), built only from primitives so it needs no downloads. See [Showcase world](#showcase-world) |
+| `worlds/ouster_showcase.sdf` | **Guided tour of the sensor model** — labelled zones for range, reflectance, retroreflectors, calibrated detection rolloff, specular/mirror ghosts, glass, curvature, sun/NEAR_IR and a moving beacon. Raycast (GPU-free), built only from primitives so it needs no downloads. See [Showcase world](#showcase-world) |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
 | `launch/turtlebot3_ouster.launch.py` | Bring up the TurtleBot3 waffle + Ouster (drivable, raycast by default) |
@@ -290,6 +291,7 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py
 # multi-sensor:  ros2 launch gz_sensors_ouster sensor_stack.launch.py
 # with RViz:     ros2 launch gz_sensors_ouster ouster_standalone.launch.py rviz:=true
 # panels mode:   ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
+# Rev8 physics:  ros2 launch gz_sensors_ouster ouster_standalone.launch.py hardware_revision:=rev08
 # WSL/headless:  ros2 launch gz_sensors_ouster ouster_standalone.launch.py headless:=true
 ```
 
@@ -334,7 +336,7 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
 | 45° | Reflectance ladder | Seven panels at one range, `laser_retro` 0.02→1.0: an even staircase across the 0–100 reflectivity band; dark panels are noisier and drop out more |
 | 58–72° | Retroreflector ladder | Nine posts, `laser_retro` 1.3→300 → the calibrated log band walked end to end (bytes 108, 130, 151, 173, 195, 220, 242, 255, 255), like signs and retro tape |
 | 82–129° | **Signal / intensity ladder** | Nine posts at *fixed* reflectivity walking in from 19.2 m to 1.2 m. SIGNAL is `base_signal·ρ/r²`, so the 1/r² term — not reflectivity — is what sweeps it; the closest post saturates the channel outright |
-| 135° | Detection limit | A dark (ρ=0.10) target at 34 m returns; its twin at 52 m is past `max_range·√(ρ/0.8)` = 42 m and **always** drops — while a bright target at the same 52 m returns fine. The miss is reflectance-driven, not a range cutoff |
+| 135° | Detection rolloff | Rev7 OS1 dark targets at 90 m and 115 m sit at the published 90%-detection point and in its smooth tail; a bright target at 115 m remains highly detectable. Returns thin statistically instead of disappearing at an artificial hard boundary. |
 | 180° | Specular / gloss | Matte (kₛ 0.10), glossy (0.45) and mirror (0.95) faces: the specular lobe, and above the mirror threshold a **ghost return** behind the mirror (the orange post's reflection) |
 | 215° | Glass | Panes at τ=0.60 and τ=0.92 with walls behind: the pane wins on the first, the wall behind wins on the second — "lidar sees through the window" |
 | 270° | Curvature | Spheres and cylinders of several radii: apparent reflectance ρ·cos(α) falls off toward each silhouette |
@@ -354,7 +356,7 @@ of values can look correct in sim and fall over on real data. Measured from the
 | `intensity` (SIGNAL) | 0 | **65535** | 4.8 decades, ~7800 distinct values |
 | `reflectivity` | 0 | **255** | ~206 distinct values across 0–255 |
 | `ambient` (NEAR_IR) | 0 | **65535** | saturates on the sun-facing retro panel |
-| `range` | 0 | **113977 mm** | out to the 110 m perimeter (OS1 window is 120 m) |
+| `range` | 0 | **~110000 mm** | out to the 110 m perimeter (inside the Rev7 OS1's 233 m representable window) |
 
 Two design points make the hard channels reachable:
 
@@ -363,12 +365,11 @@ Two design points make the hard channels reachable:
   ladder existed this world peaked at **195** of a possible 65535 (0.3% of the
   channel), with a third of objects returning literally 0. The ladder walks in
   to 1.2 m at *constant* `laser_retro`, so range alone sweeps it.
-- **Occlusion and detection limits are load-bearing.** The perimeter sits at
-  110 m rather than 60 m, because at 60 m it silently blocked the 70 m and
-  105 m range targets (max observed range was 69 m). Its `laser_retro` is 0.75
-  so that its own detection limit `120·√(0.75/0.8) = 116 m` stays beyond its
-  110 m distance — at the earlier 0.45 the wall would have been dropped by the
-  reflectance model instead of returning.
+- **Occlusion and calibrated detection are load-bearing.** The perimeter sits
+  at 110 m rather than 60 m, because at 60 m it silently blocked the 70 m and
+  105 m range targets (max observed range was 69 m). Its `laser_retro` is 0.75,
+  which keeps a Rev7 OS1 return at that range highly probable while the dark
+  Zone D target visibly thins through its product-calibrated rolloff.
 
 Two further properties worth knowing:
 
@@ -598,8 +599,34 @@ simulation without real hardware:
 | `osdome_128_rev7.json` | OSDome-128 | 128 | 180° | Nominal | Hemispheric (8 pitched panels + zenith cap) |
 
 The default files use the `RNG19_RFL8_SIG16_NIR16` lidar profile, `LEGACY`
-IMU profile, and 1024 columns/frame at 10 Hz. `max_range` is auto-derived
-from `prod_line` when not set in SDF.
+IMU profile, and 1024 columns/frame at 10 Hz. Product physics are selected by
+the metadata `prod_line` plus `<hardware_revision>`; explicit example values
+default to `rev07`. With `hardware_revision=auto`, a real revision-bearing
+`prod_pn` is preferred and firmware/product clues are used when unambiguous.
+
+### Hardware physics profiles
+
+The selected model and revision control minimum and representable range,
+published 100-klx D90 detection points, precision, range resolution, beam
+diameter/divergence, accuracy bounds, and return capability. Related revisions
+with unchanged optical specifications intentionally share a row:
+
+| Generation / revision | Models | D90 range at 10% / 80% reflectivity (m) | Representable / minimum range (m) | Returns |
+|-----------------------|--------|-------------------------------------------|-----------------------------------|---------|
+| Gen1 OS1, FW 1.x | OS1 | 40 / 105 | 200 / 0.8 | 1 |
+| Gen1 OS1, FW 2.x | OS1 | 50 / 110 | 200 / 0.8 | 1 |
+| Rev C, D, 05 | OS0; OS1; OS2 | 15 / 45; 45 / 100; 80 / 210 | 270 / 0.3; 270 / 0.3; 465 / 1.0 | 1 |
+| Rev 06, 06.2 | OS0; OS1; OS2 | 15 / 45; 45 / 100; 80 / 210 | 270 / 0.3; 270 / 0.3; 465 / 1.0 | 2 |
+| Rev 07 | OS0; OS1; OS2; OSDome | 35 / 75; 90 / 170; 200 / 350; 20 / 45 | 233 / 0.5; 233 / 0.5; 404 / 0.8; 233 / 0.5 | 2 |
+| Rev 07.1 | OS0; OS1; OSDome | 35 / 75; 90 / 170; 20 / 45 | 233 / 0.5; 233 / 0.5; 233 / 0.5 | 2 |
+| Rev 08 | OS0; OS1; OSDome; OS1 MAX | 35 / 75; 90 / 170; 20 / 45; 200 / 350 | 500 / 0.5 (all models) | 2 |
+
+D90 is the distance where detection probability remains at least 90%, not a
+hard maximum. The plugin interpolates the published 10% and 80% reflectivity
+anchors, then applies a smooth D90-to-D50 rolloff. The active scan mode also
+uses Ouster's documented point-gathering factors: halving the column rate
+multiplies detection range by 1.19 and precision sigma by 0.71. An explicit
+`max_range`, `min_range`, or range-noise setting remains an SDF override.
 
 ### Profile variants (modern vs LEGACY)
 
@@ -637,6 +664,7 @@ All noise model parameters can be changed at runtime via
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `metadata_path` | string | Path to Ouster calibration JSON. Absolute paths are used as-is; relative paths are resolved against the SDF file's directory. |
+| `hardware_revision` | string | Product physics revision: `auto`, `gen1`, `revC`, `revD`, `rev05`, `rev06`, `rev06.2`, `rev07`, `rev07.1`, or `rev08`. Prefer an explicit value for synthetic metadata without a real revision-bearing part number. |
 | `sensor_name` | string | ROS topic prefix and node namespace (e.g. `/sensor/lidar/lidar0`). |
 
 ### Lidar
@@ -644,7 +672,9 @@ All noise model parameters can be changed at runtime via
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | `lidar_hz` | 10.0 | > 0 | Scan rate in Hz. |
-| `max_range` | *auto* | >= 1 | Max sensing range in metres. Auto-derived from metadata `prod_line` if not set (OS0: 50, OS1: 120, OS2: 240). Also sets the GPU far clip plane. |
+| `max_range` | *profile* | >= 1 | Representable range in metres from the model/revision profile; explicit values override it. Also sets the GPU far clip plane. |
+| `min_range` | *profile* | >= 0 | Minimum reported range from the model/revision profile; explicit values override it. |
+| `detection_rolloff` | 0.15 | > 0 | Fraction beyond D90 used to place the smooth D50 point when a datasheet does not publish D50. Historical profiles use their published D50 anchors. |
 | `visibility_mask` | 4294967295 | 0 to 4294967295 | **Panels mode only.** Gazebo render visibility mask applied to the panel depth cameras (a visual is seen when `visual.visibility_flags & visibility_mask != 0`), so it can include/exclude visuals from the rendered scan. Has **no effect in `raycast` mode**, which casts against every mirrored visual regardless. |
 | `ray_mode` | `raycast` | `panels` \| `raycast` | `panels` renders a perspective depth-panel rig on the GPU and resamples each beam from it. `raycast` casts every beam exactly (calibrated direction, true beam-origin parallax) against an ECM scene mirror — zero interpolation error, with a per-visual material model: `laser_retro × cos(incidence)` diffuse + a specular lobe from the material `<specular>` (glossy/black paint signature) + see-through `<transparency>` (glass: pane vs object-behind, strongest return wins). Extended-Lambertian lidar equation per [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md); no rendering involved (no anchor-sensor requirement). Runs on CUDA/HIP/SYCL when available with an OpenMP CPU fallback; mirrors box/sphere/cylinder/plane/mesh visuals. |
 | `panel_oversample` | 2.0 | 1 to 4 | Panels mode only. Panel angular resolution as a multiple of the sensor's finest angular resolution. Higher = sharper edges, more VRAM and render time. |
@@ -675,8 +705,8 @@ subscriber QoS).
 
 ### Noise Model
 
-Defaults are validated against ISPRS OS1-64 accuracy assessment and
-Ouster FW 1.13+ datasheets. All are dynamically reconfigurable.
+Range and detection defaults come from the selected Ouster hardware profile.
+User-adjustable noise and dropout terms remain dynamically reconfigurable.
 
 Dropout and range noise also scale with surface reflectivity: dark
 surfaces (low retro) get up to 3x higher dropout and 2x more range
@@ -685,14 +715,14 @@ targets produce weaker returns.
 
 | Parameter | Default | Range | Units | Description |
 |-----------|---------|-------|-------|-------------|
-| `range_noise_min_std` | 0.003 | >= 0 | m | Range noise sigma at 0 m. Linearly interpolated to max_std at max_range. Scales with reflectivity. |
-| `range_noise_max_std` | 0.015 | >= 0 | m | Range noise sigma at max_range. |
+| `range_noise_min_std` | *profile* | >= 0 | m | Near-range precision sigma. Defaults to the selected hardware/mode precision envelope and scales with reflectivity. |
+| `range_noise_max_std` | *profile* | >= 0 | m | Far precision sigma, reached at the profile's 10%-reflectivity D90 reference range. |
 | `signal_noise_scale` | 1.0 | >= 0 | -- | Poisson shot noise on signal channel. 0 = off, 1 = physical. |
 | `nearir_noise_scale` | 1.0 | >= 0 | -- | Poisson noise on near-IR channel (both packet and image). |
 | `base_signal` | 800.0 | >= 0 | photon m^2 | Baseline for the 1/r² signal model and photon-limited aerosol detection. OS0: ~400, OS1: ~800. |
 | `base_reflectivity` | 50.0 | 0-255 | -- | Default calibrated reflectivity byte when no retro channel is available. In raycast mode, an omitted `laser_retro` is converted to physical reflectance before incidence, smoke attenuation and return arbitration. |
 | `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
-| `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at max_range. Returns past the reflectance-dependent detection limit `max_range·√(ρ/0.8)` always drop. |
+| `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at the representable range, combined with the product-calibrated smooth detection probability. |
 | `false_alarm_rate` | 0.0 | 0-1 | probability | Solar-background false alarms: each no-return pixel becomes a spurious point (uniform range, noise-floor signal) with this probability per frame. 0 = off. Try 0.0005-0.002 for bright daylight. |
 | `motion_distortion` | false | bool | -- | Raycast mode only. Rolling-shutter sweep: each column casts from the sensor pose at its acquisition time (interpolated per sim tick), skewing the cloud by the platform's motion over one scan — as a real spinning lidar does (see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9). Ego motion only; default off preserves the instantaneous snapshot. |
 | `edge_discon_threshold` | 0.15 | >= 0 | m | Depth-discontinuity suppression threshold (1ns echo delay convention). 0 = off. |
@@ -783,15 +813,12 @@ consumers don't get literal-zero variances.
 
 ## Sensor Tuning Guide
 
-| Sensor | `max_range` | `base_signal` | `range_noise_min_std` | `range_noise_max_std` | `dropout_rate_far` | `edge_discon_threshold` |
-|--------|-------------|---------------|-----------------------|-----------------------|--------------------|--------------------------|
-| OS0-128 | 50 | 400 | 0.005 | 0.020 | 0.05 | 0.20 |
-| OS1-64 (default) | 120 | 800 | 0.003 | 0.015 | 0.03 | 0.15 |
-| OS2-128 | 240 | 1200 | 0.003 | 0.020 | 0.04 | 0.10 |
-
-> `max_range` is auto-derived from the metadata JSON's `prod_line` field
-> when not explicitly set. The other values must be overridden in SDF if
-> you are not using the OS1 defaults.
+Start by selecting the real `<hardware_revision>` and matching model metadata;
+the profile supplies the optical limits and precision. Tune environmental
+terms (`base_signal`, shot noise, random dropout, solar false alarms and
+obscurants) only for the simulated conditions. `max_range`, `min_range` and
+range-noise parameters are escape hatches for measured unit-specific behavior,
+not required per-model boilerplate.
 
 ## Performance
 

@@ -42,7 +42,7 @@
       45°  B: reflectance ladder           REFLECTIVITY byte, 0-100 band
       70°  C: retroreflector ladder        REFLECTIVITY byte, 101-255 log band
    82-129°  K: signal/intensity ladder     SIGNAL sweeps its full uint16 range
-     135°  D: detection limit              dark far target drops, bright does not
+     135°  D: calibrated detection         smooth dark-target rolloff vs bright
      180°  E: specular / gloss             specular lobe; mirror ghost returns
      215°  F: glass                        pane vs object behind it
      270°  G: curvature                    incidence-angle falloff
@@ -50,15 +50,16 @@
      330°  I: moving beacon                motion distortion, dynamic transforms
        -   J: perimeter + ground           long-range structure and ground plane
 
-  All tuned for the default OS1-64 metadata (max_range 120 m). With OS0
-  (50 m) the far half of zones A and D fall outside range — that is itself a
-  useful thing to see.
+  All tuned for the default Rev7 OS1-64 profile: 0.5 m minimum, 233 m
+  representable range, and >90% detection at 90 m / 170 m for 10% / 80%
+  Lambertian targets. Selecting OS0, OS2, another revision, or another scan
+  mode deliberately changes the density in zones A and D.
 
   CHANNEL COVERAGE. The world is built so one scan drives every Ouster data
   channel across (most of) its domain, not just a narrow slice — otherwise a
   consumer can look correct here and fall over on real data:
 
-    RANGE         0.3 m near clip out to the 105 m target and the 110 m walls.
+    RANGE         0.5 m default minimum out to the 105 m target and 110 m walls.
     REFLECTIVITY  ~2 to 255. Zone B walks the linear Lambertian band
                   (retro 0.02-1.0 -> bytes 2,10,25,45,65,85,100); zone C walks
                   the log retro band (retro 1.3-300 -> 108,130,151,173,195,
@@ -131,9 +132,9 @@
          constant, so the cloud shows the pure range effects:
            * range noise sigma ramps min->max with distance
            * signal falls as 1/r^2
-           * dropout_rate_far raises the miss rate on the last two
-         At the OS1 default (120 m) the 105 m target sits near the edge of
-         the range window and visibly thins out. -->
+           * calibrated precision and stochastic misses grow with distance
+         Rev7 OS1's 80%-target D90 is 170 m, so all six remain well inside its
+         calibrated detection envelope. -->
     <model name="A_range_06m">
       <static>true</static><pose>6 0 0.75 0 0 0</pose>
       <link name="link">
@@ -472,42 +473,41 @@
     </model>
 
 
-    <!-- ══ ZONE D — REFLECTANCE-DEPENDENT DETECTION LIMIT (az 135°) ═══════
-         The model drops every return past d_max(rho) = max_range*sqrt(rho/0.8)
-         — detection SNR goes as rho/d^2, and vendor range specs are quoted at
-         80% reflectance. For the OS1 default (max_range 120 m):
-             rho = 0.10 -> d_max = 120*sqrt(0.125) = 42.4 m
-         The three targets below are the controlled experiment:
-           D_dark_34m   rho 0.10 @ 34 m  -> inside  the limit, returns
-           D_dark_52m   rho 0.10 @ 52 m  -> BEYOND  the limit, always drops
-           D_bright_52m rho 0.80 @ 52 m  -> same range, bright, returns
-         Seeing the dark one vanish while its bright twin at identical range
-         survives is the whole point: the miss is reflectance-driven, not a
-         range cutoff. -->
-    <model name="D_dark_34m">
-      <static>true</static><pose>-24.04 24.04 1.4 0 0 0.7854</pose>
+    <!-- ══ ZONE D — CALIBRATED DETECTION ROLLOFF (az 135°) ════════════════
+         Product datasheets specify >90% detection ranges at both 10% and 80%
+         Lambertian reflectivity. The model anchors a smooth probability curve
+         at those D90 values instead of drawing a hard geometric cutoff. For
+         the default Rev7 OS1 at 1024x10, D90 is 90 m dark / 170 m bright.
+         These targets make the distinction visible across repeated scans:
+           D_dark_90m    rho 0.10 @ 90 m  -> about 90% detection
+           D_dark_115m   rho 0.10 @ 115 m -> in the smooth tail (~13%)
+           D_bright_115m rho 0.80 @ 115 m -> comfortably inside D90
+         The far dark face flickers sparsely rather than becoming a silly,
+         perfectly empty silhouette at one exact range. -->
+    <model name="D_dark_90m">
+      <static>true</static><pose>-63.64 63.64 2.0 0 0 0.7854</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>2.5 0.3 2.8</size></box></geometry></collision>
+        <collision name="c"><geometry><box><size>4.0 0.3 4.0</size></box></geometry></collision>
         <visual name="v"><laser_retro>0.10</laser_retro>
-          <geometry><box><size>2.5 0.3 2.8</size></box></geometry>
+          <geometry><box><size>4.0 0.3 4.0</size></box></geometry>
           <material><diffuse>0.1 0.1 0.12 1</diffuse></material></visual>
       </link>
     </model>
-    <model name="D_dark_52m">
-      <static>true</static><pose>-36.77 36.77 1.8 0 0 0.7854</pose>
+    <model name="D_dark_115m">
+      <static>true</static><pose>-81.32 81.32 2.5 0 0 0.7854</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>3.0 0.3 3.6</size></box></geometry></collision>
+        <collision name="c"><geometry><box><size>5.0 0.3 5.0</size></box></geometry></collision>
         <visual name="v"><laser_retro>0.10</laser_retro>
-          <geometry><box><size>3.0 0.3 3.6</size></box></geometry>
+          <geometry><box><size>5.0 0.3 5.0</size></box></geometry>
           <material><diffuse>0.1 0.1 0.12 1</diffuse></material></visual>
       </link>
     </model>
-    <model name="D_bright_52m">
-      <static>true</static><pose>-33.94 39.60 1.8 0 0 0.7854</pose>
+    <model name="D_bright_115m">
+      <static>true</static><pose>-75.0 87.0 2.5 0 0 0.7854</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>3.0 0.3 3.6</size></box></geometry></collision>
+        <collision name="c"><geometry><box><size>5.0 0.3 5.0</size></box></geometry></collision>
         <visual name="v"><laser_retro>0.80</laser_retro>
-          <geometry><box><size>3.0 0.3 3.6</size></box></geometry>
+          <geometry><box><size>5.0 0.3 5.0</size></box></geometry>
           <material><diffuse>0.9 0.9 0.9 1</diffuse></material></visual>
       </link>
     </model>
@@ -794,10 +794,10 @@
 
     <!-- ══ ZONE J — PERIMETER (radius 110 m) ══════════════════════════════
          Four long wall segments at 110 m — OUTSIDE the range ladder (zone A
-         reaches 105 m) so they cannot occlude it, and inside the OS1 120 m
-         window. Their laser_retro is 0.75, which puts their detection limit
-         max_range*sqrt(0.75/0.8) = 116 m beyond their own 110 m distance; at
-         the previous 0.45 they would have been silently dropped out here. They give
+         reaches 105 m) so they cannot occlude it, and inside Rev7 OS1's
+         233 m representable window. Their laser_retro is 0.75, close to the
+         published 80% anchor whose D90 is 170 m, so 110 m is a high-confidence
+         return without relying on an artificial hard threshold. They give
          the cloud far structure to register against (useful for SLAM demos),
          and their length means a single wall spans many azimuth columns —
          handy for spotting azimuth/encoder-convention errors, which show up
