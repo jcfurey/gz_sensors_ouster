@@ -15,11 +15,12 @@
 
   <xacro:arg name="metadata_lidar0" default="metadata/os1_64_rev7.json"/>
   <xacro:arg name="ray_mode"       default="raycast"/>
+  <xacro:arg name="obscurant_profile" default=""/>
   <xacro:property name="ray_mode" value="$(arg ray_mode)"/>
   <xacro:property name="anchor_type"
     value="${'altimeter' if ray_mode == 'raycast' else 'camera'}"/>
 
-  <xacro:include filename="$(find gz_sensors_ouster)/examples/urdf/ouster_macro.xacro"/>
+  <xacro:include filename="ouster_macro.xacro"/>
 
   <!-- Root frame -->
   <link name="base_footprint"/>
@@ -57,6 +58,7 @@
     lidar_hz="10.0"
     enable_imu="true" imu_hz="100.0"
     ray_mode="${ray_mode}"
-    anchor_type="${anchor_type}"/>
+    anchor_type="${anchor_type}"
+    obscurant_profile="$(arg obscurant_profile)"/>
 
 </robot>

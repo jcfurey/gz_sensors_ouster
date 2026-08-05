@@ -118,8 +118,9 @@ struct RcObscurant {
 /// first so nobody raises it blindly:
 ///   * kernel argument space — CUDA and HIP allow 4 KB, and real Level Zero
 ///     devices report ≥ 2 KB, against ~1.2 KB of ScanParams here;
-///   * per-thread scratch — rcDepthAtOpticalDepth keeps three float[N] spans
-///     on the stack, so N also sets the local-memory footprint of every ray.
+///   * per-thread scratch — the medium sampler keeps two float[N] span arrays
+///     plus their indices on the stack, so N also sets the local-memory
+///     footprint of every ray.
 ///
 /// A world with more obscurants than this keeps the ones nearest the sensor
 /// and logs what it dropped (see gatherObscurants); it never silently loses
@@ -156,6 +157,11 @@ struct ScanParams {
     /// Derived once per scan from ProcessParams::base_reflectivity so missing
     /// materials participate correctly in incidence/extinction/arbitration.
     float fallback_retro = rpmath::kDefaultRetro;
+    /// Sensor gain used to turn the integrated medium-return profile into an
+    /// expected photon count. This is the same base_signal consumed by the
+    /// downstream channel model, so changing sensor sensitivity changes both
+    /// the chance of detecting aerosol and the reported SIGNAL consistently.
+    float base_signal = 800.0f;
 
     // ── Participating media (smoke / dust / fog) ─────────────────────────
     RcObscurant obscurants[kMaxObscurants];
@@ -165,9 +171,8 @@ struct ScanParams {
     /// returns the energy scattered from the slab the detector integrates
     /// over, so the medium's apparent reflectance carries this factor.
     float pulse_gate_m = 0.6f;
-    /// Per-scan salt for the deterministic scatter-depth draw. Pure integer
-    /// hashing (rcHashUnit) keeps every backend bit-identical while still
-    /// decorrelating rays and successive scans.
+    /// Per-scan salt for the medium-range draw. The pixel index supplies the
+    /// spatial key; changing this salt decorrelates successive scans.
     uint32_t rng_salt = 0;
 };
 
@@ -797,93 +802,253 @@ GZ_OUSTER_HD inline float rcOpticalDepth(const ScanParams & sp,
     return tau;
 }
 
-/// Extinction and backscatter coefficients of the medium at one world point:
-/// σ = Σσ_i and β_π = Σσ_i/S_i over every volume containing the point.
-GZ_OUSTER_HD inline void rcMediumProps(const ScanParams & sp, RcV3 p,
-                                       float & sigma_out, float & beta_out)
-{
-    sigma_out = 0.0f;
-    beta_out = 0.0f;
-    for (int i = 0; i < sp.n_obscurants; ++i) {
-        const RcObscurant & ob = sp.obscurants[i];
-        if (ob.sigma <= 0.0f) continue;
-        if (!rcObscurantContains(ob, p)) continue;
-        sigma_out += ob.sigma;
-        if (ob.lidar_ratio > 0.0f) beta_out += ob.sigma / ob.lidar_ratio;
-    }
-}
-
-/// Geometric depth at which the accumulated ATTENUATING optical depth
-/// ∫η·σ_ext ds first reaches `tau_target`, i.e. the inverse of τ_eff(s) over
-/// [t_lo, t_hi]. That is the quantity the transmittance profile is built
-/// from, so the scatter-depth sampler inverts against it; with η = 1
-/// everywhere it is the inverse of the plain optical depth.
+/// Deterministic uniform draw in (0, 1), shared by every backend.
 ///
-/// τ_eff(s) is piecewise linear with slope Ση_i·σ_i over the volumes covering
-/// s, so the inverse is exact if the walk stops at every span endpoint. Each
-/// iteration advances to the next endpoint and there are at most 2·n of them,
-/// which bounds the loop without needing a sorted index array on device.
-GZ_OUSTER_HD inline float rcDepthAtOpticalDepth(const ScanParams & sp,
-    RcV3 o, RcV3 d, float t_lo, float t_hi, float tau_target)
+/// Native GPU RNGs would make CUDA, HIP and SYCL produce different clouds.
+/// This integer hash instead gives each (pixel, scan, stream) tuple a stable
+/// draw while the scan salt still makes the plume evolve over time.
+GZ_OUSTER_HD inline float rcHashUnit(uint32_t pixel, uint32_t salt,
+                                     uint32_t stream = 0)
 {
-    float sa[kMaxObscurants], sb[kMaxObscurants], ss[kMaxObscurants];
-    int n = 0;
-    for (int i = 0; i < sp.n_obscurants; ++i) {
-        const RcObscurant & ob = sp.obscurants[i];
-        if (ob.sigma <= 0.0f) continue;
-        float a, b;
-        if (!rcObscurantSpan(ob, o, d, t_lo, t_hi, a, b)) continue;
-        sa[n] = a;
-        sb[n] = b;
-        ss[n] = ob.sigma * ob.ms_factor;
-        ++n;
-    }
-
-    float t = t_lo;
-    float acc = 0.0f;
-    for (int step = 0; step < 2 * kMaxObscurants; ++step) {
-        float density = 0.0f;
-        float t_next = t_hi;
-        for (int i = 0; i < n; ++i) {
-            if (t >= sa[i] && t < sb[i]) {
-                density += ss[i];
-                if (sb[i] < t_next) t_next = sb[i];
-            } else if (sa[i] > t && sa[i] < t_next) {
-                t_next = sa[i];
-            }
-        }
-        if (t_next <= t) break;
-        if (density > 0.0f) {
-            const float dtau = density * (t_next - t);
-            if (acc + dtau >= tau_target) {
-                return t + (tau_target - acc) / density;
-            }
-            acc += dtau;
-        }
-        t = t_next;
-    }
-    return t_hi;
-}
-
-/// Deterministic uniform draw in (0, 1) from two integers.
-///
-/// The scatter depth has to be sampled, but the raycast kernels are
-/// deliberately RNG-free so that every backend produces identical output
-/// (each backend's own curand/hiprand/oneMKL stream would not). Integer
-/// hashing gives a reproducible draw that is bit-identical everywhere:
-/// the mix is Murmur3's finaliser with Degski's constants.
-GZ_OUSTER_HD inline float rcHashUnit(uint32_t a, uint32_t b)
-{
-    uint32_t x = a * 0x9E3779B9u ^ (b + 0x85EBCA6Bu);
+    uint32_t x = pixel * 0x9E3779B9u ^ salt * 0x85EBCA6Bu ^
+                 stream * 0xC2B2AE35u;
     x ^= x >> 16;
     x *= 0x7FEB352Du;
     x ^= x >> 15;
     x *= 0x846CA68Bu;
     x ^= x >> 16;
-    // ×2⁻³² lands in [0, 1); the clamp keeps both endpoints out of the
-    // caller's log(1 − ξ), where either one would produce ±inf.
     const float u = static_cast<float>(x) * 2.3283064e-10f;
     return rpmath::gzm::fmin_(rpmath::gzm::fmax_(u, 1.0e-7f), 0.9999999f);
+}
+
+/// Integral of exp(-2*k*x) over [0, length], evaluated without catastrophic
+/// cancellation for optically thin segments.
+GZ_OUSTER_HD inline float rcDecayIntegral(float k, float length)
+{
+    const float q = 2.0f * k * length;
+    if (q < 1.0e-3f) {
+        return length * (1.0f - 0.5f * q + q * q / 6.0f);
+    }
+    return (1.0f - rpmath::gzm::exp_(-q)) / (2.0f * k);
+}
+
+/// Mean rejection acceptance under one segment's analytic proposal.
+///
+/// Three-point Gauss-Legendre quadrature is evaluated in proposal-CDF space,
+/// where the integrand is only the bounded acceptance ratio. The tighter-
+/// envelope choice in rcSelectMediumSegment keeps that ratio smooth even for
+/// optically thick or long spans, making this a cheap, stable estimate of the
+/// physical q-profile mass rather than its upper envelope.
+GZ_OUSTER_HD inline float rcProposalAcceptanceMean(
+    bool use_exp, float k, float length, float r0, float r1)
+{
+    float mean = 0.0f;
+    for (int j = 0; j < 3; ++j) {
+        const float u = j == 0 ? 0.1127016654f
+                      : j == 1 ? 0.5f : 0.8872983346f;
+        const float w = j == 1 ? 0.4444444444f : 0.2777777778f;
+        float x = 0.0f;
+        float accept = 0.0f;
+        if (use_exp) {
+            const float q = 2.0f * k * length;
+            x = (q < 1.0e-3f)
+                ? u * length
+                : -rpmath::gzm::log_(
+                    1.0f - u * (1.0f - rpmath::gzm::exp_(-q))) /
+                    (2.0f * k);
+            const float ratio = r0 / (r0 + x);
+            accept = ratio * ratio;
+        } else {
+            const float inv_r = 1.0f / r0 -
+                u * (1.0f / r0 - 1.0f / r1);
+            x = 1.0f / inv_r - r0;
+            accept = rpmath::gzm::exp_(-2.0f * k * x);
+        }
+        mean += w * accept;
+    }
+    return mean;
+}
+
+/// Walk the constant-property segments made by a set of ray/volume spans.
+///
+/// The desired range density is the received backscatter-power profile
+///
+///   q(t) = beta(t) * exp(-2*tau_eff(t)) / (t + n_off)^2.
+///
+/// Within one segment beta and k=d(tau_eff)/dt are constant. Two simple
+/// proposal envelopes are available there: retain the exponential and bound
+/// 1/R^2 by its near value, or retain 1/R^2 and bound the exponential by its
+/// near value. The tighter envelope is recorded implicitly by `use_exp_out`.
+/// A negative `pick` only computes the total proposal mass; otherwise this
+/// selects the segment containing that cumulative mass.
+GZ_OUSTER_HD inline bool rcSelectMediumSegment(
+    const ScanParams & sp, RcV3 o, RcV3 d, float n_off, float t_end,
+    const float * sa, const float * sb, const int * oi, int n,
+    float pick, float & total_out, float & a_out, float & b_out,
+    float & beta_out, float & k_out, float & tau_out, bool & use_exp_out,
+    float * profile_mass_out)
+{
+    const float t_start = rpmath::gzm::fmax_(sp.near_clip, 0.0f);
+    if (t_start >= t_end) {
+        total_out = 0.0f;
+        return false;
+    }
+
+    float tau_eff = 0.0f;
+    (void)rcOpticalDepth(sp, o, d, 0.0f, t_start, nullptr, &tau_eff);
+    float total = 0.0f;
+    float profile_mass = 0.0f;
+    float t = t_start;
+    for (int step = 0; step < 2 * kMaxObscurants + 1; ++step) {
+        float next = t_end;
+        float beta = 0.0f;
+        float k = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            const RcObscurant & ob = sp.obscurants[oi[i]];
+            if (t >= sa[i] && t < sb[i]) {
+                k += ob.sigma * ob.ms_factor;
+                if (ob.lidar_ratio > 0.0f) beta += ob.sigma / ob.lidar_ratio;
+                if (sb[i] < next) next = sb[i];
+            } else if (sa[i] > t && sa[i] < next) {
+                next = sa[i];
+            }
+        }
+        if (next <= t) break;
+
+        if (beta > 0.0f && k > 0.0f) {
+            const float r0 = rpmath::gzm::fmax_(t + n_off, 1.0e-3f);
+            const float r1 = rpmath::gzm::fmax_(next + n_off, r0 + 1.0e-6f);
+            const float trans = rpmath::gzm::exp_(-2.0f * tau_eff);
+            const float w_exp = beta * trans * rcDecayIntegral(k, next - t) /
+                                (r0 * r0);
+            const float w_inv = beta * trans * (1.0f / r0 - 1.0f / r1);
+            const bool use_exp = w_exp <= w_inv;
+            const float weight = use_exp ? w_exp : w_inv;
+            if (weight > 0.0f) {
+                profile_mass += weight * rcProposalAcceptanceMean(
+                    use_exp, k, next - t, r0, r1);
+                if (pick >= 0.0f && pick < total + weight) {
+                    total_out = total + weight;
+                    if (profile_mass_out != nullptr) {
+                        *profile_mass_out = profile_mass;
+                    }
+                    a_out = t;
+                    b_out = next;
+                    beta_out = beta;
+                    k_out = k;
+                    tau_out = tau_eff;
+                    use_exp_out = use_exp;
+                    return true;
+                }
+                total += weight;
+            }
+        }
+
+        tau_eff += k * (next - t);
+        t = next;
+        if (t >= t_end) break;
+    }
+    total_out = total;
+    if (profile_mass_out != nullptr) *profile_mass_out = profile_mass;
+    return false;
+}
+
+/// Draw one detected range from the complete range-resolved backscatter
+/// profile. Overlap is exact: each piecewise segment sums beta and attenuating
+/// extinction from every active volume, even when their lidar ratios differ.
+///
+/// First, the integrated profile becomes an expected photon count
+/// lambda = pi*base_signal*integral(q dr). A Poisson zero-count gate therefore
+/// leaves weak / distant aerosol beams empty instead of turning every volume
+/// intersection into a point. Conditional on a detection, rejection sampling
+/// uses the tighter of the two analytic envelopes described above, so both
+/// two-way transmittance and 1/R^2 spreading are present in the range draw.
+/// Six attempts keep device execution bounded; numerical rejection failure
+/// simply means this pulse produced no medium candidate.
+GZ_OUSTER_HD inline bool rcSampleMediumReturn(
+    const ScanParams & sp, RcV3 o, RcV3 d, float t_end, float n_off,
+    uint32_t pixel, float & range_out, float & rho_out)
+{
+    if (sp.pulse_gate_m <= 0.0f) return false;
+
+    float sa[kMaxObscurants], sb[kMaxObscurants];
+    int oi[kMaxObscurants];
+    int n = 0;
+    for (int i = 0; i < sp.n_obscurants; ++i) {
+        const RcObscurant & ob = sp.obscurants[i];
+        if (ob.sigma <= 0.0f) continue;
+        float a, b;
+        if (!rcObscurantSpan(ob, o, d, 0.0f, t_end, a, b)) continue;
+        sa[n] = a;
+        sb[n] = b;
+        oi[n] = i;
+        ++n;
+    }
+    if (n == 0) return false;
+
+    float total = 0.0f;
+    float profile_mass = 0.0f;
+    float a = 0.0f, b = 0.0f, beta = 0.0f, k = 0.0f, tau = 0.0f;
+    bool use_exp = false;
+    (void)rcSelectMediumSegment(sp, o, d, n_off, t_end, sa, sb, oi, n,
+                                -1.0f, total, a, b, beta, k, tau, use_exp,
+                                &profile_mass);
+    if (total <= 0.0f || profile_mass <= 0.0f) return false;
+
+    // Each range gate carries base_signal*pi*q(r)*dr expected photons; their
+    // sum over the column is Poisson with this mean. P(N>0)=1-exp(-lambda).
+    const float lambda = rpmath::gzm::fmax_(sp.base_signal, 0.0f) *
+                         rpmath::kPi * profile_mass;
+    const float detection_probability =
+        1.0f - rpmath::gzm::exp_(-lambda);
+    if (rcHashUnit(pixel, sp.rng_salt, 0u) > detection_probability) {
+        return false;
+    }
+
+    constexpr uint32_t kAttempts = 6;
+    for (uint32_t attempt = 0; attempt < kAttempts; ++attempt) {
+        const uint32_t stream = 1u + 3u * attempt;
+        const float pick = rcHashUnit(pixel, sp.rng_salt, stream) * total;
+        float walked = 0.0f;
+        if (!rcSelectMediumSegment(sp, o, d, n_off, t_end, sa, sb, oi, n,
+                                   pick, walked, a, b, beta, k, tau,
+                                   use_exp, nullptr)) {
+            continue;
+        }
+
+        const float u = rcHashUnit(pixel, sp.rng_salt, stream + 1u);
+        const float length = b - a;
+        const float r0 = rpmath::gzm::fmax_(a + n_off, 1.0e-3f);
+        float x = 0.0f;
+        float accept = 0.0f;
+        if (use_exp) {
+            const float q = 2.0f * k * length;
+            x = (q < 1.0e-3f)
+                ? u * length
+                : -rpmath::gzm::log_(
+                    1.0f - u * (1.0f - rpmath::gzm::exp_(-q))) /
+                    (2.0f * k);
+            const float ratio = r0 / (r0 + x);
+            accept = ratio * ratio;
+        } else {
+            const float r1 = rpmath::gzm::fmax_(b + n_off, r0 + 1.0e-6f);
+            const float inv_r = 1.0f / r0 -
+                u * (1.0f / r0 - 1.0f / r1);
+            x = 1.0f / inv_r - r0;
+            accept = rpmath::gzm::exp_(-2.0f * k * x);
+        }
+
+        if (rcHashUnit(pixel, sp.rng_salt, stream + 2u) > accept) continue;
+
+        const float tau_s = tau + k * x;
+        const float rho = rpmath::kPi * beta * sp.pulse_gate_m *
+                          rpmath::gzm::exp_(-2.0f * tau_s);
+        if (rho <= 0.0f) return false;
+        range_out = a + x + n_off;
+        rho_out = rho;
+        return true;
+    }
+    return false;
 }
 
 /// Apply the participating medium to an already-resolved return.
@@ -907,18 +1072,15 @@ GZ_OUSTER_HD inline float rcHashUnit(uint32_t a, uint32_t b)
 ///  2. **Backscatter from the medium itself.** A slab of medium at range r
 ///     returns P(r) ∝ β_π·ΔR·exp(−2τ(r))/r², which is exactly the form the
 ///     rest of the pipeline expects (`base_signal·ρ/r²`), so the medium gets
-///     an apparent reflectance ρ_med = β_π·ΔR·exp(−2τ(r)). Its depth is
-///     sampled from the two-way transmittance profile by inverse CDF in
-///     optical depth, giving the characteristic speckled near-face wall of
-///     returns in dense smoke and sparse penetrating returns in thin smoke.
-///     (The 1/r² weighting is kept in the amplitude but omitted from the
-///     sampling density — it varies slowly across the ≲1/σ penetration
-///     depth. With media of DIFFERENT lidar ratios overlapping on one ray
-///     the sampling is extinction-weighted where the true return profile is
-///     backscatter-weighted, so which volume a return is drawn from is
-///     mildly biased; the amplitude reported for wherever it lands is
-///     still exact.) A single-return sensor reports whichever candidate is
-///     stronger, the same strongest-return rule the glass/mirror paths use.
+///     an apparent reflectance ρ_med = π·β_π·ΔR·exp(−2τ_eff(r)). The
+///     integrated profile first passes a Poisson photon-count gate, then a
+///     range is drawn conditional on detection. Both operations include
+///     overlapping media, two-way extinction and 1/r² spreading. This leaves
+///     weak intersections empty and represents the pulse-to-pulse variation
+///     of a finite aerosol population instead of turning a homogeneous volume
+///     into a solid object. The sampled medium return then competes with the
+///     attenuated surface by received power, the same rule the glass/mirror
+///     paths use.
 ///
 ///  3. **NEAR_IR airlight.** Illuminated smoke scatters ambient light into
 ///     the receiver, so the ambient channel composites as
@@ -939,14 +1101,14 @@ GZ_OUSTER_HD inline float rcHashUnit(uint32_t a, uint32_t b)
 /// cloud augmentation); Koschmieder 1924 for the airlight composite.
 GZ_OUSTER_HD inline void rcApplyObscurants(
     const ScanParams & sp, RcV3 o, RcV3 d, float n_off, float t_budget,
-    uint32_t idx, float & range, float & rho, float * nir_val)
+    uint32_t pixel, float & range, float & rho, float * nir_val)
 {
     const bool hit = rpmath::gzm::isfinite_(range);
     // Path the medium is integrated over: out to the hard target, or the
     // whole range budget when the beam missed (smoke against open sky still
     // returns). Integration starts at the sensor rather than at near_clip so
-    // a sensor sitting inside a cloud is attenuated correctly; returns that
-    // land inside the blind zone are discarded below instead.
+    // a sensor sitting inside a cloud is attenuated correctly; observable
+    // medium-return support starts at near_clip in the sampler below.
     const float t_end = hit ? (range - n_off) : t_budget;
     if (t_end <= 0.0f) return;
 
@@ -984,32 +1146,12 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
                    path_albedo * illum * (1.0f - trans_ambient);
     }
 
-    // 2. Medium backscatter candidate. Inverse-CDF sample of the scatter
-    //    depth over the truncated two-way transmittance profile: ξ = 0 lands
-    //    at the near face, ξ → 1 at the far end of the medium. Sampling and
-    //    inversion both live in η·τ space, so a medium with η < 1 is
-    //    penetrated deeper — which is exactly what recovering the
-    //    forward-scattered light means.
-    const float xi = rcHashUnit(idx, sp.rng_salt);
-    const float tau_s = -0.5f * rpmath::gzm::log_(
-        1.0f - xi * (1.0f - trans_2way));
-    const float t_s = rcDepthAtOpticalDepth(sp, o, d, 0.0f, t_end, tau_s);
-    if (t_s < sp.near_clip) return;   // inside the detector's blind zone
-
-    float sigma_s = 0.0f, beta_s = 0.0f;
-    rcMediumProps(sp, RcV3{o.x + d.x * t_s, o.y + d.y * t_s, o.z + d.z * t_s},
-                  sigma_s, beta_s);
-    if (beta_s <= 0.0f) return;
-
-    // ρ_med = π·β_π·ΔR. The π converts between the two halves of the lidar
-    // equation: an extended Lambertian target returns P ∝ ρ·cos(α)/(π·R²)
-    // while a distributed medium returns P ∝ β_π·ΔR/R², and `rho` here plays
-    // the role of ρ·cos(α) (see rcApparentReflectance). Dropping it would
-    // under-report every medium return by 3.14×.
-    const float rho_m = rpmath::kPi * beta_s * sp.pulse_gate_m *
-                        rpmath::gzm::exp_(-2.0f * tau_s);
-    if (rho_m <= 0.0f) return;
-    const float range_m = t_s + n_off;
+    // 2. Stochastic range draw from the complete received-backscatter profile.
+    //    The scan salt evolves the plume; the shared downstream model still
+    //    supplies electronic shot/range/dropout noise afterward.
+    float range_m = 0.0f, rho_m = 0.0f;
+    if (!rcSampleMediumReturn(
+            sp, o, d, t_end, n_off, pixel, range_m, rho_m)) return;
 
     // Strongest-return arbitration by received power ρ/R² (same rule as the
     // glass and mirror candidates). Written as a cross-multiplication so the
@@ -1023,8 +1165,9 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
 /// Cast one output pixel (beam × measurement id) against the whole scene.
 /// Writes the reported Ouster range (metres; `inf_value` for a miss — the
 /// value satisfying the XYZ-LUT reconstruction, see castScan docs) and the
-/// nearest hit's APPARENT reflectance: laser_retro × cos(incidence)
-/// (0 on a miss, or when laser_retro is unset).
+/// nearest hit's APPARENT reflectance: diffuse reflectance × cos(incidence)
+/// plus the material's specular lobe (0 on a miss; an omitted laser_retro uses
+/// ScanParams::fallback_retro).
 ///
 /// `col_r`/`col_t` (optional, both or neither): per-COLUMN sensor→world
 /// poses for motion distortion — column m casts from col_r[9m..]/col_t[3m..]

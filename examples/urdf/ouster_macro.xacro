@@ -34,6 +34,8 @@
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+  <xacro:include filename="ouster_smoke_obscurants.xacro"/>
+
   <xacro:macro name="ouster_sensor"
     params="name parent metadata_path
             topic_prefix:=''
@@ -41,7 +43,8 @@
             lidar_hz:=10.0
             enable_imu:=false imu_hz:=100.0
             ray_mode:=raycast
-            anchor_type:=altimeter">
+            anchor_type:=altimeter
+            obscurant_profile:=''">
 
     <!-- ROS topic prefix == <sensor_name>. Its last segment must equal `name`
          so the plugin's gz-sensor lookup succeeds. -->
@@ -151,6 +154,9 @@
         <lidar_hz>${lidar_hz}</lidar_hz>
         <!-- panels (GPU render rig) | raycast (CPU per-beam, no rendering). -->
         <ray_mode>${ray_mode}</ray_mode>
+        <xacro:if value="${obscurant_profile == 'smoke_demo'}">
+          <xacro:ouster_smoke_obscurants/>
+        </xacro:if>
         <xacro:if value="${enable_imu}">
           <imu_name>auto</imu_name>
           <imu_hz>${imu_hz}</imu_hz>

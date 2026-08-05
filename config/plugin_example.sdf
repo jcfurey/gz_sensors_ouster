@@ -130,12 +130,14 @@
        produces competing returns, and NEAR_IR brightens while the laser
        channels darken (docs/MODEL_REFERENCES.md §11).
 
-       Gazebo <particle_emitter> elements in the world are mirrored
-       AUTOMATICALLY — nothing below is required to make the smoke a world
-       already shows obscure the LiDAR. See examples/worlds/ouster_smoke.sdf. -->
+       Authored <obscurant> volumes are recommended: Gazebo particle emitters
+       are rendering effects and expose no physical aerosol density. See the
+       explicit profile used by examples/worlds/ouster_smoke.sdf. -->
 
-  <!-- Stop mirroring the world's particle emitters. -->
-  <!-- <particle_obscuration>false</particle_obscuration> -->
+  <!-- Compatibility option: mirror the world's visual particle emitters.
+       Off by default so a rendering tweak cannot silently change LiDAR
+       physics. Prefer explicit <obscurant> blocks below. -->
+  <!-- <particle_obscuration>true</particle_obscuration> -->
 
   <!-- Extinction coefficient (1/m) produced by an emitter whose
        <particle_scatter_ratio> is 1.0. gz's default ratio of 0.65 then

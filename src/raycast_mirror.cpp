@@ -557,6 +557,7 @@ void RaycastMirror::threadFunc()
             sp.sun_ambient = sun[4];
             sp.fallback_retro =
                 rpmath::reflectivityByteToRetro(process_params.base_reflectivity);
+            sp.base_signal = process_params.base_signal;
             sp.n_obscurants = n_obscurants;
             std::copy_n(obscurants, n_obscurants, sp.obscurants);
             sp.rng_salt = rng_salt;

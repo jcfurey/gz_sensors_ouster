@@ -689,7 +689,7 @@ targets produce weaker returns.
 | `range_noise_max_std` | 0.015 | >= 0 | m | Range noise sigma at max_range. |
 | `signal_noise_scale` | 1.0 | >= 0 | -- | Poisson shot noise on signal channel. 0 = off, 1 = physical. |
 | `nearir_noise_scale` | 1.0 | >= 0 | -- | Poisson noise on near-IR channel (both packet and image). |
-| `base_signal` | 800.0 | >= 0 | photon m^2 | Baseline for 1/r^2 signal model. OS0: ~400, OS1: ~800. |
+| `base_signal` | 800.0 | >= 0 | photon m^2 | Baseline for the 1/r² signal model and photon-limited aerosol detection. OS0: ~400, OS1: ~800. |
 | `base_reflectivity` | 50.0 | 0-255 | -- | Default calibrated reflectivity byte when no retro channel is available. In raycast mode, an omitted `laser_retro` is converted to physical reflectance before incidence, smoke attenuation and return arbitration. |
 | `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
 | `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at max_range. Returns past the reflectance-dependent detection limit `max_range·√(ρ/0.8)` always drop. |
@@ -706,13 +706,23 @@ returns, and NEAR_IR *brightens* while the laser channels darken. See
 [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §11 for the physics, and
 `examples/worlds/ouster_smoke.sdf` for a demo of all of it.
 
-Gazebo `<particle_emitter>` elements are mirrored **automatically** — the
-smoke a world already shows becomes smoke the LiDAR scans, with no plugin
-configuration. These knobs tune that, or add volumes of your own:
+The medium first passes a photon-count gate with
+`P(detect) = 1 − exp(−base_signal·π·∫β(r)exp(−2τ(r))/R² dr)`. Weak or distant
+smoke intersections therefore remain empty instead of outlining the authored
+volume as a solid object. Conditional on detection, the range is sampled from
+that complete received-power profile and compared with the attenuated hard
+target by received power. Successive scans produce sparse, spatially
+distributed, changing aerosol returns. Ordinary signal, range and dropout
+noise are applied afterward by the shared sensor model.
+
+Use explicit `<obscurant>` volumes when the physics matters. Gazebo
+`<particle_emitter>` elements are visual effects without a physical density;
+mirroring their approximate envelopes remains available as an opt-in
+compatibility mode:
 
 | Parameter | Default | Range | Units | Description |
 |---|---|---|---|---|
-| `particle_obscuration` | true | bool | -- | Mirror the world's `<particle_emitter>` elements as obscurants. Set false to ignore them. |
+| `particle_obscuration` | false | bool | -- | Opt in to mirroring the world's visual `<particle_emitter>` envelopes as obscurants. Prefer explicit volumes. |
 | `particle_extinction` | 1.0 | >= 0 | 1/m | Extinction coefficient produced by an emitter whose `<particle_scatter_ratio>` is 1.0. gz's default ratio of 0.65 then gives σ ≈ 0.65/m — visibility ≈ 6 m, thick smoke. Lower it for haze. |
 | `particle_growth` | 1.0 | >= 0 | -- | Fraction of the mean particle travel distance (`½(v_min+v_max)·lifetime`) by which an emitter's `<size>` volume is dilated to cover the plume. 0 uses `<size>` verbatim. The dilation is isotropic, so it always contains the plume; use `<obscurant>` when the shape matters. |
 | `obscurant_lidar_ratio` | 50.0 | > 0 | sr | Extinction-to-backscatter ratio `S = σ_ext/β_π`, which sets how strongly the medium returns. ≈18-20 fog/cloud, 40-50 dust, 50-70 smoke. |

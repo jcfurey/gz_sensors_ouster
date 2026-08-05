@@ -62,6 +62,12 @@ def generate_launch_description():
          "'ouster_demo_panels.sdf' if '", ray_mode, "' == 'panels' "
          "else 'ouster_demo.sdf')"])
     world = PathJoinSubstitution([pkg_share, 'examples', 'worlds', world_name])
+    # The smoke world's visible particles are deliberately decoupled from its
+    # LiDAR physics. Selecting that world injects its companion set of explicit
+    # <obscurant> volumes into the spawned sensor plugin.
+    obscurant_profile = PythonExpression(
+        ["'smoke_demo' if '", world_arg,
+         "' == 'ouster_smoke.sdf' else ''"])
 
     # ABSOLUTE metadata path: relative paths resolve against an on-disk SDF dir,
     # which does not exist for a model spawned from the robot_description topic.
@@ -80,6 +86,7 @@ def generate_launch_description():
             'xacro ', urdf,
             ' metadata_lidar0:=', metadata,
             ' ray_mode:=', ray_mode,
+            ' obscurant_profile:=', obscurant_profile,
         ]),
         value_type=str,
     )

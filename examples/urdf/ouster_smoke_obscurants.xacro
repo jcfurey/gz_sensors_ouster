@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<!--
+  Explicit participating-media profile for examples/worlds/ouster_smoke.sdf.
+
+  Gazebo particle emitters are only a visual overlay in that world. These
+  volumes are the authoritative LiDAR physics: their poses match the visible
+  plumes, while their optical coefficients and shapes are independent of
+  rendering-oriented emitter settings.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="smoke_volume" params="type pose size extinction">
+    <obscurant>
+      <type>${type}</type>
+      <pose>${pose}</pose>
+      <size>${size}</size>
+      <extinction>${extinction}</extinction>
+      <lidar_ratio>50</lidar_ratio>
+      <albedo>0.8</albedo>
+      <multiple_scattering>1.0</multiple_scattering>
+    </obscurant>
+  </xacro:macro>
+
+  <xacro:macro name="ouster_smoke_obscurants">
+    <!-- Zone A: density ladder. Ellipsoids avoid treating the visible
+         billboard emitter's box boundary as a physical smoke wall. -->
+    <xacro:smoke_volume type="ellipsoid" pose="7.000 0.000 1.20 0 0 0.0000"
+      size="1.8 1.8 3.6" extinction="0.05"/>
+    <xacro:smoke_volume type="ellipsoid" pose="6.729 1.929 1.20 0 0 0.2793"
+      size="1.8 1.8 3.6" extinction="0.15"/>
+    <xacro:smoke_volume type="ellipsoid" pose="5.936 3.709 1.20 0 0 0.5585"
+      size="1.8 1.8 3.6" extinction="0.35"/>
+    <xacro:smoke_volume type="ellipsoid" pose="4.684 5.202 1.20 0 0 0.8378"
+      size="1.8 1.8 3.6" extinction="0.65"/>
+    <xacro:smoke_volume type="ellipsoid" pose="3.069 6.292 1.20 0 0 1.1170"
+      size="1.8 1.8 3.6" extinction="1.0"/>
+
+    <!-- Zone B: explicit physics-shape gallery. The point emitter's optical
+         counterpart is an ellipsoid; point is a rendering concept, not a
+         participating-medium geometry. -->
+    <xacro:smoke_volume type="box" pose="0.244 6.996 1.20 0 0 1.5359"
+      size="1.8 1.8 3.6" extinction="0.35"/>
+    <xacro:smoke_volume type="cylinder" pose="-1.929 6.729 1.20 0 0 1.8500"
+      size="1.8 1.8 3.6" extinction="0.35"/>
+    <xacro:smoke_volume type="ellipsoid" pose="-3.914 5.803 1.20 0 0 2.1642"
+      size="1.8 1.8 3.6" extinction="0.35"/>
+    <xacro:smoke_volume type="ellipsoid" pose="-5.516 4.310 1.20 0 0 2.4784"
+      size="2.0 2.0 2.0" extinction="0.35"/>
+
+    <!-- Zone C: medium returns against open sky. -->
+    <xacro:smoke_volume type="ellipsoid" pose="-6.792 1.693 1.20 0 0 2.8972"
+      size="1.8 1.8 3.6" extinction="0.2"/>
+    <xacro:smoke_volume type="ellipsoid" pose="-6.962 -0.732 1.20 0 0 3.2463"
+      size="1.8 1.8 3.6" extinction="0.5"/>
+    <xacro:smoke_volume type="ellipsoid" pose="-6.292 -3.069 1.20 0 0 3.5954"
+      size="1.8 1.8 3.6" extinction="1.0"/>
+
+    <!-- Zone D: equal media in front of dark and bright targets. -->
+    <xacro:smoke_volume type="ellipsoid" pose="-4.500 -5.362 1.20 0 0 4.0143"
+      size="1.8 1.8 3.6" extinction="0.5"/>
+    <xacro:smoke_volume type="ellipsoid" pose="-2.847 -6.395 1.20 0 0 4.2935"
+      size="1.8 1.8 3.6" extinction="0.5"/>
+  </xacro:macro>
+
+</robot>

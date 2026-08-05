@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Participating media (smoke / dust / fog) in the raycast ray mode: volume
-// geometry, Beer–Lambert extinction against the closed-form value, exact
-// inversion of the optical-depth profile, the medium's own backscatter
-// return, NEAR_IR airlight, and the downstream consequences the model is
+// geometry, Beer–Lambert extinction against the closed-form value, the
+// medium's stochastic range-resolved backscatter return, NEAR_IR airlight,
+// and the downstream consequences the model is
 // supposed to produce for free (dimmer signal, lower reflectivity byte,
 // targets falling past the detection limit).
 //
@@ -232,40 +232,6 @@ TEST(ObscurantOpticalDepth, WeightedAlbedoIsTauWeighted)
     EXPECT_NEAR(albedo, 0.6f, 1e-5f);     // equal τ → plain mean
 }
 
-TEST(ObscurantOpticalDepth, DepthInversionIsExactAcrossSegments)
-{
-    // Two disjoint slabs of different density: τ(s) is piecewise linear with
-    // a gap, so a naive uniform-medium inversion would land in the wrong
-    // segment. Round-tripping every target τ pins the walk.
-    rc::ScanParams sp = baseParams();
-    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 5.0f,
-                                 1.0f, 5.0f, 5.0f, 0.3f));   // [4, 6]
-    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 20.0f,
-                                 2.0f, 5.0f, 5.0f, 0.7f));   // [18, 22]
-    const float tau_total =
-        rc::rcOpticalDepth(sp, kOrigin, kForward, 0.0f, 40.0f);
-    ASSERT_NEAR(tau_total, 0.3f * 2.0f + 0.7f * 4.0f, 1e-5f);
-
-    for (int k = 1; k < 20; ++k) {
-        const float target = tau_total * static_cast<float>(k) / 20.0f;
-        const float s =
-            rc::rcDepthAtOpticalDepth(sp, kOrigin, kForward, 0.0f, 40.0f,
-                                      target);
-        EXPECT_NEAR(rc::rcOpticalDepth(sp, kOrigin, kForward, 0.0f, s),
-                    target, 1e-4f) << "at k=" << k;
-    }
-}
-
-TEST(ObscurantOpticalDepth, DepthInversionClampsToFarEndWhenUnreachable)
-{
-    rc::ScanParams sp = baseParams();
-    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 5.0f,
-                                 1.0f, 5.0f, 5.0f, 0.3f));
-    EXPECT_NEAR(rc::rcDepthAtOpticalDepth(sp, kOrigin, kForward, 0.0f, 40.0f,
-                                          100.0f),
-                40.0f, 1e-4f);
-}
-
 // ── Extinction of a hard target ──────────────────────────────────────────────
 
 TEST(ObscurantExtinction, MissingRetroUsesPhysicalFallbackBeforeMedia)
@@ -353,7 +319,6 @@ TEST(ObscurantExtinction, EmptyConfigIsBitIdenticalToNoMediaAtAll)
     const RayResult base = castOne(scene, xf, baseParams());
 
     rc::ScanParams sp = baseParams();
-    sp.rng_salt = 12345;          // salt set, but no volumes
     sp.pulse_gate_m = 3.0f;
     const RayResult same = castOne(scene, xf, sp);
 
@@ -519,42 +484,8 @@ TEST(ObscurantForwardScatter, AmbientChannelIgnoresEta)
     }
 }
 
-TEST(ObscurantForwardScatter, ScatterDepthSamplingPenetratesDeeper)
-{
-    // Sampling lives in η·τ space, so recovering forward-scattered light
-    // must also push the medium's own returns further into the cloud.
-    rc::Scene scene;
-    std::vector<rc::InstanceXform> xf;
-
-    auto medianDepth = [&](float eta) {
-        rc::ScanParams sp = baseParams();
-        addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
-                                     5.0f, 5.0f, 5.0f, 1.0f, 50.0f, 0.8f,
-                                     eta));
-        std::vector<float> depths;
-        for (uint32_t i = 1; i <= 600; ++i) {
-            sp.rng_salt = i;
-            const RayResult r = castOne(scene, xf, sp);
-            if (std::isfinite(r.range)) depths.push_back(r.range);
-        }
-        std::sort(depths.begin(), depths.end());
-        return depths.empty() ? 0.0f : depths[depths.size() / 2];
-    };
-
-    const float deep = medianDepth(0.25f);
-    const float shallow = medianDepth(1.0f);
-    EXPECT_GT(deep, shallow);
-    // Mean penetration is 1/(2ησ): 0.5 m at η = 0.25 against 0.125 m at 1.
-    EXPECT_NEAR(deep - 5.0f, 4.0f * (shallow - 5.0f), 0.15f);
-}
-
-// ── Backscatter from the medium itself ───────────────────────────────────────
-
 namespace {
 
-/// Cast the same ray under many RNG salts. The scatter-depth draw is a pure
-/// hash of (pixel index, salt), so varying the salt on a one-pixel scan
-/// samples exactly the distribution a full frame would.
 std::vector<RayResult> castOverSalts(const rc::Scene & scene,
                                      const std::vector<rc::InstanceXform> & xf,
                                      rc::ScanParams sp, int n)
@@ -568,37 +499,78 @@ std::vector<RayResult> castOverSalts(const rc::Scene & scene,
     return out;
 }
 
-double fractionWithRangeBelow(const std::vector<RayResult> & rs, float limit)
+double fractionWithRange(const std::vector<RayResult> & rs,
+                         float lo, float hi)
 {
     const auto n = std::count_if(rs.begin(), rs.end(),
-        [limit](const RayResult & r) { return r.range < limit; });
+        [lo, hi](const RayResult & r) { return r.range >= lo && r.range < hi; });
     return static_cast<double>(n) / static_cast<double>(rs.size());
+}
+
+float medianFiniteRange(std::vector<RayResult> rs)
+{
+    std::vector<float> ranges;
+    for (const auto & r : rs) {
+        if (std::isfinite(r.range)) ranges.push_back(r.range);
+    }
+    std::sort(ranges.begin(), ranges.end());
+    return ranges.empty() ? 0.0f : ranges[ranges.size() / 2];
 }
 
 }  // namespace
 
-TEST(ObscurantBackscatter, DenseSmokeReturnsFromItsNearFace)
+TEST(ObscurantForwardScatter, LowerEtaSamplesDeeperIntoTheMedium)
+{
+    // The draw follows beta*exp(-2*eta*tau)/R^2. Recovering more forward-
+    // scattered light therefore broadens the range distribution into the
+    // cloud, while range spreading still keeps it biased toward the sensor.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+
+    auto medianDepth = [&](float eta) {
+        rc::ScanParams sp = baseParams();
+        addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                     5.0f, 5.0f, 5.0f, 1.0f, 50.0f, 0.8f,
+                                     eta));
+        return medianFiniteRange(castOverSalts(scene, xf, sp, 2000));
+    };
+
+    EXPECT_GT(medianDepth(0.25f), medianDepth(1.0f) + 0.2f);
+}
+
+// ── Backscatter from the medium itself ───────────────────────────────────────
+
+TEST(ObscurantBackscatter, DenseSmokeIsSpeckledButNearFaceWeighted)
 {
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
-    // An untagged wall still loses to a genuinely dense cloud.
     makeWall(scene, xf, 30.0f, 0.0f, false);
 
     rc::ScanParams sp = baseParams();
-    // σ = 2 /m over [5, 15]: two-way optical depth 40, so the wall is gone
-    // and the mean penetration is 1/(2σ) = 0.25 m past the near face.
+    // sigma=2/m over [5,15]: the wall is gone and most sampled power lies
+    // within the first few attenuation lengths, without collapsing to x=5.
     addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
                                  5.0f, 5.0f, 5.0f, 2.0f));
 
     const auto rs = castOverSalts(scene, xf, sp, 2000);
+    float lo = 100.0f, hi = 0.0f;
+    int medium_returns = 0;
+    int near_returns = 0;
     for (const auto & r : rs) {
         ASSERT_TRUE(std::isfinite(r.range));
-        EXPECT_GE(r.range, 5.0f) << "no return may come from before the cloud";
+        if (r.range >= 29.9f) continue;
+        ++medium_returns;
+        EXPECT_GE(r.range, 5.0f);
         EXPECT_LE(r.range, 15.0f);
+        if (r.range < 5.5f) ++near_returns;
+        lo = std::min(lo, r.range);
+        hi = std::max(hi, r.range);
     }
-    // Analytic: P(depth < 5 + d) = 1 - exp(-2σd) → 86% by 0.5 m, 99.7% by 1.5.
-    EXPECT_GT(fractionWithRangeBelow(rs, 5.5f), 0.80);
-    EXPECT_GT(fractionWithRangeBelow(rs, 6.5f), 0.99);
+    EXPECT_GT(medium_returns, 1000);
+    EXPECT_LT(medium_returns, 1500)
+        << "even dense smoke must not return on every intersecting beam";
+    EXPECT_GT(hi - lo, 0.5f) << "the plume must not collapse to a hard shell";
+    EXPECT_GT(static_cast<double>(near_returns) / medium_returns, 0.80);
 }
 
 TEST(ObscurantBackscatter, ThinHazeLetsTheTargetThrough)
@@ -614,17 +586,13 @@ TEST(ObscurantBackscatter, ThinHazeLetsTheTargetThrough)
                                  5.0f, 5.0f, 5.0f, 0.002f));
 
     const auto rs = castOverSalts(scene, xf, sp, 500);
-    const auto wall = std::count_if(rs.begin(), rs.end(),
-        [](const RayResult & r) { return std::abs(r.range - 30.0f) < 0.1f; });
-    EXPECT_GT(static_cast<double>(wall) / rs.size(), 0.95);
+    EXPECT_GT(fractionWithRange(rs, 29.9f, 30.1f), 0.95);
 }
 
 TEST(ObscurantBackscatter, SmokeAgainstOpenSkyStillReturns)
 {
-    // No geometry at all: a beam through smoke is a RETURN, not a miss.
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
-
     rc::ScanParams sp = baseParams();
     addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
                                  5.0f, 5.0f, 5.0f, 1.0f));
@@ -638,16 +606,15 @@ TEST(ObscurantBackscatter, SmokeAgainstOpenSkyStillReturns)
         EXPECT_LE(r.range, 15.0f);
         EXPECT_GT(r.retro, 0.0f);
     }
-    EXPECT_GT(finite, 450);
+    EXPECT_GT(finite, 225);
+    EXPECT_LT(finite, 375)
+        << "the medium must remain a sparse aerosol, not a solid silhouette";
 }
 
-TEST(ObscurantBackscatter, ReturnAmplitudeMatchesTheLidarEquation)
+TEST(ObscurantBackscatter, ReturnAmplitudeMatchesTheLidarEquationAtItsDraw)
 {
-    // Salt 0 is not used by castOverSalts; pick a salt whose draw lands very
-    // close to the near face so the analytic value is unambiguous.
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
-
     constexpr float kSigma = 1.0f;
     constexpr float kS = 40.0f;
     rc::ScanParams sp = baseParams();
@@ -655,50 +622,45 @@ TEST(ObscurantBackscatter, ReturnAmplitudeMatchesTheLidarEquation)
     addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
                                  5.0f, 5.0f, 5.0f, kSigma, kS));
 
-    const auto rs = castOverSalts(scene, xf, sp, 400);
-    for (const auto & r : rs) {
-        ASSERT_TRUE(std::isfinite(r.range));
-        // ρ = π·β·ΔR·exp(-2τ) with β = σ/S and τ = σ·(depth - 5).
+    int finite = 0;
+    for (const auto & r : castOverSalts(scene, xf, sp, 400)) {
+        if (!std::isfinite(r.range)) continue;
+        ++finite;
         const float tau = kSigma * (r.range - 5.0f);
         const float expected = static_cast<float>(M_PI) * (kSigma / kS) *
                                sp.pulse_gate_m * std::exp(-2.0f * tau);
         EXPECT_NEAR(r.retro, expected, 1e-5f) << "range=" << r.range;
     }
+    EXPECT_GT(finite, 175);
+    EXPECT_LT(finite, 300);
 }
 
-TEST(ObscurantBackscatter, ReturnsInsideTheBlindZoneAreDiscarded)
+TEST(ObscurantBackscatter, SensorInsideSmokeStartsSamplingAtNearClip)
 {
-    // Sensor standing inside dense smoke: everything nearer than near_clip
-    // is unreportable, so those draws must yield a miss rather than a
-    // bogus 5 cm return.
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
-
     rc::ScanParams sp = baseParams();
     sp.near_clip = 1.0f;
     addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 0.0f,
                                  20.0f, 20.0f, 20.0f, 3.0f));
 
-    const auto rs = castOverSalts(scene, xf, sp, 1000);
-    int blanked = 0;
-    for (const auto & r : rs) {
-        if (!std::isfinite(r.range)) {
-            ++blanked;
-            EXPECT_EQ(r.retro, 0.0f);
-        } else {
-            EXPECT_GE(r.range, sp.near_clip);
-        }
+    int finite = 0;
+    for (const auto & r : castOverSalts(scene, xf, sp, 1000)) {
+        if (!std::isfinite(r.range)) continue;
+        ++finite;
+        EXPECT_GE(r.range, sp.near_clip);
+        const float expected = static_cast<float>(M_PI) * (3.0f / 50.0f) *
+                               sp.pulse_gate_m * std::exp(-2.0f * 3.0f * r.range);
+        EXPECT_NEAR(r.retro, expected, 1e-6f);
     }
-    // P(scatter within 1 m) = 1 - exp(-2·3·1) ≈ 99.8%.
-    EXPECT_GT(blanked, 900);
+    EXPECT_GT(finite, 25);
+    EXPECT_LT(finite, 100);
 }
 
-TEST(ObscurantBackscatter, IsReproducibleForTheSameSalt)
+TEST(ObscurantBackscatter, SameSaltIsReproducibleAndNewSaltEvolves)
 {
     rc::Scene scene;
     std::vector<rc::InstanceXform> xf;
-    makeWall(scene, xf, 30.0f, 0.9f);
-
     rc::ScanParams sp = baseParams();
     addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
                                  5.0f, 5.0f, 5.0f, 1.0f));
@@ -710,22 +672,95 @@ TEST(ObscurantBackscatter, IsReproducibleForTheSameSalt)
 
     sp.rng_salt = 8;
     const RayResult c = castOne(scene, xf, sp);
-    EXPECT_NE(a.range, c.range) << "successive scans must decorrelate";
+    EXPECT_NE(a.range, c.range);
+}
+
+TEST(ObscurantBackscatter, OverlapIsWeightedByBackscatterNotOnlyExtinction)
+{
+    // The weak background spans [5,15]. A high-beta overlap on [10,12]
+    // should draw many returns into that later interval despite its range and
+    // attenuation penalties; the old extinction-only CDF could not express
+    // this when lidar ratios differed.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    rc::ScanParams weak = baseParams();
+    addObscurant(weak, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                   5.0f, 5.0f, 5.0f, 0.1f, 100.0f));
+    rc::ScanParams overlap = weak;
+    addObscurant(overlap, obscurantAt(rc::ObscurantType::kBox, 11.0f,
+                                      1.0f, 5.0f, 5.0f, 1.0f, 10.0f));
+
+    const double baseline = fractionWithRange(
+        castOverSalts(scene, xf, weak, 2000), 10.0f, 12.0f);
+    const double boosted = fractionWithRange(
+        castOverSalts(scene, xf, overlap, 2000), 10.0f, 12.0f);
+    EXPECT_GT(boosted, baseline + 0.2);
+    EXPECT_GT(boosted, 0.25);
+}
+
+TEST(ObscurantBackscatter, PhotonGateTracksIntegratedReceivedPower)
+{
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    constexpr float kSigma = 0.35f;
+    constexpr float kS = 50.0f;
+    constexpr float kLo = 5.0f;
+    constexpr float kHi = 15.0f;
+
+    rc::ScanParams sp = baseParams();
+    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                 5.0f, 5.0f, 5.0f, kSigma, kS));
+
+    // High-resolution midpoint integration is an independent reference for
+    // lambda = base_signal*pi*integral(beta*exp(-2*tau)/R^2 dR).
+    constexpr int kSteps = 20000;
+    const double dr = (kHi - kLo) / kSteps;
+    double profile_mass = 0.0;
+    for (int i = 0; i < kSteps; ++i) {
+        const double r = kLo + (i + 0.5) * dr;
+        const double tau = kSigma * (r - kLo);
+        profile_mass += (kSigma / kS) * std::exp(-2.0 * tau) /
+                        (r * r) * dr;
+    }
+    const double expected =
+        1.0 - std::exp(-sp.base_signal * M_PI * profile_mass);
+
+    const auto rs = castOverSalts(scene, xf, sp, 20000);
+    const double observed = static_cast<double>(std::count_if(
+        rs.begin(), rs.end(), [](const RayResult & r) {
+            return std::isfinite(r.range);
+        })) / rs.size();
+    EXPECT_NEAR(observed, expected, 0.02);
+    EXPECT_GT(observed, 0.0);
+    EXPECT_LT(observed, 1.0);
+}
+
+TEST(ObscurantBackscatter, ZeroSensorGainCannotDetectTheMedium)
+{
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    rc::ScanParams sp = baseParams();
+    sp.base_signal = 0.0f;
+    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                 5.0f, 5.0f, 5.0f, 1.0f));
+
+    for (const auto & r : castOverSalts(scene, xf, sp, 100)) {
+        EXPECT_FALSE(std::isfinite(r.range));
+    }
 }
 
 TEST(ObscurantBackscatter, HashDrawIsUniformAndOpenIntervalled)
 {
-    // The draw feeds log(1 - ξ); an exact 0 or 1 would produce ±inf.
     int bins[10] = {0};
     for (uint32_t i = 0; i < 20000; ++i) {
-        const float u = rc::rcHashUnit(i, 991u);
+        const float u = rc::rcHashUnit(i, 991u, 2u);
         ASSERT_GT(u, 0.0f);
         ASSERT_LT(u, 1.0f);
         ++bins[static_cast<int>(u * 10.0f)];
     }
-    for (int b : bins) {
-        EXPECT_GT(b, 1700) << "hash draw is badly non-uniform";
-        EXPECT_LT(b, 2300) << "hash draw is badly non-uniform";
+    for (int count : bins) {
+        EXPECT_GT(count, 1700);
+        EXPECT_LT(count, 2300);
     }
 }
 

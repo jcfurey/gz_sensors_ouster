@@ -8,13 +8,10 @@
 //
 // Two sources feed the same volume list:
 //
-//   * Gazebo <particle_emitter> elements, mirrored automatically so the
-//     smoke you SEE is the smoke you SCAN. gz gives no physical density for
-//     an emitter — rate/lifetime/particle_size are authored for visual
-//     appeal, not radiometry — so the extinction coefficient is derived from
-//     <particle_scatter_ratio>, which is already Gazebo's "how much does
-//     this emitter affect range sensors" knob (gz-rendering applies it to
-//     GpuRays), scaled by a documented per-sensor coefficient.
+//   * Gazebo <particle_emitter> elements, mirrored only when explicitly
+//     enabled. gz gives no physical density for an emitter — rate, lifetime
+//     and particle size are authored for visual appeal, not radiometry — so
+//     this compatibility path is deliberately opt-in.
 //
 //   * <obscurant> blocks on the plugin itself, for authored volumes with
 //     direct control of σ_ext (or visibility), lidar ratio and albedo. Use
@@ -88,7 +85,7 @@ struct ObscurantVolume {
 
 /// Everything the mirror needs to turn a world into a list of obscurants.
 struct ObscurantConfig {
-    bool mirror_particles = true;      ///< auto-mirror <particle_emitter>
+    bool mirror_particles = false;     ///< opt-in <particle_emitter> mirroring
     double particle_extinction = kParticleExtinction;
     double particle_growth = kParticleGrowth;
     double lidar_ratio = kObscurantLidarRatio;  ///< default S for emitters

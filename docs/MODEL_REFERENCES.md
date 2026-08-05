@@ -277,6 +277,8 @@ extinction coefficient σ_ext [1/m]. Three effects, all in
 τ_e(R) = ∫₀ᴿ η · σ_ext ds                    what the ACTIVE round trip sees
 ρ_app ← ρ_app · exp(−2τ_e)                   two-way extinction of the target
 ρ_med  = π · β_π · ΔR · exp(−2τ_e,s)         backscatter from the medium itself
+λ_med  = base_signal · π · ∫β_πe^(−2τ_e)/R²dR expected detected photons
+P_med  = 1 − exp(−λ_med)                      chance of any medium return
 NIR    = NIR_target·e^(−τ) + ω·I·(1 − e^(−τ))  airlight on the ambient channel
 ```
 
@@ -324,31 +326,45 @@ Three properties fall out rather than being coded:
   dims by exp(−2τ), the calibrated REFLECTIVITY byte drops, range noise
   widens on the √ρ weighting, and once ρ·exp(−2τ) falls past the √(ρ/0.8)
   detection limit of §3 the return disappears entirely.
-- A beam that hits nothing can still return, because the medium is a target.
-  That is how a phantom obstacle appears in real smoke.
+- A beam that hits nothing can still return, because the medium is a target,
+  but only when its integrated backscatter produces a nonzero Poisson count.
+  That creates sparse phantom points without drawing the whole volume as a
+  solid silhouette.
 - NEAR_IR moves the *opposite* way from the laser channels — lit smoke
   scatters ambient light into the receiver, so the ambient image brightens
   while the range image darkens, the signature of fog on a real Ouster.
 
-The scatter depth is sampled by inverse CDF over the truncated two-way
-transmittance profile, so dense smoke returns from a speckled shell just
-inside its near face and thin smoke returns sparsely from throughout — the
-1/R² term is kept in the amplitude but omitted from the sampling density,
-which varies slowly across the ≲1/σ penetration depth. Sampling uses an
-integer hash of (pixel, per-scan salt) rather than a backend RNG, so the CPU
-and every GPU kernel draw identically.
+The range-resolved received-power profile is
+`q(R) = β_π(R)·exp(−2τ_e(R))/R²`. Volume entry and exit boundaries split the
+ray into intervals whose β_π and extinction slope are constant; overlapping
+volumes therefore sum exactly even when their lidar ratios differ. Its
+integral is converted to an expected photon count using the same
+`base_signal` gain as the downstream SIGNAL channel. A Poisson zero-count gate
+decides whether the medium is detected at all. This is the missing distinction
+between continuous extinction and discrete aerosol returns: every crossing
+attenuates a hard target, but not every crossing generates a point.
 
-**Sourcing.** Gazebo `<particle_emitter>` elements are mirrored
-automatically (`src/obscurants.cpp`), so the smoke a world already shows is
-the smoke the LiDAR scans. gz exposes no physical density for an emitter —
-rate/lifetime/particle_size are authored for visual appeal — so σ_ext comes
-from `<particle_scatter_ratio>`, which is already Gazebo's "how much does
-this emitter affect range sensors" knob (gz-rendering applies it to
-GpuRays), scaled by `<particle_extinction>`. The volume is the emitter's own
-`<size>` region dilated by the mean particle travel distance; the dilation
-is isotropic because the message documents no stable emission axis, so it
-always *contains* the plume. `<obscurant>` blocks give exact volumes with an
-explicit σ_ext (or `<visibility>`, via Koschmieder's σ = 3.912/V).
+Conditional on detection, rejection sampling uses the tighter of two analytic
+envelopes: retain the exponential and bound `1/R²`, or retain `1/R²` and bound
+the exponential. This includes both terms in the range draw without storing a
+per-ray waveform. A backend-stable hash of pixel, scan and draw decorrelates
+the aerosol speckle over space and time. Once drawn, the medium amplitude still
+follows the lidar equation above and competes with the attenuated target by
+received power. Electronic shot, range and dropout noise remain downstream
+sensor effects.
+
+**Sourcing.** Explicit `<obscurant>` blocks are authoritative and recommended:
+they specify volume geometry, σ_ext (or `<visibility>`, via Koschmieder's
+σ = 3.912/V), lidar ratio and albedo independently of rendering.
+
+Gazebo `<particle_emitter>` mirroring (`src/obscurants.cpp`) is an opt-in
+compatibility path. It is disabled by default because gz exposes no physical
+density for an emitter — rate, lifetime and particle size are authored for
+visual appeal — and its simple envelope is not a turbulent aerosol field.
+When explicitly enabled, σ_ext comes from `<particle_scatter_ratio>` scaled by
+`<particle_extinction>`, and the emitter `<size>` is dilated isotropically by
+the mean particle travel distance. This preserves older worlds without making
+their visual effects silently control LiDAR physics.
 
 Parameter values: S ≈ 18–20 sr for fog and water cloud, 40–50 sr for dust,
 50–70 sr for biomass-burning smoke; ω ≈ 0.8–0.9 in the near IR for weakly
@@ -360,11 +376,12 @@ Two coupling caveats worth knowing when tuning:
   function, but nothing enforces it — the laser path reads S alone and only
   the ambient channel reads ω, so an inconsistent pair describes no real
   aerosol even though it simulates fine.
-- **Scatter-depth sampling is extinction-weighted**, while the true return
-  profile is backscatter-weighted. These are the same thing for one medium;
-  where volumes with *different* lidar ratios overlap on one ray, which
-  volume a return is drawn from is mildly biased. The amplitude reported for
-  wherever it lands is exact either way.
+- **ΔR is a rectangular slab approximation**, not an explicitly convolved
+  emitted-pulse waveform. It preserves the distributed-return scaling, but
+  does not broaden or shift a sharp cloud boundary the way a measured pulse
+  response would. The stochastic range draw represents finite-population
+  variability rather than claiming to reproduce a particular detector's full
+  waveform processing.
 
 - Rasshofer et al. — *Influences of weather phenomena on automotive laser
   radar systems*, Adv. Radio Sci. 9, 2011. The extinction + backscatter
@@ -386,9 +403,10 @@ Two coupling caveats worth knowing when tuning:
 
 Panels mode has no equivalent path (it only ever sees a rendered depth
 image), and the plugin warns if obscurants are configured there. Verified
-in-tree by `test_obscurants` (closed-form Beer–Lambert, exact inversion of
-the optical-depth profile, fallback-material extinction/arbitration, and the
-sampled amplitude against the lidar equation) and `test_obscurant_config`;
+in-tree by `test_obscurants` (closed-form Beer–Lambert, received-power range
+sampling, overlapping lidar ratios, fallback-material extinction/arbitration,
+and amplitude against the lidar equation) and
+`test_obscurant_config`;
 `examples/worlds/ouster_smoke.sdf` demonstrates it with an untagged-wall
 density ladder whose first three rungs preserve the wall and last two report
 the medium.

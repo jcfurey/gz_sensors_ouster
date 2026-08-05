@@ -42,6 +42,10 @@ def _anchor_types(doc: xml.dom.minidom.Document) -> dict:
             for s in doc.getElementsByTagName('sensor')}
 
 
+def _obscurants(doc: xml.dom.minidom.Document) -> list:
+    return list(doc.getElementsByTagName('obscurant'))
+
+
 # ── ouster_standalone ─────────────────────────────────────────────────────────
 
 def test_standalone_raycast_anchor_is_altimeter():
@@ -54,6 +58,22 @@ def test_standalone_panels_anchor_is_camera():
     t = _anchor_types(_expand('ouster_standalone.urdf.xacro',
                                ray_mode='panels', metadata_lidar0=META0))
     assert t.get('lidar0') == 'camera', f'anchor types: {t}'
+
+
+def test_standalone_default_has_no_implicit_obscurants():
+    doc = _expand('ouster_standalone.urdf.xacro',
+                  ray_mode='raycast', metadata_lidar0=META0)
+    assert not _obscurants(doc)
+
+
+def test_standalone_smoke_profile_injects_explicit_volumes():
+    doc = _expand('ouster_standalone.urdf.xacro',
+                  ray_mode='raycast', metadata_lidar0=META0,
+                  obscurant_profile='smoke_demo')
+    volumes = _obscurants(doc)
+    assert len(volumes) == 14
+    # The profile is authoritative; it must not re-enable emitter mirroring.
+    assert not doc.getElementsByTagName('particle_obscuration')
 
 
 # ── sensor_stack (two sensors) ────────────────────────────────────────────────

@@ -10,6 +10,8 @@ import xml.dom.minidom
 import pytest
 
 WORLDS = pathlib.Path(__file__).resolve().parent.parent / 'examples' / 'worlds'
+EXAMPLES = WORLDS.parent
+SMOKE_PROFILE = EXAMPLES / 'urdf' / 'ouster_smoke_obscurants.xacro'
 WORLD_NAMES = sorted(p.name for p in WORLDS.glob('*.sdf'))
 
 
@@ -158,24 +160,38 @@ def test_visual_geometry_is_mirrorable(name):
 
 # ── Smoke world: the obscuration demo ────────────────────────────────────────
 #
-# Its whole point is a monotone density ladder, and every cloud in it is an
-# ordinary <particle_emitter> — no plugin configuration. Both properties are
-# easy to break silently (a retuned ratio that lands out of order still loads
-# and still looks like smoke), so pin them.
+# Its visible particle emitters are deliberately separate from the companion
+# xacro's explicit optical volumes. Pin both layers so a visual edit cannot
+# silently rewrite LiDAR physics or leave the two profiles misaligned.
 
 def _smoke_emitters() -> dict:
     doc = xml.dom.minidom.parse(str(WORLDS / 'ouster_smoke.sdf'))
     out = {}
     for model in doc.getElementsByTagName('model'):
         for em in model.getElementsByTagName('particle_emitter'):
-            ratios = [r.firstChild.nodeValue.strip()
-                      for r in em.getElementsByTagName(
-                          'particle_scatter_ratio') if r.firstChild]
+            def value(tag):
+                nodes = [n.firstChild.nodeValue.strip()
+                         for n in em.getElementsByTagName(tag) if n.firstChild]
+                return nodes[0] if nodes else None
+
+            ratio = value('particle_scatter_ratio')
             out[model.getAttribute('name')] = {
                 'type': em.getAttribute('type'),
-                'ratio': float(ratios[0]) if ratios else None,
+                'ratio': float(ratio) if ratio else None,
+                'rate': float(value('rate')),
+                'pose': value('pose'),
+                'size': value('size'),
+                'albedo_map': value('albedo_map'),
+                'color_range_image': value('color_range_image'),
             }
     return out
+
+
+def _smoke_volumes() -> list:
+    doc = xml.dom.minidom.parse(str(SMOKE_PROFILE))
+    return [{key: node.getAttribute(key)
+             for key in ('type', 'pose', 'size', 'extinction')}
+            for node in doc.getElementsByTagName('xacro:smoke_volume')]
 
 
 def test_smoke_world_ladder_ratio_matches_model_name():
@@ -215,31 +231,62 @@ def test_smoke_world_ladder_exercises_default_reflectivity():
     assert not tagged, f'fallback ladder walls unexpectedly tagged: {tagged}'
 
 
-def test_smoke_world_covers_every_emitter_shape():
-    """Each emitter type takes a different branch in the volume conversion
-    (src/obscurants.cpp); the gallery zone exists to exercise all of them."""
-    kinds = {e['type'] for e in _smoke_emitters().values()}
-    assert {'box', 'cylinder', 'ellipsoid', 'point'} <= kinds, kinds
+def test_smoke_world_uses_consistent_ground_source_emitters():
+    """Visual smoke rises from a thin source instead of filling arbitrary
+    volumes or shooting radially along each model's local +X axis."""
+    emitters = _smoke_emitters()
+    kinds = {e['type'] for e in emitters.values()}
+    assert kinds == {'box'}
+    assert {e['pose'] for e in emitters.values()} == {
+        '0 0 -1.15 0 -1.5708 0'}
+    assert {e['size'] for e in emitters.values()} == {'0.08 1.4 1.4'}
 
 
-def test_smoke_world_needs_no_plugin_configuration():
-    """The demo's claim is that mirroring gz particle emitters is automatic.
-    An <obscurant> block or a tweaked knob in the world would undercut it —
-    and the plugin lives in the xacro, not here, so there is nowhere for one
-    to legitimately appear."""
-    # Match on parsed elements, not raw text: the header comment names these
-    # knobs on purpose, pointing the reader at the docs.
-    doc = xml.dom.minidom.parse(str(WORLDS / 'ouster_smoke.sdf'))
-    for knob in ('obscurant', 'particle_extinction', 'particle_obscuration',
-                 'particle_growth', 'obscurant_lidar_ratio',
-                 'obscurant_albedo', 'pulse_length'):
-        found = doc.getElementsByTagName(knob)
-        assert not found, f'<{knob}> defeats the point of this world'
+def test_smoke_world_uses_soft_lifetime_textures():
+    emitters = _smoke_emitters()
+    assert {e['albedo_map'] for e in emitters.values()} == {
+        '../media/particles/fog.png'}
+    assert {e['color_range_image'] for e in emitters.values()} == {
+        '../media/particles/fogcolors.png'}
+    for relative in ('fog.png', 'fogcolors.png'):
+        assert (EXAMPLES / 'media' / 'particles' / relative).is_file()
+
+
+def test_smoke_world_visual_rate_tracks_density_ladder():
+    rungs = sorted(
+        (e['ratio'], e['rate']) for model, e in _smoke_emitters().items()
+        if model.startswith('A_smoke_'))
+    rates = [rate for _, rate in rungs]
+    assert rates == sorted(set(rates)), rungs
+
+
+def test_smoke_world_has_one_explicit_volume_per_visual_plume():
+    volumes = _smoke_volumes()
+    emitters = _smoke_emitters()
+    assert len(volumes) == len(emitters) == 14
+    assert all(v['pose'] and v['size'] and v['extinction'] for v in volumes)
+
+
+def test_smoke_world_explicit_density_ladder_is_monotonic():
+    """The first five companion volumes are Zone A's physical ladder."""
+    extinctions = [float(v['extinction']) for v in _smoke_volumes()[:5]]
+    assert extinctions == [0.05, 0.15, 0.35, 0.65, 1.0]
+
+
+def test_smoke_world_uses_only_supported_explicit_volume_shapes():
+    kinds = {v['type'] for v in _smoke_volumes()}
+    assert kinds <= {'box', 'cylinder', 'ellipsoid'}
+    assert {'box', 'cylinder', 'ellipsoid'} <= kinds
+
+
+def test_standalone_launch_selects_smoke_physics_profile():
+    text = (EXAMPLES / 'launch' / 'ouster_standalone.launch.py').read_text()
+    assert "'smoke_demo'" in text
+    assert 'obscurant_profile:=' in text
 
 
 def test_smoke_world_serves_emitter_command_topics():
-    """The header tells the reader to toggle clouds over gz topic; that only
-    works with the particle-emitter system loaded."""
+    """The visual overlay still needs Gazebo's particle-emitter system."""
     assert 'gz-sim-particle-emitter-system' in _plugins('ouster_smoke.sdf')
 
 

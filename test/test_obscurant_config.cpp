@@ -171,10 +171,7 @@ TEST(ObscurantConfig, VolumeWithoutExtinctionIsRejected)
 TEST(ObscurantConfig, ActiveTracksWhetherAnythingCanObscure)
 {
     ObscurantConfig cfg;
-    EXPECT_TRUE(cfg.active()) << "particle mirroring is on by default";
-
-    cfg.mirror_particles = false;
-    EXPECT_FALSE(cfg.active());
+    EXPECT_FALSE(cfg.active()) << "visual emitters are ignored by default";
 
     ObscurantVolume dead;
     cfg.volumes.push_back(dead);
@@ -315,7 +312,7 @@ TEST(ObscurantConfig, EmitterIsPlacedAtItsWorldPose)
 TEST(ObscurantSdf, EmptyPluginKeepsTheDocumentedDefaults)
 {
     const auto cfg = parseObscurantConfig(pluginElement(""));
-    EXPECT_TRUE(cfg.mirror_particles);
+    EXPECT_FALSE(cfg.mirror_particles);
     EXPECT_DOUBLE_EQ(cfg.particle_extinction, kParticleExtinction);
     EXPECT_DOUBLE_EQ(cfg.particle_growth, kParticleGrowth);
     EXPECT_DOUBLE_EQ(cfg.lidar_ratio, kObscurantLidarRatio);
@@ -336,14 +333,14 @@ TEST(ObscurantSdf, NullElementIsSafe)
 TEST(ObscurantSdf, ScalarKnobsAreRead)
 {
     const auto cfg = parseObscurantConfig(pluginElement(
-        "<particle_obscuration>false</particle_obscuration>"
+        "<particle_obscuration>true</particle_obscuration>"
         "<particle_extinction>0.4</particle_extinction>"
         "<particle_growth>0.25</particle_growth>"
         "<obscurant_lidar_ratio>18</obscurant_lidar_ratio>"
         "<obscurant_albedo>0.95</obscurant_albedo>"
         "<obscurant_multiple_scattering>0.6</obscurant_multiple_scattering>"
         "<pulse_length>0.9</pulse_length>"));
-    EXPECT_FALSE(cfg.mirror_particles);
+    EXPECT_TRUE(cfg.mirror_particles);
     EXPECT_DOUBLE_EQ(cfg.particle_extinction, 0.4);
     EXPECT_DOUBLE_EQ(cfg.particle_growth, 0.25);
     EXPECT_DOUBLE_EQ(cfg.lidar_ratio, 18.0);
@@ -507,6 +504,7 @@ TEST(ObscurantEcm, MirrorsEveryEmitterAtItsWorldPose)
     }
 
     ObscurantConfig cfg;
+    cfg.mirror_particles = true;
     cfg.particle_growth = 0.0;
     std::vector<rc::RcObscurant> out;
     EXPECT_EQ(gatherObscurants(cfg, ecm, {0, 0, 0}, out), 0u);
@@ -534,6 +532,7 @@ TEST(ObscurantEcm, ComposesTheWholeParentChain)
                  ::gz::math::Pose3d(0, 0, 2, 0, 0, 0));
 
     ObscurantConfig cfg;
+    cfg.mirror_particles = true;
     cfg.particle_growth = 0.0;
     std::vector<rc::RcObscurant> out;
     gatherObscurants(cfg, ecm, {0, 0, 0}, out);
@@ -551,6 +550,7 @@ TEST(ObscurantEcm, AuthoredVolumesAndEmittersBothAppear)
                  boxEmitter());
 
     ObscurantConfig cfg;
+    cfg.mirror_particles = true;
     ObscurantVolume v;
     v.pose = ::gz::math::Pose3d(-5, 0, 1, 0, 0, 0);
     v.extinction = 0.3;
@@ -576,6 +576,7 @@ TEST(ObscurantEcm, ReportsWhatTheCapDiscarded)
                      boxEmitter());
     }
     ObscurantConfig cfg;
+    cfg.mirror_particles = true;
     std::vector<rc::RcObscurant> out;
     EXPECT_EQ(gatherObscurants(cfg, ecm, {0, 0, 0}, out), 3u);
     EXPECT_EQ(out.size(), static_cast<size_t>(rc::kMaxObscurants));
@@ -587,6 +588,7 @@ TEST(ObscurantEcm, ClearsPriorContentsOnEveryGather)
     spawnEmitter(ecm, "cloud", ::gz::math::Pose3d(5, 0, 1, 0, 0, 0),
                  boxEmitter());
     ObscurantConfig cfg;
+    cfg.mirror_particles = true;
     std::vector<rc::RcObscurant> out{at(1, 1), at(2, 1)};
     gatherObscurants(cfg, ecm, {0, 0, 0}, out);
     EXPECT_EQ(out.size(), 1u) << "stale volumes would accumulate every scan";

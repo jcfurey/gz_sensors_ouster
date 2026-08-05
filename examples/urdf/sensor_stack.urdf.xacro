@@ -21,7 +21,7 @@
   <xacro:property name="anchor_type"
     value="${'altimeter' if ray_mode == 'raycast' else 'camera'}"/>
 
-  <xacro:include filename="$(find gz_sensors_ouster)/examples/urdf/ouster_macro.xacro"/>
+  <xacro:include filename="ouster_macro.xacro"/>
 
   <xacro:property name="pi" value="3.14159265359"/>
 

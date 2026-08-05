@@ -38,7 +38,7 @@
   <xacro:include filename="$(find turtlebot3_description)/urdf/turtlebot3_waffle.urdf"/>
 
   <!-- Ouster mount macro. -->
-  <xacro:include filename="$(find gz_sensors_ouster)/examples/urdf/ouster_macro.xacro"/>
+  <xacro:include filename="ouster_macro.xacro"/>
 
   <!-- The Ouster, sat above the waffle's top plate (base_scan is at z=0.122). -->
   <xacro:ouster_sensor

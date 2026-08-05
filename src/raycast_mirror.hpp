@@ -126,7 +126,7 @@ private:
     // emitters move with their link and can be toggled at runtime.
     std::vector<rc::RcObscurant> job_obscurants_;
     std::vector<rc::RcObscurant> post_obscurants_;
-    // Salts the kernel's per-ray scatter-depth draw so smoke speckle is
+    // Salts the kernel's per-ray medium-range draw so aerosol speckle is
     // decorrelated between scans while staying reproducible within a run.
     uint32_t scan_counter_ = 0;
     uint32_t job_rng_salt_ = 0;
