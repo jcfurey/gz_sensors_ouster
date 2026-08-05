@@ -13,6 +13,7 @@
 #include "frame_exchange.hpp"
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "lidar_common.hpp"
+#include "obscurants.hpp"
 #include "raycast_scene.hpp"
 #include "gz_gpu_ouster_lidar/sim_time_scheduler.hpp"
 
@@ -53,6 +54,9 @@ public:
         bool motion_distortion = false;
         const std::vector<float> * beam_alt_f = nullptr;
         const std::vector<float> * beam_az_f = nullptr;
+        /// Smoke / dust / fog volumes to integrate along every beam.
+        /// nullptr (or an inactive config) disables the whole stage.
+        const ObscurantConfig * obscurants = nullptr;
     };
 
     /// Start the cast worker. Pointed-to objects must outlive stop().
@@ -118,6 +122,14 @@ private:
     std::shared_ptr<const rc::Scene> job_scene_;
     uint64_t job_scene_version_ = 0;
     std::vector<rc::InstanceXform> job_xforms_;
+    // Participating media for this scan, re-gathered every scan because
+    // emitters move with their link and can be toggled at runtime.
+    std::vector<rc::RcObscurant> job_obscurants_;
+    std::vector<rc::RcObscurant> post_obscurants_;
+    // Salts the kernel's per-ray scatter-depth draw so smoke speckle is
+    // decorrelated between scans while staying reproducible within a run.
+    uint32_t scan_counter_ = 0;
+    uint32_t job_rng_salt_ = 0;
     float job_sensor_r_[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     float job_sensor_t_[3] = {0, 0, 0};
     std::vector<float> job_col_r_;   // per-column poses (motion distortion;

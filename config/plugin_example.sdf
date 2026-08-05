@@ -121,6 +121,68 @@
        instantaneous snapshot. -->
   <!-- <motion_distortion>true</motion_distortion> -->
 
+  <!-- ─── Smoke / dust / fog obscuration (raycast mode only) ──────── -->
+  <!-- Beams are integrated through participating media: targets behind
+       smoke dim by exp(-2*tau) and eventually drop out, the smoke itself
+       produces competing returns, and NEAR_IR brightens while the laser
+       channels darken (docs/MODEL_REFERENCES.md §11).
+
+       Gazebo <particle_emitter> elements in the world are mirrored
+       AUTOMATICALLY — nothing below is required to make the smoke a world
+       already shows obscure the LiDAR. See examples/worlds/ouster_smoke.sdf. -->
+
+  <!-- Stop mirroring the world's particle emitters. -->
+  <!-- <particle_obscuration>false</particle_obscuration> -->
+
+  <!-- Extinction coefficient (1/m) produced by an emitter whose
+       <particle_scatter_ratio> is 1.0. gz's default ratio of 0.65 then
+       gives sigma ~ 0.65/m: visibility ~6 m, i.e. thick smoke. Lower this
+       for haze. -->
+  <!-- <particle_extinction>1.0</particle_extinction> -->
+
+  <!-- Fraction of the mean particle travel distance by which an emitter's
+       own <size> volume is dilated to cover the plume the particles
+       actually occupy. 0 uses <size> verbatim. -->
+  <!-- <particle_growth>1.0</particle_growth> -->
+
+  <!-- Extinction-to-backscatter ratio S = sigma_ext/beta_pi [sr]: how
+       strongly the medium returns. ~18-20 fog/cloud, 40-50 dust,
+       50-70 smoke. Single-scattering albedo drives the NEAR_IR glow.
+       The two are not independent — S = 4*pi/(omega*P(pi)) — but nothing
+       enforces it, so pick a pair that describes a real aerosol. -->
+  <!-- <obscurant_lidar_ratio>50.0</obscurant_lidar_ratio> -->
+  <!-- <obscurant_albedo>0.8</obscurant_albedo> -->
+
+  <!-- Platt's multiple-scattering factor eta. Extinction removes light in
+       every direction, but forward-peaked media (smoke, dust, fog) deflect
+       most of it by only milliradians, so a real receiver still collects it.
+       eta credits that back: the round trip attenuates by exp(-2*eta*tau).
+       1.0 (default) is the pure single-scattering limit and changes nothing;
+       0.5-0.8 is realistic for dense fog and smoke. Laser channels only —
+       the NEAR_IR airlight term already accounts for the same physics. -->
+  <!-- <obscurant_multiple_scattering>0.6</obscurant_multiple_scattering> -->
+
+  <!-- One-pulse range gate dR = c*t_pulse/2 (metres); scales the medium's
+       return amplitude. -->
+  <!-- <pulse_length>0.6</pulse_length> -->
+
+  <!-- Authored volumes, for exact plume shapes or fog banks. Repeat the
+       block for more (up to 16; beyond that the nearest to the sensor are
+       kept and the rest are logged as dropped). Say the density either as
+       <extinction> in 1/m or as <visibility> in metres (Koschmieder:
+       sigma = 3.912/V); extinction wins if both are given. -->
+  <!--
+  <obscurant>
+    <type>ellipsoid</type>
+    <pose>10 0 1.5 0 0 0</pose>
+    <size>6 6 3</size>
+    <extinction>0.6</extinction>
+    <lidar_ratio>50</lidar_ratio>
+    <albedo>0.8</albedo>
+    <multiple_scattering>0.6</multiple_scattering>
+  </obscurant>
+  -->
+
   <!-- ─── IMU (optional) ──────────────────────────────────────────── -->
   <!-- Publishes: .../imu_packets (Ouster PacketMsg) and .../imu (sensor_msgs/Imu).
        Requires gz-sim-imu-system plugin loaded in your world SDF:

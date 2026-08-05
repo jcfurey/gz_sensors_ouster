@@ -268,6 +268,7 @@ add_subdirectory(cuda)
 # include/ to the target's public include path.
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/gz_gpu_ouster_lidar_system.cpp
+  src/obscurants.cpp
   src/ouster_metadata.cpp
   src/packet_encoder.cpp
   src/panel_rig.cpp
@@ -342,6 +343,21 @@ if(BUILD_TESTING)
   # beam-origin parallax, retro, near clip, processDepth)
   ament_add_gtest(test_raycast test/test_raycast.cpp)
   target_link_libraries(test_raycast gz_gpu_ouster_lidar_cuda)
+
+  # Test: participating media (smoke / dust / fog) — volume geometry,
+  # Beer-Lambert extinction, medium backscatter, NEAR_IR airlight
+  ament_add_gtest(test_obscurants test/test_obscurants.cpp)
+  target_link_libraries(test_obscurants gz_gpu_ouster_lidar_cuda)
+
+  # Test: ECM/SDF -> obscurant conversion (particle emitters, authored
+  # volumes, nearest-N selection). Compiles src/obscurants.cpp directly so
+  # the helpers stay reachable without exporting them from the plugin .so.
+  ament_auto_add_gtest(test_obscurant_config
+    test/test_obscurant_config.cpp src/obscurants.cpp)
+  target_link_libraries(test_obscurant_config
+    gz_gpu_ouster_lidar_cuda gz-sim::gz-sim)
+  target_include_directories(test_obscurant_config PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
   # Test: scan-frame triple buffer (header-only, no deps beyond the STL)
   ament_add_gtest(test_frame_exchange test/test_frame_exchange.cpp)

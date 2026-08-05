@@ -5,6 +5,7 @@
 
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <string>
@@ -442,6 +443,22 @@ void RaycastMirror::postUpdate(
             return false;  // first directional light wins
         });
 
+    // Smoke / dust / fog volumes, re-gathered every scan: particle emitters
+    // ride on links that move, and both their `emitting` flag and an
+    // authored volume's density can change mid-run.
+    post_obscurants_.clear();
+    if (params_.obscurants != nullptr && params_.obscurants->active()) {
+        const size_t dropped = gatherObscurants(
+            *params_.obscurants, ecm, sensor_pose.Pos(), post_obscurants_);
+        if (dropped > 0) {
+            RCLCPP_WARN_THROTTLE(kLogger, throttle_clock_, 10000,
+                "%s: %zu obscurant volume(s) beyond the %d-volume cap were "
+                "dropped this scan; the nearest %d are kept, so more distant "
+                "smoke will not obscure", sensor_name_.c_str(), dropped,
+                rc::kMaxObscurants, rc::kMaxObscurants);
+        }
+    }
+
     bool overwrote_job = false;
     uint64_t dropped_jobs = 0;
     {
@@ -457,6 +474,8 @@ void RaycastMirror::postUpdate(
         poseToRT(sensor_pose, job_sensor_r_, job_sensor_t_);
         job_col_r_.swap(post_col_r_);
         job_col_t_.swap(post_col_t_);
+        job_obscurants_.swap(post_obscurants_);
+        job_rng_salt_ = ++scan_counter_;
         job_metadata_ = FrameMetadata{sim_now.count(), epoch};
         job_process_params_ = process_params;
         std::memcpy(job_sun_, sun, sizeof(sun));
@@ -484,6 +503,12 @@ void RaycastMirror::threadFunc()
         RayProcessParams process_params;
         uint64_t version = 0;
         float sr[9], st[3], sun[5];
+        // Obscurants are copied rather than swapped: at most
+        // rc::kMaxObscurants entries (~576 B), and the kernel wants them in
+        // ScanParams by value anyway.
+        rc::RcObscurant obscurants[rc::kMaxObscurants];
+        int n_obscurants = 0;
+        uint32_t rng_salt = 0;
         {
             std::unique_lock<std::mutex> lk(mtx_);
             cv_.wait(lk, [this] {
@@ -502,6 +527,10 @@ void RaycastMirror::threadFunc()
             std::memcpy(sr, job_sensor_r_, sizeof(sr));
             std::memcpy(st, job_sensor_t_, sizeof(st));
             std::memcpy(sun, job_sun_, sizeof(sun));
+            n_obscurants = static_cast<int>(std::min<size_t>(
+                job_obscurants_.size(), rc::kMaxObscurants));
+            std::copy_n(job_obscurants_.begin(), n_obscurants, obscurants);
+            rng_salt = job_rng_salt_;
         }
         if (!scene || !proc_) continue;
 
@@ -525,6 +554,13 @@ void RaycastMirror::threadFunc()
             sp.sun_dir[2] = sun[2];
             sp.sun_diffuse = sun[3];
             sp.sun_ambient = sun[4];
+            sp.n_obscurants = n_obscurants;
+            std::copy_n(obscurants, n_obscurants, sp.obscurants);
+            sp.rng_salt = rng_salt;
+            if (params_.obscurants != nullptr) {
+                sp.pulse_gate_m =
+                    static_cast<float>(params_.obscurants->pulse_gate_m);
+            }
 
             // CUDA launches raycast and channel/noise kernels back-to-back on
             // one stream, with no host round trip for depth/retro/NIR. Other

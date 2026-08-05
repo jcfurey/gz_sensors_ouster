@@ -31,6 +31,7 @@ def test_all_worlds_have_physics(name):
 @pytest.mark.parametrize('name', ['ouster_demo.sdf',
                                    'ouster_demo_panels.sdf',
                                    'ouster_showcase.sdf',
+                                   'ouster_smoke.sdf',
                                    'turtlebot3_ouster_headless.sdf'])
 def test_example_worlds_have_imu(name):
     assert 'gz-sim-imu-system' in _plugins(name)
@@ -38,7 +39,7 @@ def test_example_worlds_have_imu(name):
 
 # ── Raycast worlds: no rendering system, yes altimeter ───────────────────────
 
-RAYCAST_WORLDS = ['ouster_demo.sdf', 'ouster_showcase.sdf',
+RAYCAST_WORLDS = ['ouster_demo.sdf', 'ouster_showcase.sdf', 'ouster_smoke.sdf',
                   'turtlebot3_ouster_headless.sdf']
 
 
@@ -153,6 +154,81 @@ def test_visual_geometry_is_mirrorable(name):
     assert not offenders, (
         f'{name} has visual geometry the raycast mirror cannot see '
         f'(silently invisible to the lidar): {offenders}')
+
+
+# ── Smoke world: the obscuration demo ────────────────────────────────────────
+#
+# Its whole point is a monotone density ladder, and every cloud in it is an
+# ordinary <particle_emitter> — no plugin configuration. Both properties are
+# easy to break silently (a retuned ratio that lands out of order still loads
+# and still looks like smoke), so pin them.
+
+def _smoke_emitters() -> dict:
+    doc = xml.dom.minidom.parse(str(WORLDS / 'ouster_smoke.sdf'))
+    out = {}
+    for model in doc.getElementsByTagName('model'):
+        for em in model.getElementsByTagName('particle_emitter'):
+            ratios = [r.firstChild.nodeValue.strip()
+                      for r in em.getElementsByTagName(
+                          'particle_scatter_ratio') if r.firstChild]
+            out[model.getAttribute('name')] = {
+                'type': em.getAttribute('type'),
+                'ratio': float(ratios[0]) if ratios else None,
+            }
+    return out
+
+
+def test_smoke_world_ladder_ratio_matches_model_name():
+    """A_smoke_035 must actually carry scatter ratio 0.35 — the header table
+    quotes derived optical depths keyed to these names."""
+    mismatches = []
+    for model, em in _smoke_emitters().items():
+        if not model.startswith(('A_smoke_', 'C_sky_')):
+            continue
+        expected = int(model.rsplit('_', 1)[1]) / 100.0
+        if em['ratio'] is None or abs(em['ratio'] - expected) > 1e-9:
+            mismatches.append(f'{model}: expected {expected}, found {em}')
+    assert not mismatches, (
+        f'smoke ladder name/ratio mismatch (a stray global replace?): '
+        f'{mismatches}')
+
+
+def test_smoke_world_ladder_is_monotonic():
+    rungs = sorted((m, e['ratio'])
+                   for m, e in _smoke_emitters().items()
+                   if m.startswith('A_smoke_'))
+    values = [v for _, v in rungs]
+    assert len(values) >= 4, 'density ladder is suspiciously short'
+    assert values == sorted(set(values)), (
+        f'density ladder has duplicate or non-monotonic rungs: {rungs}')
+
+
+def test_smoke_world_covers_every_emitter_shape():
+    """Each emitter type takes a different branch in the volume conversion
+    (src/obscurants.cpp); the gallery zone exists to exercise all of them."""
+    kinds = {e['type'] for e in _smoke_emitters().values()}
+    assert {'box', 'cylinder', 'ellipsoid', 'point'} <= kinds, kinds
+
+
+def test_smoke_world_needs_no_plugin_configuration():
+    """The demo's claim is that mirroring gz particle emitters is automatic.
+    An <obscurant> block or a tweaked knob in the world would undercut it —
+    and the plugin lives in the xacro, not here, so there is nowhere for one
+    to legitimately appear."""
+    # Match on parsed elements, not raw text: the header comment names these
+    # knobs on purpose, pointing the reader at the docs.
+    doc = xml.dom.minidom.parse(str(WORLDS / 'ouster_smoke.sdf'))
+    for knob in ('obscurant', 'particle_extinction', 'particle_obscuration',
+                 'particle_growth', 'obscurant_lidar_ratio',
+                 'obscurant_albedo', 'pulse_length'):
+        found = doc.getElementsByTagName(knob)
+        assert not found, f'<{knob}> defeats the point of this world'
+
+
+def test_smoke_world_serves_emitter_command_topics():
+    """The header tells the reader to toggle clouds over gz topic; that only
+    works with the particle-emitter system loaded."""
+    assert 'gz-sim-particle-emitter-system' in _plugins('ouster_smoke.sdf')
 
 
 # ── Panels world: rendering system present, no altimeter ─────────────────────

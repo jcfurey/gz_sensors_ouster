@@ -26,6 +26,7 @@ namespace gz_gpu_ouster_lidar {
 // header needs only forward declarations.
 class FrameExchange;
 class ProcessedFrameExchange;
+struct ObscurantConfig;
 class OusterMetadata;
 class PacketEncoder;
 class PanelRig;
@@ -88,6 +89,11 @@ private:
     bool publish_native_images_ = false;     // os_image is the sim image source
     double max_range_ = 120.0;               // metres, default OS1
     bool max_range_explicit_ = false;        // set via SDF (don't auto-derive)
+    // Smoke / dust / fog obscuration (raycast mode only): mirrored gz
+    // <particle_emitter>s plus any authored <obscurant> volumes. Held by
+    // pointer like the other src/-private types so this header stays free of
+    // the uninstalled definition; outlives the mirror that borrows it.
+    std::unique_ptr<ObscurantConfig> obscurants_;
 
     // Noise model SDF defaults (live store sits in RosInterface; these hold
     // the parsed + clamped initial values handed over at init).
@@ -225,6 +231,9 @@ private:
     // ── Private methods ──────────────────────────────────────────────────────
     void OnRender();
     void OnRenderTeardown();
+    /// Parse the <obscurant> volumes and the particle-mirroring knobs into
+    /// obscurants_. Called from Configure once the SDF is available.
+    void parseObscurants(const std::shared_ptr<const sdf::Element> & sdf);
     void encodeAndPublish(int64_t stamp_ns, const float * raw_data, int raw_n);
     RayProcessParams makeRayProcessParams() const;
     void publishChannels(int64_t stamp_ns);

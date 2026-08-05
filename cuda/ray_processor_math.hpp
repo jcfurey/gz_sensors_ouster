@@ -79,6 +79,8 @@ GZ_OUSTER_HD inline float fmax_(float a, float b) { return a > b ? a : b; }
 #if defined(SYCL_LANGUAGE_VERSION)
 GZ_OUSTER_HD inline float sqrt_(float x)     { return sycl::sqrt(x); }
 GZ_OUSTER_HD inline float log2_(float x)     { return sycl::log2(x); }
+GZ_OUSTER_HD inline float log_(float x)      { return sycl::log(x); }
+GZ_OUSTER_HD inline float exp_(float x)      { return sycl::exp(x); }
 GZ_OUSTER_HD inline float cos_(float x)      { return sycl::cos(x); }
 GZ_OUSTER_HD inline float sin_(float x)      { return sycl::sin(x); }
 GZ_OUSTER_HD inline float floor_(float x)    { return sycl::floor(x); }
@@ -87,6 +89,8 @@ GZ_OUSTER_HD inline bool  isfinite_(float x) { return sycl::isfinite(x); }
 #else
 GZ_OUSTER_HD inline float sqrt_(float x)     { return std::sqrt(x); }
 GZ_OUSTER_HD inline float log2_(float x)     { return std::log2(x); }
+GZ_OUSTER_HD inline float log_(float x)      { return std::log(x); }
+GZ_OUSTER_HD inline float exp_(float x)      { return std::exp(x); }
 GZ_OUSTER_HD inline float cos_(float x)      { return std::cos(x); }
 GZ_OUSTER_HD inline float sin_(float x)      { return std::sin(x); }
 GZ_OUSTER_HD inline float floor_(float x)    { return std::floor(x); }
