@@ -265,6 +265,85 @@ SDK XYZ LUT (`ouster_client` `xyzlut.cpp`) and destagger
 (`lidar_scan_impl.h`), and the Ouster sensor documentation coordinate-frame
 sections. Verified in-tree by `test_raycast.BeamOriginParallaxMatchesXyzLut`.
 
+### 11. Participating media — smoke, dust and fog (raycast mode)
+
+**Model:** every beam is integrated through a list of obscurant volumes
+(`rc::RcObscurant`, `cuda/raycast_math.hpp`), each homogeneous with
+extinction coefficient σ_ext [1/m]. Three effects, all in
+`rc::rcApplyObscurants`:
+
+```
+τ(R)  = ∫₀ᴿ σ_ext ds                        one-way optical depth
+ρ_app ← ρ_app · exp(−2τ)                    two-way extinction of the target
+ρ_med = π · β_π · ΔR · exp(−2τ_s)           backscatter from the medium itself
+NIR   = NIR_target·e^(−τ) + ω·I·(1 − e^(−τ))   airlight on the ambient channel
+```
+
+with β_π = σ_ext/S from the **lidar ratio** S = σ_ext/β_π [sr], ΔR = c·τ_pulse/2
+the one-pulse range gate, and ω the single-scattering albedo. The
+single-return detector reports whichever of the medium and the hard target
+carries more received power ρ/R² — the same strongest-return rule §8 uses
+for glass and mirrors.
+
+Three properties fall out rather than being coded:
+
+- Because extinction multiplies the *apparent reflectance*, the whole
+  downstream pipeline responds with no knowledge that smoke exists: SIGNAL
+  dims by exp(−2τ), the calibrated REFLECTIVITY byte drops, range noise
+  widens on the √ρ weighting, and once ρ·exp(−2τ) falls past the √(ρ/0.8)
+  detection limit of §3 the return disappears entirely.
+- A beam that hits nothing can still return, because the medium is a target.
+  That is how a phantom obstacle appears in real smoke.
+- NEAR_IR moves the *opposite* way from the laser channels — lit smoke
+  scatters ambient light into the receiver, so the ambient image brightens
+  while the range image darkens, the signature of fog on a real Ouster.
+
+The scatter depth is sampled by inverse CDF over the truncated two-way
+transmittance profile, so dense smoke returns from a speckled shell just
+inside its near face and thin smoke returns sparsely from throughout — the
+1/R² term is kept in the amplitude but omitted from the sampling density,
+which varies slowly across the ≲1/σ penetration depth. Sampling uses an
+integer hash of (pixel, per-scan salt) rather than a backend RNG, so the CPU
+and every GPU kernel draw identically.
+
+**Sourcing.** Gazebo `<particle_emitter>` elements are mirrored
+automatically (`src/obscurants.cpp`), so the smoke a world already shows is
+the smoke the LiDAR scans. gz exposes no physical density for an emitter —
+rate/lifetime/particle_size are authored for visual appeal — so σ_ext comes
+from `<particle_scatter_ratio>`, which is already Gazebo's "how much does
+this emitter affect range sensors" knob (gz-rendering applies it to
+GpuRays), scaled by `<particle_extinction>`. The volume is the emitter's own
+`<size>` region dilated by the mean particle travel distance; the dilation
+is isotropic because the message documents no stable emission axis, so it
+always *contains* the plume. `<obscurant>` blocks give exact volumes with an
+explicit σ_ext (or `<visibility>`, via Koschmieder's σ = 3.912/V).
+
+Parameter values: S ≈ 18–20 sr for fog and water cloud, 40–50 sr for dust,
+50–70 sr for biomass-burning smoke; ω ≈ 0.8–0.9 in the near IR for weakly
+absorbing smoke and dust.
+
+- Rasshofer et al. — *Influences of weather phenomena on automotive laser
+  radar systems*, Adv. Radio Sci. 9, 2011. The extinction + backscatter
+  decomposition this implements.
+- Hahner et al. — *Fog Simulation on Real LiDAR Point Clouds for 3D Object
+  Detection*, ICCV 2021, arXiv:2108.05249; Kilic et al. — *LISA: Lidar Light
+  Scattering Augmentation*, arXiv:2107.07004. The same physics applied as
+  point-cloud augmentation; useful cross-checks on the artifact shapes.
+- Müller et al. — *Aerosol-type-dependent lidar ratios observed with Raman
+  lidar*, JGR 112 D16202, 2007; Ackermann — *The extinction-to-backscatter
+  ratio of tropospheric aerosol*, J. Atmos. Ocean. Technol. 15, 1998. Source
+  of the lidar-ratio values above.
+- Koschmieder 1924, for the airlight composite and the visibility ↔
+  extinction conversion.
+
+Panels mode has no equivalent path (it only ever sees a rendered depth
+image), and the plugin warns if obscurants are configured there. Verified
+in-tree by `test_obscurants` (closed-form Beer–Lambert, exact inversion of
+the optical-depth profile, the sampled amplitude against the lidar equation)
+and `test_obscurant_config`; `examples/worlds/ouster_smoke.sdf` demonstrates
+it, and its header table's predicted reflectivity bytes match the measured
+point cloud rung for rung.
+
 ## Known gaps (deliberately not modeled)
 
 Ordered roughly by expected impact on downstream perception realism.
@@ -274,8 +353,9 @@ Ordered roughly by expected impact on downstream perception realism.
 | Agent motion during sweep | §9 distorts for EGO motion; other agents' poses stay at the scan-trigger snapshot. Fast crossing traffic also smears in reality (LiDARsim interpolates per-agent poses too). | *Lidar with Velocity*, arXiv:2111.09497; HiMo, arXiv:2503.00803 |
 | Beam divergence / footprint | Finite-footprint returns: edge mixing, multi-return, footprint-averaged ranges on oblique/rough surfaces; energy is ~2-D Gaussian over the footprint. HELIOS++ subsamples the beam cone. | Winiwarter et al. 2022 |
 | Retroreflector blooming / crosstalk | Very strong returns (signs, plates) saturate detectors and scatter into neighbouring channels — halo points, range bias. This plugin encodes ρ > 1 in the reflectivity byte but produces no artifacts. | *LiDAR Blooming Artifacts Estimation … with Synthetic Data Modeling*, IEEE (10.1109/10774004), 2024 |
-| Atmospheric attenuation | `P_r ∝ e^(−2ζR)`; ζ from rain rate / fog visibility via Mie scattering. Hooks cleanly into `signalFromRange` if weather sim is ever needed. | Rasshofer et al., Adv. Radio Sci. 9, 2011; MDPI Sensors 23(15):6891, 2023 |
-| Weather scatterers (rain/fog/snow) | Backscatter returns *off the weather itself* (early false hits), not just attenuation. Physics-based augmentation is a mature line of work and a good template. | Hahner et al., *Fog Simulation on Real LiDAR Point Clouds*, ICCV 2021 (arXiv:2108.05249); Kilic et al., *LISA*, arXiv:2107.07004; Hahner et al., *LiDAR Snowfall Simulation*, CVPR 2022 |
+| Discrete precipitation (rain / snow) | §11 models a *continuous* medium, which fits smoke, dust and fog. Rain and snow are sparse discrete scatterers: individual drops or flakes crossing single beams give isolated near returns and per-beam flicker rather than a smooth transmittance profile, and the drop-size distribution ties σ_ext to rain rate. | Hahner et al., *LiDAR Snowfall Simulation*, CVPR 2022; Kilic et al., *LISA*, arXiv:2107.07004 |
+| Multiple scattering in dense media | §11 is single-scattering: at high optical depth real returns pick up multiply-scattered photons, which stretch the pulse and bias ranges long. | Rasshofer et al., Adv. Radio Sci. 9, 2011 |
+| Density structure inside a plume | Obscurant volumes are homogeneous with a hard boundary; real plumes have soft, turbulent, time-varying density, so simulated cloud edges are crisper than real ones. | §11 references |
 | Multi-return / full waveform | Second returns through vegetation, edge splits. | Winiwarter et al. 2022 |
 | Incidence angle in panels mode | Depth-image normals (from gradients) could approximate cos(α); currently panels mode applies no incidence factor. | §1 references |
 | Retroreflective BRDF | Retroreflectors (ρ > 1) are *angle-insensitive* (corner cubes return along the incident path); §8's diffuse+specular split still attenuates them by cos(α). | Kashani et al. 2015 |

@@ -59,6 +59,59 @@ struct InstanceXform {
     float bmax[3];
 };
 
+/// Shape of an obscurant volume, in the volume's own local frame.
+enum class ObscurantType : int {
+    kBox = 0,     ///< box, half-extents half[0..2]
+    kEllipsoid,   ///< semi-axes half[0..2] (a sphere when all three are equal)
+    kCylinder,    ///< z axis, semi-axes half[0..1], half-length half[2]
+};
+
+/// One participating-medium volume: smoke, dust, fog or spray that the beam
+/// travels THROUGH rather than bounces off.
+///
+/// Inside the volume the medium is homogeneous with extinction coefficient
+/// σ_ext = `sigma` [1/m], so Beer–Lambert gives the one-way transmittance
+/// over a path of length L as exp(−σ·L). The volume backscatter coefficient
+/// follows from the extinction-to-backscatter ratio (the "lidar ratio")
+/// S = σ_ext/β_π [sr] — the standard atmospheric-lidar parameterisation,
+/// measured per aerosol type: ≈18–20 sr for fog/water cloud, ≈40–50 sr for
+/// dust, ≈50–70 sr for biomass-burning smoke (Müller et al., JGR 112 D16202,
+/// 2007; Ackermann, J. Atmos. Ocean. Technol. 15, 1998).
+struct RcObscurant {
+    float r[9];             ///< world→local rotation (row-major)
+    float t[3];             ///< world→local translation: p_l = r·p_w + t
+    float half[3];          ///< local half-extents / semi-axes (metres)
+    float sigma = 0.0f;     ///< extinction coefficient σ_ext [1/m]
+    float lidar_ratio = 50.0f;  ///< S = σ_ext/β_π [sr]
+    float albedo = 0.8f;    ///< single-scattering albedo ω (NEAR_IR airlight)
+    ObscurantType type = ObscurantType::kEllipsoid;
+};
+
+/// Obscurant volumes ride inside ScanParams, which every backend already
+/// passes to its kernel BY VALUE (RcCastArgs in the CUDA/HIP kernels, the
+/// captured sp_copy in SYCL) — the same trick ResampleParams uses for its
+/// panel array. That keeps the whole feature out of the Backend interface at
+/// the cost of a fixed cap.
+///
+/// 16 is chosen against two budgets, and the static_assert below pins the
+/// first so nobody raises it blindly:
+///   * kernel argument space — CUDA and HIP allow 4 KB, and real Level Zero
+///     devices report ≥ 2 KB, against ~1.2 KB of ScanParams here;
+///   * per-thread scratch — rcDepthAtOpticalDepth keeps three float[N] spans
+///     on the stack, so N also sets the local-memory footprint of every ray.
+///
+/// A world with more obscurants than this keeps the ones nearest the sensor
+/// and logs what it dropped (see gatherObscurants); it never silently loses
+/// smoke.
+constexpr int kMaxObscurants = 16;
+/// Half-extents are clamped to this before any divide: gz particle emitters
+/// are routinely authored flat (`<size>10 10 0</size>`).
+constexpr float kRcObscurantMinHalf = 1.0e-3f;
+/// Optical depth below which a medium is treated as absent — exp(−2τ) differs
+/// from 1 by < 0.02% here, so neither the attenuation nor a backscatter
+/// return is observable.
+constexpr float kRcTauMin = 1.0e-4f;
+
 struct ScanParams {
     int H = 0;                 ///< beam count (output rows)
     int W = 0;                 ///< columns per frame (output cols)
@@ -74,7 +127,29 @@ struct ScanParams {
     float sun_dir[3] = {0.0f, 0.0f, -1.0f};  ///< propagation direction (unit)
     float sun_diffuse = 0.0f;  ///< sun term weight (0 = no sun)
     float sun_ambient = 1.0f;  ///< ambient term weight
+
+    // ── Participating media (smoke / dust / fog) ─────────────────────────
+    RcObscurant obscurants[kMaxObscurants];
+    int n_obscurants = 0;      ///< valid entries in obscurants[] (0 = off)
+    /// Effective range gate of one pulse, ΔR = c·τ_pulse/2 [m]. A hard target
+    /// returns all of its energy from one surface; a distributed medium only
+    /// returns the energy scattered from the slab the detector integrates
+    /// over, so the medium's apparent reflectance carries this factor.
+    float pulse_gate_m = 0.6f;
+    /// Per-scan salt for the deterministic scatter-depth draw. Pure integer
+    /// hashing (rcHashUnit) keeps every backend bit-identical while still
+    /// decorrelating rays and successive scans.
+    uint32_t rng_salt = 0;
 };
+
+// ScanParams is copied into kernel argument space by every backend. OpenCL's
+// floor for CL_DEVICE_MAX_PARAMETER_SIZE is 1 KB and real Level Zero / CUDA /
+// HIP devices are well above it, but the margin is finite — if this fires,
+// shrink RcObscurant or move the array to a device buffer beside `xforms`
+// rather than nudging the bound.
+static_assert(sizeof(ScanParams) <= 2048,
+              "ScanParams must stay inside the smallest backend's kernel "
+              "argument budget");
 
 constexpr float kRcTriEps = 1.0e-8f;
 constexpr int kRcBvhStack = 64;
@@ -556,6 +631,327 @@ GZ_OUSTER_HD inline float rcHitReflectance(
     return rcApparentReflectance(instances[inst], cos_inc);
 }
 
+// ── Participating media: smoke / dust / fog obscuration ─────────────────────
+//
+// A beam crossing an obscurant volume does two things a clear beam does not:
+// it LOSES energy on the way out and back (Beer–Lambert extinction), and it
+// gains a competing return SCATTERED BACK BY THE MEDIUM ITSELF, which a
+// single-return sensor may report instead of the real target. Both are the
+// dominant lidar-in-smoke artifacts, and both are modeled here.
+//
+// Everything below is a pure function of ScanParams — no RNG state, no extra
+// buffers — so the CPU fallback and the CUDA/HIP/SYCL kernels run identical
+// code with no change to the Backend interface.
+
+/// Entry/exit ray parameters of one obscurant, clipped to [t_lo, t_hi].
+/// False when the ray misses the volume or the clipped span is empty.
+///
+/// Ellipsoid and elliptic-cylinder cases divide the local ray by the
+/// semi-axes: scaling origin and direction by the same per-axis factors
+/// leaves the ray parameter t untouched, so the roots come out directly in
+/// the caller's parameterisation.
+GZ_OUSTER_HD inline bool rcObscurantSpan(const RcObscurant & ob,
+    RcV3 o, RcV3 d, float t_lo, float t_hi, float & a, float & b)
+{
+    const RcV3 o_l = rcXformPoint(ob.r, ob.t, o);
+    const RcV3 d_l = rcRotate(ob.r, d);
+    const float hx = rpmath::gzm::fmax_(ob.half[0], kRcObscurantMinHalf);
+    const float hy = rpmath::gzm::fmax_(ob.half[1], kRcObscurantMinHalf);
+    const float hz = rpmath::gzm::fmax_(ob.half[2], kRcObscurantMinHalf);
+
+    float lo = t_lo, hi = t_hi;
+    switch (ob.type) {
+        case ObscurantType::kBox: {
+            if (!rcSlabAxis(o_l.x, d_l.x, -hx, hx, lo, hi)) return false;
+            if (!rcSlabAxis(o_l.y, d_l.y, -hy, hy, lo, hi)) return false;
+            if (!rcSlabAxis(o_l.z, d_l.z, -hz, hz, lo, hi)) return false;
+            break;
+        }
+        case ObscurantType::kEllipsoid: {
+            const RcV3 os{o_l.x / hx, o_l.y / hy, o_l.z / hz};
+            const RcV3 ds{d_l.x / hx, d_l.y / hy, d_l.z / hz};
+            const float qa = rcDot(ds, ds);
+            if (qa < 1.0e-20f) return false;
+            const float qb = rcDot(os, ds);
+            const float qc = rcDot(os, os) - 1.0f;
+            const float disc = qb * qb - qa * qc;
+            if (disc < 0.0f) return false;
+            const float sq = rpmath::gzm::sqrt_(disc);
+            lo = rpmath::gzm::fmax_(lo, (-qb - sq) / qa);
+            hi = rpmath::gzm::fmin_(hi, (-qb + sq) / qa);
+            break;
+        }
+        case ObscurantType::kCylinder: {
+            const float ox = o_l.x / hx, oy = o_l.y / hy;
+            const float dx = d_l.x / hx, dy = d_l.y / hy;
+            const float qa = dx * dx + dy * dy;
+            const float qc = ox * ox + oy * oy - 1.0f;
+            if (qa < 1.0e-20f) {
+                // Parallel to the axis: inside the tube for all t, or never.
+                if (qc > 0.0f) return false;
+            } else {
+                const float qb = ox * dx + oy * dy;
+                const float disc = qb * qb - qa * qc;
+                if (disc < 0.0f) return false;
+                const float sq = rpmath::gzm::sqrt_(disc);
+                lo = rpmath::gzm::fmax_(lo, (-qb - sq) / qa);
+                hi = rpmath::gzm::fmin_(hi, (-qb + sq) / qa);
+            }
+            if (!rcSlabAxis(o_l.z, d_l.z, -hz, hz, lo, hi)) return false;
+            break;
+        }
+    }
+    a = lo;
+    b = hi;
+    return b > a;
+}
+
+/// True when the world-space point lies inside the volume.
+GZ_OUSTER_HD inline bool rcObscurantContains(const RcObscurant & ob, RcV3 p_w)
+{
+    const RcV3 p = rcXformPoint(ob.r, ob.t, p_w);
+    const float hx = rpmath::gzm::fmax_(ob.half[0], kRcObscurantMinHalf);
+    const float hy = rpmath::gzm::fmax_(ob.half[1], kRcObscurantMinHalf);
+    const float hz = rpmath::gzm::fmax_(ob.half[2], kRcObscurantMinHalf);
+    switch (ob.type) {
+        case ObscurantType::kBox:
+            return rpmath::gzm::fabs_(p.x) <= hx &&
+                   rpmath::gzm::fabs_(p.y) <= hy &&
+                   rpmath::gzm::fabs_(p.z) <= hz;
+        case ObscurantType::kEllipsoid: {
+            const RcV3 s{p.x / hx, p.y / hy, p.z / hz};
+            return rcDot(s, s) <= 1.0f;
+        }
+        case ObscurantType::kCylinder: {
+            const float sx = p.x / hx, sy = p.y / hy;
+            return sx * sx + sy * sy <= 1.0f &&
+                   rpmath::gzm::fabs_(p.z) <= hz;
+        }
+    }
+    return false;
+}
+
+/// One-way optical depth τ = ∫σ_ext ds accumulated over every obscurant on
+/// [t_lo, t_hi]. Overlapping volumes are handled EXACTLY without any interval
+/// merging, because the integral of a sum is the sum of the integrals:
+/// ∫Σσ_i ds = Σ∫σ_i ds. `albedo_out` (optional) receives the τ-weighted mean
+/// single-scattering albedo over the same path.
+GZ_OUSTER_HD inline float rcOpticalDepth(const ScanParams & sp,
+    RcV3 o, RcV3 d, float t_lo, float t_hi, float * albedo_out = nullptr)
+{
+    float tau = 0.0f;
+    float w_albedo = 0.0f;
+    for (int i = 0; i < sp.n_obscurants; ++i) {
+        const RcObscurant & ob = sp.obscurants[i];
+        if (ob.sigma <= 0.0f) continue;
+        float a, b;
+        if (!rcObscurantSpan(ob, o, d, t_lo, t_hi, a, b)) continue;
+        const float dtau = ob.sigma * (b - a);
+        tau += dtau;
+        w_albedo += dtau * ob.albedo;
+    }
+    if (albedo_out != nullptr) {
+        *albedo_out = (tau > 0.0f) ? (w_albedo / tau) : 0.0f;
+    }
+    return tau;
+}
+
+/// Extinction and backscatter coefficients of the medium at one world point:
+/// σ = Σσ_i and β_π = Σσ_i/S_i over every volume containing the point.
+GZ_OUSTER_HD inline void rcMediumProps(const ScanParams & sp, RcV3 p,
+                                       float & sigma_out, float & beta_out)
+{
+    sigma_out = 0.0f;
+    beta_out = 0.0f;
+    for (int i = 0; i < sp.n_obscurants; ++i) {
+        const RcObscurant & ob = sp.obscurants[i];
+        if (ob.sigma <= 0.0f) continue;
+        if (!rcObscurantContains(ob, p)) continue;
+        sigma_out += ob.sigma;
+        if (ob.lidar_ratio > 0.0f) beta_out += ob.sigma / ob.lidar_ratio;
+    }
+}
+
+/// Geometric depth at which the accumulated one-way optical depth first
+/// reaches `tau_target`, i.e. the inverse of τ(s) over [t_lo, t_hi].
+///
+/// τ(s) is piecewise linear with slope Σσ_i over the volumes covering s, so
+/// the inverse is exact if the walk stops at every span endpoint. Each
+/// iteration advances to the next endpoint and there are at most 2·n of them,
+/// which bounds the loop without needing a sorted index array on device.
+GZ_OUSTER_HD inline float rcDepthAtOpticalDepth(const ScanParams & sp,
+    RcV3 o, RcV3 d, float t_lo, float t_hi, float tau_target)
+{
+    float sa[kMaxObscurants], sb[kMaxObscurants], ss[kMaxObscurants];
+    int n = 0;
+    for (int i = 0; i < sp.n_obscurants; ++i) {
+        const RcObscurant & ob = sp.obscurants[i];
+        if (ob.sigma <= 0.0f) continue;
+        float a, b;
+        if (!rcObscurantSpan(ob, o, d, t_lo, t_hi, a, b)) continue;
+        sa[n] = a;
+        sb[n] = b;
+        ss[n] = ob.sigma;
+        ++n;
+    }
+
+    float t = t_lo;
+    float acc = 0.0f;
+    for (int step = 0; step < 2 * kMaxObscurants; ++step) {
+        float density = 0.0f;
+        float t_next = t_hi;
+        for (int i = 0; i < n; ++i) {
+            if (t >= sa[i] && t < sb[i]) {
+                density += ss[i];
+                if (sb[i] < t_next) t_next = sb[i];
+            } else if (sa[i] > t && sa[i] < t_next) {
+                t_next = sa[i];
+            }
+        }
+        if (t_next <= t) break;
+        if (density > 0.0f) {
+            const float dtau = density * (t_next - t);
+            if (acc + dtau >= tau_target) {
+                return t + (tau_target - acc) / density;
+            }
+            acc += dtau;
+        }
+        t = t_next;
+    }
+    return t_hi;
+}
+
+/// Deterministic uniform draw in (0, 1) from two integers.
+///
+/// The scatter depth has to be sampled, but the raycast kernels are
+/// deliberately RNG-free so that every backend produces identical output
+/// (each backend's own curand/hiprand/oneMKL stream would not). Integer
+/// hashing gives a reproducible draw that is bit-identical everywhere:
+/// the mix is Murmur3's finaliser with Degski's constants.
+GZ_OUSTER_HD inline float rcHashUnit(uint32_t a, uint32_t b)
+{
+    uint32_t x = a * 0x9E3779B9u ^ (b + 0x85EBCA6Bu);
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    // ×2⁻³² lands in [0, 1); the clamp keeps both endpoints out of the
+    // caller's log(1 − ξ), where either one would produce ±inf.
+    const float u = static_cast<float>(x) * 2.3283064e-10f;
+    return rpmath::gzm::fmin_(rpmath::gzm::fmax_(u, 1.0e-7f), 0.9999999f);
+}
+
+/// Apply the participating medium to an already-resolved return.
+///
+/// On entry `range`/`rho` describe the hard-target candidate (`rho == 0` and
+/// a non-finite `range` when the beam missed everything); on exit they
+/// describe what the detector actually reports. Three effects, in order:
+///
+///  1. **Two-way extinction.** The pulse crosses the medium going out and
+///     coming back, so the target's apparent reflectance is scaled by
+///     exp(−2τ). Because the whole downstream pipeline is driven by that one
+///     number, this single multiply correctly dims SIGNAL, lowers the
+///     calibrated REFLECTIVITY byte, widens the range noise and — through
+///     the √ρ detection limit in rpmath::dropoutProbability — makes targets
+///     disappear entirely once the smoke is thick enough. No downstream
+///     stage needs to know that smoke exists.
+///
+///  2. **Backscatter from the medium itself.** A slab of medium at range r
+///     returns P(r) ∝ β_π·ΔR·exp(−2τ(r))/r², which is exactly the form the
+///     rest of the pipeline expects (`base_signal·ρ/r²`), so the medium gets
+///     an apparent reflectance ρ_med = β_π·ΔR·exp(−2τ(r)). Its depth is
+///     sampled from the two-way transmittance profile by inverse CDF in
+///     optical depth, giving the characteristic speckled near-face wall of
+///     returns in dense smoke and sparse penetrating returns in thin smoke.
+///     (The 1/r² weighting is kept in the amplitude but omitted from the
+///     sampling density — it varies slowly across the ≲1/σ penetration
+///     depth.) A single-return sensor reports whichever candidate is
+///     stronger, the same strongest-return rule the glass/mirror paths use.
+///
+///  3. **NEAR_IR airlight.** Illuminated smoke scatters ambient light into
+///     the receiver, so the ambient channel composites as
+///     L = L_target·exp(−τ) + ω·illum·(1 − exp(−τ)) — Koschmieder's airlight
+///     equation. Dense smoke therefore GLOWS in NEAR_IR while it darkens the
+///     laser channels, matching what a real Ouster shows in fog or smoke.
+///
+/// One approximation to note: the medium is integrated along the STRAIGHT
+/// ray out to the reported range. That is exact for the direct and
+/// behind-glass candidates, but a mirror-ghost return actually travels a
+/// bent path of the same total length, so its optical depth is taken over
+/// the straight segment instead of the two real legs.
+///
+/// References: Rasshofer et al., Adv. Radio Sci. 9, 2011 (lidar in adverse
+/// weather); Hahner et al., *Fog Simulation on Real LiDAR Point Clouds*,
+/// ICCV 2021 (arXiv:2108.05249) and Kilic et al., *LISA*, arXiv:2107.07004
+/// (the same extinction + medium-backscatter decomposition applied as point
+/// cloud augmentation); Koschmieder 1924 for the airlight composite.
+GZ_OUSTER_HD inline void rcApplyObscurants(
+    const ScanParams & sp, RcV3 o, RcV3 d, float n_off, float t_budget,
+    uint32_t idx, float & range, float & rho, float * nir_val)
+{
+    const bool hit = rpmath::gzm::isfinite_(range);
+    // Path the medium is integrated over: out to the hard target, or the
+    // whole range budget when the beam missed (smoke against open sky still
+    // returns). Integration starts at the sensor rather than at near_clip so
+    // a sensor sitting inside a cloud is attenuated correctly; returns that
+    // land inside the blind zone are discarded below instead.
+    const float t_end = hit ? (range - n_off) : t_budget;
+    if (t_end <= 0.0f) return;
+
+    float path_albedo = 0.0f;
+    const float tau = rcOpticalDepth(sp, o, d, 0.0f, t_end, &path_albedo);
+    if (tau <= kRcTauMin) return;
+
+    const float trans_1way = rpmath::gzm::exp_(-tau);
+    const float trans_2way = trans_1way * trans_1way;
+
+    // 1. Two-way extinction of the hard-target return.
+    rho *= trans_2way;
+
+    // 3. NEAR_IR airlight — computed from the FULL line-of-sight optical
+    //    depth regardless of which candidate wins below, because Ouster's
+    //    ambient channel is a passive measurement of the whole column, not
+    //    a gated sample at the reported range.
+    if (nir_val != nullptr) {
+        const float illum = sp.sun_ambient + sp.sun_diffuse;
+        *nir_val = *nir_val * trans_1way +
+                   path_albedo * illum * (1.0f - trans_1way);
+    }
+
+    // 2. Medium backscatter candidate. Inverse-CDF sample of the scatter
+    //    depth over the truncated two-way transmittance profile: ξ = 0 lands
+    //    at the near face, ξ → 1 at the far end of the medium.
+    const float xi = rcHashUnit(idx, sp.rng_salt);
+    const float tau_s = -0.5f * rpmath::gzm::log_(
+        1.0f - xi * (1.0f - trans_2way));
+    const float t_s = rcDepthAtOpticalDepth(sp, o, d, 0.0f, t_end, tau_s);
+    if (t_s < sp.near_clip) return;   // inside the detector's blind zone
+
+    float sigma_s = 0.0f, beta_s = 0.0f;
+    rcMediumProps(sp, RcV3{o.x + d.x * t_s, o.y + d.y * t_s, o.z + d.z * t_s},
+                  sigma_s, beta_s);
+    if (beta_s <= 0.0f) return;
+
+    // ρ_med = π·β_π·ΔR. The π converts between the two halves of the lidar
+    // equation: an extended Lambertian target returns P ∝ ρ·cos(α)/(π·R²)
+    // while a distributed medium returns P ∝ β_π·ΔR/R², and `rho` here plays
+    // the role of ρ·cos(α) (see rcApparentReflectance). Dropping it would
+    // under-report every medium return by 3.14×.
+    const float rho_m = rpmath::kPi * beta_s * sp.pulse_gate_m *
+                        rpmath::gzm::exp_(-2.0f * tau_s);
+    if (rho_m <= 0.0f) return;
+    const float range_m = t_s + n_off;
+
+    // Strongest-return arbitration by received power ρ/R² (same rule as the
+    // glass and mirror candidates). Written as a cross-multiplication so the
+    // miss case never has to divide by an infinite range.
+    if (!hit || rho_m * range * range > rho * range_m * range_m) {
+        range = range_m;
+        rho = rho_m;
+    }
+}
+
 /// Cast one output pixel (beam × measurement id) against the whole scene.
 /// Writes the reported Ouster range (metres; `inf_value` for a miss — the
 /// value satisfying the XYZ-LUT reconstruction, see castScan docs) and the
@@ -624,9 +1020,21 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                   inst0, tri0,
                                   tlas_nodes, tlas_order, n_tlas_nodes);
     if (inst0 < 0) {
-        range_out = inf_value;
-        retro_out = 0.0f;
-        if (nir_out) *nir_out = 0.0f;
+        // A beam that hits nothing can still return from a participating
+        // medium along its path — smoke against open sky is a return, not a
+        // miss — so the obscurant stage runs before giving up.
+        float miss_range = inf_value;
+        float miss_rho = 0.0f;
+        float miss_nir = 0.0f;
+        if (sp.n_obscurants > 0) {
+            rcApplyObscurants(sp, o, d, n_off, t_budget,
+                              static_cast<uint32_t>(idx),
+                              miss_range, miss_rho,
+                              nir_out ? &miss_nir : nullptr);
+        }
+        range_out = miss_range;
+        retro_out = miss_rho;
+        if (nir_out) *nir_out = miss_nir;
         return;
     }
 
@@ -735,13 +1143,11 @@ GZ_OUSTER_HD inline void rcCastOneRay(
         }
     }
 
-    range_out = range;
-    retro_out = rho;
-
     // NEAR_IR ambient factor at the winning hit: albedo × Lambert sun term
     // (view-independent — ambient radiance off a Lambertian surface does not
     // depend on the sensor's incidence angle, unlike the laser return; see
     // ScanParams sun fields and docs/MODEL_REFERENCES.md §6).
+    float nir_val = 0.0f;
     if (nir_out) {
         const InstanceXform & xw = xforms[w_inst];
         const RcV3 o_l = rcXformPoint(xw.r, xw.t, w_o);
@@ -764,8 +1170,20 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                     n_w.z * sp.sun_dir[2]);
             illum += sp.sun_diffuse * rpmath::gzm::fmax_(lambert, 0.0f);
         }
-        *nir_out = instances[w_inst].retro * illum;
+        nir_val = instances[w_inst].retro * illum;
     }
+
+    // Smoke / dust / fog along the path: extinction of this return, a
+    // competing backscatter return from the medium, and NEAR_IR airlight.
+    if (sp.n_obscurants > 0) {
+        rcApplyObscurants(sp, o, d, n_off, t_budget,
+                          static_cast<uint32_t>(idx), range, rho,
+                          nir_out ? &nir_val : nullptr);
+    }
+
+    range_out = range;
+    retro_out = rho;
+    if (nir_out) *nir_out = nir_val;
 }
 
 }  // namespace rc

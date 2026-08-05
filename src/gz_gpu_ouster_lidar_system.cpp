@@ -118,6 +118,35 @@ GzGpuOusterLidarSystem::~GzGpuOusterLidarSystem()
     }
 }
 
+// ── Participating media (smoke / dust / fog) ─────────────────────────────────
+
+void GzGpuOusterLidarSystem::parseObscurants(
+    const std::shared_ptr<const sdf::Element> & sdf)
+{
+    auto cfg = std::make_unique<ObscurantConfig>(parseObscurantConfig(sdf));
+    if (cfg->active()) {
+        // Obscuration is integrated per beam inside the raycast kernel; the
+        // panels pipeline only ever sees a rendered depth image and has no
+        // path for it. Say so rather than silently doing nothing.
+        if (ray_mode_ != "raycast") {
+            RCLCPP_WARN(kLogger,
+                "obscurant/particle obscuration is modelled in the raycast "
+                "ray mode only; ray_mode='%s' will ignore it",
+                ray_mode_.c_str());
+        } else {
+            RCLCPP_INFO(kLogger,
+                "obscuration: %zu authored volume(s), particle emitters %s "
+                "(sigma=%.3f/m per unit scatter ratio, growth=%.2f), "
+                "S=%.1f sr, albedo=%.2f, pulse gate=%.2f m",
+                cfg->volumes.size(),
+                cfg->mirror_particles ? "mirrored" : "ignored",
+                cfg->particle_extinction, cfg->particle_growth,
+                cfg->lidar_ratio, cfg->albedo, cfg->pulse_gate_m);
+        }
+    }
+    obscurants_ = std::move(cfg);
+}
+
 // ── ISystemConfigure ─────────────────────────────────────────────────────────
 
 void GzGpuOusterLidarSystem::Configure(
@@ -213,6 +242,9 @@ void GzGpuOusterLidarSystem::Configure(
         max_range_ = sdf->Get<double>("max_range");
         max_range_explicit_ = true;
     }
+
+    // ── Smoke / dust / fog obscuration (raycast mode) ───────────────────────
+    parseObscurants(sdf);
 
     // ── IMU parameters (optional — omit imu_name to disable) ─────────────────
     if (sdf->HasElement("imu_name")) {
@@ -514,6 +546,7 @@ void GzGpuOusterLidarSystem::Configure(
         mp.motion_distortion = motion_distortion_;
         mp.beam_alt_f = &meta_->beam_alt_f;
         mp.beam_az_f = &meta_->beam_az_f;
+        mp.obscurants = obscurants_.get();
         mirror_->start(mp, ray_processor_.get(), processed_exchange_.get());
         // Nothing render-side to initialise — unblock PostUpdate immediately.
         sensor_initialized_.store(true, std::memory_order_release);

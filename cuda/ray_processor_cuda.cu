@@ -94,7 +94,10 @@ void launchResampleKernel(
 }
 
 /// Per-thread arguments for the raycast kernel that don't vary per ray.
-/// Passed by value (~70 B) like ResampleParams.
+/// Passed by value like ResampleParams. ScanParams dominates the size (it
+/// carries the scan's obscurant volumes inline — see rc::kMaxObscurants),
+/// which a static_assert in raycast_math.hpp keeps inside the smallest
+/// backend's kernel-argument budget.
 struct RcCastArgs {
     float sr[9];
     float st[3];

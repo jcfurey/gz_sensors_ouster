@@ -697,6 +697,43 @@ targets produce weaker returns.
 | `motion_distortion` | false | bool | -- | Raycast mode only. Rolling-shutter sweep: each column casts from the sensor pose at its acquisition time (interpolated per sim tick), skewing the cloud by the platform's motion over one scan — as a real spinning lidar does (see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9). Ego motion only; default off preserves the instantaneous snapshot. |
 | `edge_discon_threshold` | 0.15 | >= 0 | m | Depth-discontinuity suppression threshold (1ns echo delay convention). 0 = off. |
 
+### Smoke, dust and fog obscuration (raycast mode)
+
+Beams are integrated through participating media: targets behind smoke dim by
+`exp(−2τ)` and eventually drop out, the smoke itself produces competing
+returns, and NEAR_IR *brightens* while the laser channels darken. See
+[docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §11 for the physics, and
+`examples/worlds/ouster_smoke.sdf` for a demo of all of it.
+
+Gazebo `<particle_emitter>` elements are mirrored **automatically** — the
+smoke a world already shows becomes smoke the LiDAR scans, with no plugin
+configuration. These knobs tune that, or add volumes of your own:
+
+| Parameter | Default | Range | Units | Description |
+|---|---|---|---|---|
+| `particle_obscuration` | true | bool | -- | Mirror the world's `<particle_emitter>` elements as obscurants. Set false to ignore them. |
+| `particle_extinction` | 1.0 | >= 0 | 1/m | Extinction coefficient produced by an emitter whose `<particle_scatter_ratio>` is 1.0. gz's default ratio of 0.65 then gives σ ≈ 0.65/m — visibility ≈ 6 m, thick smoke. Lower it for haze. |
+| `particle_growth` | 1.0 | >= 0 | -- | Fraction of the mean particle travel distance (`½(v_min+v_max)·lifetime`) by which an emitter's `<size>` volume is dilated to cover the plume. 0 uses `<size>` verbatim. The dilation is isotropic, so it always contains the plume; use `<obscurant>` when the shape matters. |
+| `obscurant_lidar_ratio` | 50.0 | > 0 | sr | Extinction-to-backscatter ratio `S = σ_ext/β_π`, which sets how strongly the medium returns. ≈18-20 fog/cloud, 40-50 dust, 50-70 smoke. |
+| `obscurant_albedo` | 0.8 | 0-1 | -- | Single-scattering albedo ω — how brightly lit media glow in NEAR_IR. |
+| `pulse_length` | 0.6 | >= 0 | m | One-pulse range gate `ΔR = c·τ_pulse/2`; scales the medium's return amplitude. |
+
+Authored volumes are `<obscurant>` blocks on the plugin (repeat for more,
+up to 16 — beyond that the nearest to the sensor are kept and the rest are
+logged as dropped):
+
+```xml
+<obscurant>
+  <type>ellipsoid</type>        <!-- box | ellipsoid | cylinder -->
+  <pose>10 0 1.5 0 0 0</pose>   <!-- world frame -->
+  <size>6 6 3</size>            <!-- FULL extents, metres -->
+  <extinction>0.6</extinction>  <!-- σ_ext [1/m] ... -->
+  <!-- <visibility>6.5</visibility>   ...or say it as metres of visibility -->
+  <lidar_ratio>50</lidar_ratio> <!-- optional, defaults as above -->
+  <albedo>0.8</albedo>
+</obscurant>
+```
+
 ### IMU (optional)
 
 Requires a Gazebo IMU sensor in the SDF/URDF and the `gz-sim-imu-system`

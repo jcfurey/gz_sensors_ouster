@@ -1,0 +1,627 @@
+<?xml version="1.0"?>
+<!--
+  ouster_smoke.sdf - smoke / dust obscuration demo for gz_sensors_ouster.
+
+    ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
+      world:=ouster_smoke.sdf
+
+  Every cloud in this world is an ordinary Gazebo <particle_emitter>. The
+  plugin mirrors them automatically (<particle_obscuration> defaults to true),
+  so the smoke you SEE in the GUI is the smoke the LiDAR SCANS - no plugin
+  configuration is needed to reproduce anything below. See
+  docs/MODEL_REFERENCES.md 11 for the physics and README.md for the knobs,
+  including the <obscurant> block for authored volumes with an explicit
+  extinction coefficient.
+
+  Toggle any cloud at runtime and watch the point cloud change:
+
+    gz topic -t /model/A_smoke_100/link/link/particle_emitter/emitter/cmd \
+      -m gz.msgs.ParticleEmitter -p 'emitting: {data: false}'
+
+  Raycast mode only - obscuration is integrated along each cast beam, and the
+  panels pipeline has no equivalent path. Like the other raycast worlds this
+  one loads NO rendering system, so it runs headless anywhere.
+
+  Layout: everything sits on azimuth arcs around the sensor at the origin.
+  Walls are at 14 m, clouds at 7 m. Each emitter's <size> is
+  1.2x1.2x3.0 m, dilated by particle_growth x
+  v_mean x lifetime = 0.3 m on every side, so a beam through the middle of a
+  cloud crosses 1.8 m of it starting at 6.1 m.
+
+  ZONE A (0-64 deg) - density ladder, identical 0.8-retro walls behind
+    clouds of rising <particle_scatter_ratio>. With the default
+    <particle_extinction> of 1.0 /m per unit ratio:
+
+      ratio 0.05 -> sigma 0.05/m, tau 0.09, wall rho 0.6682, smoke rho 0.0019  => reports the wall
+      ratio 0.15 -> sigma 0.15/m, tau 0.27, wall rho 0.4662, smoke rho 0.0057  => reports the wall
+      ratio 0.35 -> sigma 0.35/m, tau 0.63, wall rho 0.2269, smoke rho 0.0132  => reports the wall
+      ratio 0.65 -> sigma 0.65/m, tau 1.17, wall rho 0.0771, smoke rho 0.0245  => reports the smoke
+      ratio 1.0  -> sigma 1.00/m, tau 1.80, wall rho 0.0219, smoke rho 0.0377  => reports the smoke
+
+    So the first three rungs show the wall surviving and dimming, and the last
+    two show the smoke itself becoming the strongest return - the transition a
+    real lidar makes as smoke thickens.
+
+  ZONE B (88-142 deg) - emitter shape gallery: box, cylinder, ellipsoid and
+    point emitters at one density. Point emitters ignore <size> in Gazebo, so
+    the plugin models them as the ball the particles travel through.
+
+  ZONE C (166-206 deg) - smoke against open sky, no wall behind. These beams
+    would be misses in clear air; the returns they produce come from the
+    medium itself, which is how a phantom obstacle appears in real smoke.
+
+  ZONE D (230-262 deg) - NEAR_IR airlight. A 0.05-retro and a 0.95-retro wall
+    behind identical clouds, plus an unobscured 0.95 wall for reference. Smoke
+    BRIGHTENS the ambient channel toward albedo x illumination (0.8) while it
+    DARKENS the laser channels - the signature of fog/smoke on a real Ouster.
+    The dark wall disappears completely and the bright one survives: same
+    smoke, opposite outcome, because extinction acts on the target's own
+    reflectance.
+
+  ZONE E (290-330 deg) - clear-air control walls at three reflectances, for an
+    in-frame A/B against the obscured zones.
+
+  Zone spacing is deliberate: a cloud subtends about +/-8 deg from the sensor,
+  so the arcs are set far enough apart that each rung obscures ONLY its own
+  wall. Move one and the ladder stops measuring what its table says.
+-->
+<sdf version="1.9">
+  <world name="ouster_smoke">
+
+    <physics name="default" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-altimeter-system"
+            name="gz::sim::systems::Altimeter"/>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu"/>
+    <!-- Serves each emitter's .../cmd topic so the clouds can be toggled and
+         retuned at runtime; the plugin re-reads them every scan. -->
+    <plugin filename="gz-sim-particle-emitter-system"
+            name="gz::sim::systems::ParticleEmitter"/>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.8 0.9 1</background>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.5 0.3 -1</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>80 80</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>80 80</size></plane></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ZONE A: density ladder (see the header table). -->
+    <model name="A_wall_005">
+      <static>true</static>
+      <pose>14.000 0.000 1.50 0 0 0.0000</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="A_smoke_005">
+      <static>true</static>
+      <pose>7.000 0.000 1.20 0 0 0.0000</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.05</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="A_wall_015">
+      <static>true</static>
+      <pose>13.458 3.859 1.50 0 0 0.2793</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="A_smoke_015">
+      <static>true</static>
+      <pose>6.729 1.929 1.20 0 0 0.2793</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.15</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="A_wall_035">
+      <static>true</static>
+      <pose>11.873 7.419 1.50 0 0 0.5585</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="A_smoke_035">
+      <static>true</static>
+      <pose>5.936 3.709 1.20 0 0 0.5585</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.35</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="A_wall_065">
+      <static>true</static>
+      <pose>9.368 10.404 1.50 0 0 0.8378</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="A_smoke_065">
+      <static>true</static>
+      <pose>4.684 5.202 1.20 0 0 0.8378</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.65</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="A_wall_100">
+      <static>true</static>
+      <pose>6.137 12.583 1.50 0 0 1.1170</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="A_smoke_100">
+      <static>true</static>
+      <pose>3.069 6.292 1.20 0 0 1.1170</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>1.0</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <!-- ZONE B: one density, every emitter shape. -->
+    <model name="B_wall_box">
+      <static>true</static>
+      <pose>0.489 13.991 1.50 0 0 1.5359</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="B_smoke_box">
+      <static>true</static>
+      <pose>0.244 6.996 1.20 0 0 1.5359</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.35</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="B_wall_cylinder">
+      <static>true</static>
+      <pose>-3.859 13.458 1.50 0 0 1.8500</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="B_smoke_cylinder">
+      <static>true</static>
+      <pose>-1.929 6.729 1.20 0 0 1.8500</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="cylinder">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.35</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="B_wall_ellipsoid">
+      <static>true</static>
+      <pose>-7.829 11.607 1.50 0 0 2.1642</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="B_smoke_ellipsoid">
+      <static>true</static>
+      <pose>-3.914 5.803 1.20 0 0 2.1642</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="ellipsoid">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.35</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="B_wall_point">
+      <static>true</static>
+      <pose>-11.032 8.619 1.50 0 0 2.4784</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="B_smoke_point">
+      <static>true</static>
+      <pose>-5.516 4.310 1.20 0 0 2.4784</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="point">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.3</min_velocity>
+          <max_velocity>0.7</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.35</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <!-- ZONE C: no wall behind - every return here is the medium. -->
+    <model name="C_sky_020">
+      <static>true</static>
+      <pose>-6.792 1.693 1.20 0 0 2.8972</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.2</particle_scatter_ratio>
+          <material>
+            <diffuse>0.7 0.65 0.6</diffuse>
+            <specular>0.7 0.65 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="C_sky_050">
+      <static>true</static>
+      <pose>-6.962 -0.732 1.20 0 0 3.2463</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.5</particle_scatter_ratio>
+          <material>
+            <diffuse>0.7 0.65 0.6</diffuse>
+            <specular>0.7 0.65 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="C_sky_100">
+      <static>true</static>
+      <pose>-6.292 -3.069 1.20 0 0 3.5954</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>1.0</particle_scatter_ratio>
+          <material>
+            <diffuse>0.7 0.65 0.6</diffuse>
+            <specular>0.7 0.65 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <!-- ZONE D: NEAR_IR airlight - smoke brightens ambient, dims laser. -->
+    <model name="D_wall_dark">
+      <static>true</static>
+      <pose>-8.999 -10.725 1.50 0 0 4.0143</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.05</laser_retro>
+          <material>
+            <ambient>0.05 0.05 0.05 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="D_smoke_dark">
+      <static>true</static>
+      <pose>-4.500 -5.362 1.20 0 0 4.0143</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.5</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="D_wall_bright">
+      <static>true</static>
+      <pose>-5.694 -12.790 1.50 0 0 4.2935</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.95</laser_retro>
+          <material>
+            <ambient>0.95 0.95 0.95 1</ambient>
+            <diffuse>0.95 0.95 0.95 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="D_smoke_bright">
+      <static>true</static>
+      <pose>-2.847 -6.395 1.20 0 0 4.2935</pose>
+      <link name="link">
+        <particle_emitter name="emitter" type="box">
+          <emitting>true</emitting>
+          <size>1.2 1.2 3.0</size>
+          <particle_size>0.6 0.6 0.6</particle_size>
+          <lifetime>2.0</lifetime>
+          <min_velocity>0.1</min_velocity>
+          <max_velocity>0.2</max_velocity>
+          <rate>40</rate>
+          <scale_rate>0.4</scale_rate>
+          <particle_scatter_ratio>0.5</particle_scatter_ratio>
+          <material>
+            <diffuse>0.6 0.6 0.6</diffuse>
+            <specular>0.6 0.6 0.6</specular>
+          </material>
+        </particle_emitter>
+      </link>
+    </model>
+    <model name="D_wall_reference">
+      <static>true</static>
+      <pose>-1.948 -13.864 1.50 0 0 4.5728</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.95</laser_retro>
+          <material>
+            <ambient>0.95 0.95 0.95 1</ambient>
+            <diffuse>0.95 0.95 0.95 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <!-- ZONE E: clear-air control walls, no emitters. -->
+    <model name="E_clear_080">
+      <static>true</static>
+      <pose>4.788 -13.156 1.50 0 0 5.0615</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.8</laser_retro>
+          <material>
+            <ambient>0.80 0.80 0.80 1</ambient>
+            <diffuse>0.80 0.80 0.80 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="E_clear_040">
+      <static>true</static>
+      <pose>8.999 -10.725 1.50 0 0 5.4105</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.4</laser_retro>
+          <material>
+            <ambient>0.40 0.40 0.40 1</ambient>
+            <diffuse>0.40 0.40 0.40 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="E_clear_010">
+      <static>true</static>
+      <pose>12.124 -7.000 1.50 0 0 5.7596</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>0.2 1.80 4.00</size></box></geometry>
+          <laser_retro>0.1</laser_retro>
+          <material>
+            <ambient>0.10 0.10 0.10 1</ambient>
+            <diffuse>0.10 0.10 0.10 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>
