@@ -273,17 +273,43 @@ extinction coefficient σ_ext [1/m]. Three effects, all in
 `rc::rcApplyObscurants`:
 
 ```
-τ(R)  = ∫₀ᴿ σ_ext ds                        one-way optical depth
-ρ_app ← ρ_app · exp(−2τ)                    two-way extinction of the target
-ρ_med = π · β_π · ΔR · exp(−2τ_s)           backscatter from the medium itself
-NIR   = NIR_target·e^(−τ) + ω·I·(1 − e^(−τ))   airlight on the ambient channel
+τ(R)   = ∫₀ᴿ σ_ext ds                        one-way optical depth
+τ_e(R) = ∫₀ᴿ η · σ_ext ds                    what the ACTIVE round trip sees
+ρ_app ← ρ_app · exp(−2τ_e)                   two-way extinction of the target
+ρ_med  = π · β_π · ΔR · exp(−2τ_e,s)         backscatter from the medium itself
+NIR    = NIR_target·e^(−τ) + ω·I·(1 − e^(−τ))  airlight on the ambient channel
 ```
 
 with β_π = σ_ext/S from the **lidar ratio** S = σ_ext/β_π [sr], ΔR = c·τ_pulse/2
-the one-pulse range gate, and ω the single-scattering albedo. The
-single-return detector reports whichever of the medium and the hard target
-carries more received power ρ/R² — the same strongest-return rule §8 uses
-for glass and mirrors.
+the one-pulse range gate, ω the single-scattering albedo, and η Platt's
+multiple-scattering factor (below). The single-return detector reports
+whichever of the medium and the hard target carries more received power
+ρ/R² — the same strongest-return rule §8 uses for glass and mirrors.
+
+**Forward vs back scattering.** Both are modeled, but they enter in different
+places, and it is worth being explicit about which:
+
+- *Backscatter* is the return, to single-scattering order, through the lidar
+  ratio. S is the measured extinction-to-backscatter ratio, so it already
+  folds in both the albedo and the phase function at 180°:
+  β_π = σ_ext·ω·P(π)/4π, i.e. S = 4π/(ω·P(π)).
+- *Forward scattering* enters as loss, since σ_ext = σ_abs + σ_sca removes
+  light in every direction. Taken literally that is too pessimistic:
+  smoke, dust and fog are strongly forward-peaked (asymmetry g ≈ 0.7–0.9), so
+  much of what σ_ext removes is deflected by only milliradians and a real
+  receiver still collects it. **Platt's multiple-scattering factor η** is the
+  standard first-order correction — keep the single-scattering form and
+  attenuate by exp(−2·η·τ) instead. η ≈ 1 for optically thin media or a
+  narrow field of view (the default, reproducing the pure single-scattering
+  limit exactly), η ≈ 0.5–0.8 for dense fog and smoke at typical lidar fields
+  of view. Real η varies along the path as multiple scattering builds up; one
+  path-averaged value is Platt's own working approximation and is as far as
+  this model can go without a beam-cone model.
+
+  η applies to the active laser round trip only. The NEAR_IR composite below
+  is a passive wide-field transfer whose airlight term already *is* the
+  multiply-scattered light, so applying η there too would correct for the
+  same physics twice.
 
 Three properties fall out rather than being coded:
 
@@ -320,11 +346,27 @@ explicit σ_ext (or `<visibility>`, via Koschmieder's σ = 3.912/V).
 
 Parameter values: S ≈ 18–20 sr for fog and water cloud, 40–50 sr for dust,
 50–70 sr for biomass-burning smoke; ω ≈ 0.8–0.9 in the near IR for weakly
-absorbing smoke and dust.
+absorbing smoke and dust; η ≈ 1 thin, 0.5–0.8 dense.
+
+Two coupling caveats worth knowing when tuning:
+
+- **ω and S are not independent.** S = 4π/(ω·P(π)) ties them to the phase
+  function, but nothing enforces it — the laser path reads S alone and only
+  the ambient channel reads ω, so an inconsistent pair describes no real
+  aerosol even though it simulates fine.
+- **Scatter-depth sampling is extinction-weighted**, while the true return
+  profile is backscatter-weighted. These are the same thing for one medium;
+  where volumes with *different* lidar ratios overlap on one ray, which
+  volume a return is drawn from is mildly biased. The amplitude reported for
+  wherever it lands is exact either way.
 
 - Rasshofer et al. — *Influences of weather phenomena on automotive laser
   radar systems*, Adv. Radio Sci. 9, 2011. The extinction + backscatter
   decomposition this implements.
+- Platt — *Lidar and radiometric observations of cirrus clouds*, J. Atmos.
+  Sci. 30, 1973, and *Remote sounding of high clouds III*, J. Appl.
+  Meteorol. 20, 1981. Source of the multiple-scattering factor η and of the
+  practice of treating it as a single path-averaged number.
 - Hahner et al. — *Fog Simulation on Real LiDAR Point Clouds for 3D Object
   Detection*, ICCV 2021, arXiv:2108.05249; Kilic et al. — *LISA: Lidar Light
   Scattering Augmentation*, arXiv:2107.07004. The same physics applied as
@@ -354,7 +396,7 @@ Ordered roughly by expected impact on downstream perception realism.
 | Beam divergence / footprint | Finite-footprint returns: edge mixing, multi-return, footprint-averaged ranges on oblique/rough surfaces; energy is ~2-D Gaussian over the footprint. HELIOS++ subsamples the beam cone. | Winiwarter et al. 2022 |
 | Retroreflector blooming / crosstalk | Very strong returns (signs, plates) saturate detectors and scatter into neighbouring channels — halo points, range bias. This plugin encodes ρ > 1 in the reflectivity byte but produces no artifacts. | *LiDAR Blooming Artifacts Estimation … with Synthetic Data Modeling*, IEEE (10.1109/10774004), 2024 |
 | Discrete precipitation (rain / snow) | §11 models a *continuous* medium, which fits smoke, dust and fog. Rain and snow are sparse discrete scatterers: individual drops or flakes crossing single beams give isolated near returns and per-beam flicker rather than a smooth transmittance profile, and the drop-size distribution ties σ_ext to rain rate. | Hahner et al., *LiDAR Snowfall Simulation*, CVPR 2022; Kilic et al., *LISA*, arXiv:2107.07004 |
-| Multiple scattering in dense media | §11 is single-scattering: at high optical depth real returns pick up multiply-scattered photons, which stretch the pulse and bias ranges long. | Rasshofer et al., Adv. Radio Sci. 9, 2011 |
+| Multiple scattering — beyond the transmittance | §11's η corrects the *magnitude* of the loss, but multiply-scattered photons also arrive late and off-axis: real dense-medium returns are pulse-stretched and range-biased long, and the beam broadens with depth. Both need a beam-cone model, which is its own gap above. | Platt 1973/1981; Bissonnette, Appl. Opt. 35, 1996 |
 | Density structure inside a plume | Obscurant volumes are homogeneous with a hard boundary; real plumes have soft, turbulent, time-varying density, so simulated cloud edges are crisper than real ones. | §11 references |
 | Multi-return / full waveform | Second returns through vegetation, edge splits. | Winiwarter et al. 2022 |
 | Incidence angle in panels mode | Depth-image normals (from gradients) could approximate cos(α); currently panels mode applies no incidence factor. | §1 references |

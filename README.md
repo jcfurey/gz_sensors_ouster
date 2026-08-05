@@ -700,7 +700,7 @@ targets produce weaker returns.
 ### Smoke, dust and fog obscuration (raycast mode)
 
 Beams are integrated through participating media: targets behind smoke dim by
-`exp(−2τ)` and eventually drop out, the smoke itself produces competing
+`exp(−2·η·τ)` and eventually drop out, the smoke itself produces competing
 returns, and NEAR_IR *brightens* while the laser channels darken. See
 [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §11 for the physics, and
 `examples/worlds/ouster_smoke.sdf` for a demo of all of it.
@@ -715,7 +715,8 @@ configuration. These knobs tune that, or add volumes of your own:
 | `particle_extinction` | 1.0 | >= 0 | 1/m | Extinction coefficient produced by an emitter whose `<particle_scatter_ratio>` is 1.0. gz's default ratio of 0.65 then gives σ ≈ 0.65/m — visibility ≈ 6 m, thick smoke. Lower it for haze. |
 | `particle_growth` | 1.0 | >= 0 | -- | Fraction of the mean particle travel distance (`½(v_min+v_max)·lifetime`) by which an emitter's `<size>` volume is dilated to cover the plume. 0 uses `<size>` verbatim. The dilation is isotropic, so it always contains the plume; use `<obscurant>` when the shape matters. |
 | `obscurant_lidar_ratio` | 50.0 | > 0 | sr | Extinction-to-backscatter ratio `S = σ_ext/β_π`, which sets how strongly the medium returns. ≈18-20 fog/cloud, 40-50 dust, 50-70 smoke. |
-| `obscurant_albedo` | 0.8 | 0-1 | -- | Single-scattering albedo ω — how brightly lit media glow in NEAR_IR. |
+| `obscurant_albedo` | 0.8 | 0-1 | -- | Single-scattering albedo ω — how brightly lit media glow in NEAR_IR. Not independent of `obscurant_lidar_ratio`: `S = 4π/(ω·P(π))`. |
+| `obscurant_multiple_scattering` | 1.0 | 0-1 | -- | Platt's η. Forward-peaked media deflect much of the "extinguished" light by only milliradians, so a real receiver still collects it; η credits that back, attenuating by `exp(−2·η·τ)`. 1.0 is the pure single-scattering limit (nothing changes unless you ask); 0.5-0.8 is realistic for dense fog and smoke. Applies to the laser round trip only — the NEAR_IR airlight term already accounts for it. |
 | `pulse_length` | 0.6 | >= 0 | m | One-pulse range gate `ΔR = c·τ_pulse/2`; scales the medium's return amplitude. |
 
 Authored volumes are `<obscurant>` blocks on the plugin (repeat for more,
@@ -731,6 +732,7 @@ logged as dropped):
   <!-- <visibility>6.5</visibility>   ...or say it as metres of visibility -->
   <lidar_ratio>50</lidar_ratio> <!-- optional, defaults as above -->
   <albedo>0.8</albedo>
+  <multiple_scattering>0.6</multiple_scattering>
 </obscurant>
 ```
 

@@ -147,9 +147,20 @@
 
   <!-- Extinction-to-backscatter ratio S = sigma_ext/beta_pi [sr]: how
        strongly the medium returns. ~18-20 fog/cloud, 40-50 dust,
-       50-70 smoke. Single-scattering albedo drives the NEAR_IR glow. -->
+       50-70 smoke. Single-scattering albedo drives the NEAR_IR glow.
+       The two are not independent — S = 4*pi/(omega*P(pi)) — but nothing
+       enforces it, so pick a pair that describes a real aerosol. -->
   <!-- <obscurant_lidar_ratio>50.0</obscurant_lidar_ratio> -->
   <!-- <obscurant_albedo>0.8</obscurant_albedo> -->
+
+  <!-- Platt's multiple-scattering factor eta. Extinction removes light in
+       every direction, but forward-peaked media (smoke, dust, fog) deflect
+       most of it by only milliradians, so a real receiver still collects it.
+       eta credits that back: the round trip attenuates by exp(-2*eta*tau).
+       1.0 (default) is the pure single-scattering limit and changes nothing;
+       0.5-0.8 is realistic for dense fog and smoke. Laser channels only —
+       the NEAR_IR airlight term already accounts for the same physics. -->
+  <!-- <obscurant_multiple_scattering>0.6</obscurant_multiple_scattering> -->
 
   <!-- One-pulse range gate dR = c*t_pulse/2 (metres); scales the medium's
        return amplitude. -->
@@ -168,6 +179,7 @@
     <extinction>0.6</extinction>
     <lidar_ratio>50</lidar_ratio>
     <albedo>0.8</albedo>
+    <multiple_scattering>0.6</multiple_scattering>
   </obscurant>
   -->
 

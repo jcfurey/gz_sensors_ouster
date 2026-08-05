@@ -42,7 +42,20 @@ namespace gz_gpu_ouster_lidar {
 constexpr double kObscurantLidarRatio = 50.0;
 /// Single-scattering albedo ω, for the NEAR_IR airlight term. Smoke and dust
 /// are weakly absorbing in the near IR (ω ≈ 0.8–0.9); pure soot is far lower.
+///
+/// ω and the lidar ratio S describe the same scattering from two sides and
+/// are NOT independent: β_π = σ_ext·ω·P(π)/4π, so a chosen pair implies a
+/// phase function value P(π) = 4π/(S·ω). Nothing enforces that — the laser
+/// path takes its backscatter from S alone and only the ambient channel
+/// reads ω — but a pair whose implied P(π) is absurd describes no real
+/// aerosol.
 constexpr double kObscurantAlbedo = 0.8;
+/// Platt's multiple-scattering factor η. 1.0 is the pure single-scattering
+/// limit: every forward-scattered photon counted as lost, which makes dense
+/// forward-peaked media too opaque. It is the default because it changes
+/// nothing for anyone who does not ask for the correction; 0.5–0.8 is the
+/// realistic range for dense fog and smoke at typical lidar fields of view.
+constexpr double kObscurantMultipleScattering = 1.0;
 /// Effective one-pulse range gate ΔR = c·τ_pulse/2 [m]; ≈0.6 m for the ~4 ns
 /// pulse of a mid-range ToF lidar.
 constexpr double kObscurantPulseGate = 0.6;
@@ -70,6 +83,7 @@ struct ObscurantVolume {
     double extinction = 0.0;                  ///< σ_ext [1/m]
     double lidar_ratio = kObscurantLidarRatio;
     double albedo = kObscurantAlbedo;
+    double multiple_scattering = kObscurantMultipleScattering;  ///< η
 };
 
 /// Everything the mirror needs to turn a world into a list of obscurants.
@@ -79,6 +93,7 @@ struct ObscurantConfig {
     double particle_growth = kParticleGrowth;
     double lidar_ratio = kObscurantLidarRatio;  ///< default S for emitters
     double albedo = kObscurantAlbedo;           ///< default ω for emitters
+    double multiple_scattering = kObscurantMultipleScattering;  ///< default η
     double pulse_gate_m = kObscurantPulseGate;
     std::vector<ObscurantVolume> volumes;
 
@@ -109,7 +124,7 @@ void makeObscurant(rc::ObscurantType type,
                    const ::gz::math::Pose3d & world_pose,
                    const ::gz::math::Vector3d & half,
                    double sigma, double lidar_ratio, double albedo,
-                   rc::RcObscurant & out);
+                   double multiple_scattering, rc::RcObscurant & out);
 
 /// Convert one authored volume. False when it is optically empty.
 bool obscurantFromVolume(const ObscurantVolume & vol, rc::RcObscurant & out);

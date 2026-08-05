@@ -72,7 +72,7 @@ rc::RcObscurant at(double x, double radius)
     rc::RcObscurant ob;
     makeObscurant(rc::ObscurantType::kEllipsoid,
                   ::gz::math::Pose3d(x, 0, 0, 0, 0, 0),
-                  {radius, radius, radius}, 0.5, 50.0, 0.8, ob);
+                  {radius, radius, radius}, 0.5, 50.0, 0.8, 1.0, ob);
     return ob;
 }
 
@@ -98,7 +98,7 @@ TEST(ObscurantConfig, StoresTheWorldToLocalTransform)
     // 90° about z, translated: local +x maps to world +y.
     makeObscurant(rc::ObscurantType::kBox,
                   ::gz::math::Pose3d(3, 4, 5, 0, 0, GZ_PI / 2),
-                  {1, 2, 3}, 0.25, 40.0, 0.7, ob);
+                  {1, 2, 3}, 0.25, 40.0, 0.7, 0.65, ob);
 
     const auto centre = toLocal(ob, {3, 4, 5});
     EXPECT_NEAR(centre.X(), 0.0, 1e-5);
@@ -115,6 +115,7 @@ TEST(ObscurantConfig, StoresTheWorldToLocalTransform)
     EXPECT_FLOAT_EQ(ob.sigma, 0.25f);
     EXPECT_FLOAT_EQ(ob.lidar_ratio, 40.0f);
     EXPECT_FLOAT_EQ(ob.albedo, 0.7f);
+    EXPECT_FLOAT_EQ(ob.ms_factor, 0.65f);
     EXPECT_EQ(ob.type, rc::ObscurantType::kBox);
 }
 
@@ -123,16 +124,23 @@ TEST(ObscurantConfig, RejectsDegenerateOpticalParameters)
     rc::RcObscurant ob;
     // A zero or negative lidar ratio would divide by zero in the kernel and
     // emit a return of infinite power.
-    makeObscurant(rc::ObscurantType::kBox, {}, {1, 1, 1}, 0.5, 0.0, 2.0, ob);
+    makeObscurant(rc::ObscurantType::kBox, {}, {1, 1, 1}, 0.5, 0.0, 2.0, 5.0,
+                  ob);
     EXPECT_FLOAT_EQ(ob.lidar_ratio,
                     static_cast<float>(kObscurantLidarRatio));
     EXPECT_FLOAT_EQ(ob.albedo, 1.0f) << "albedo must clamp into [0, 1]";
+    EXPECT_FLOAT_EQ(ob.ms_factor, 1.0f)
+        << "eta above 1 would mean losing more than all the light";
 
     makeObscurant(rc::ObscurantType::kBox, {}, {-1, 1, 1}, -3.0, 50.0, -1.0,
-                  ob);
+                  -0.5, ob);
     EXPECT_FLOAT_EQ(ob.half[0], 0.0f);
     EXPECT_FLOAT_EQ(ob.sigma, 0.0f);
     EXPECT_FLOAT_EQ(ob.albedo, 0.0f);
+    // eta floors above zero: a medium that returns backscatter while being
+    // perfectly transparent to the same beam is not a physical state.
+    EXPECT_GT(ob.ms_factor, 0.0f);
+    EXPECT_LT(ob.ms_factor, 0.01f);
 }
 
 // ── Authored volumes ─────────────────────────────────────────────────────────
@@ -281,10 +289,12 @@ TEST(ObscurantConfig, EmitterInheritsTheConfiguredOpticalDefaults)
     ObscurantConfig cfg;
     cfg.lidar_ratio = 18.0;   // fog
     cfg.albedo = 0.95;
+    cfg.multiple_scattering = 0.6;
     rc::RcObscurant ob;
     ASSERT_TRUE(obscurantFromEmitter(boxEmitter(), {}, cfg, ob));
     EXPECT_FLOAT_EQ(ob.lidar_ratio, 18.0f);
     EXPECT_FLOAT_EQ(ob.albedo, 0.95f);
+    EXPECT_FLOAT_EQ(ob.ms_factor, 0.6f);
 }
 
 TEST(ObscurantConfig, EmitterIsPlacedAtItsWorldPose)
@@ -310,6 +320,8 @@ TEST(ObscurantSdf, EmptyPluginKeepsTheDocumentedDefaults)
     EXPECT_DOUBLE_EQ(cfg.particle_growth, kParticleGrowth);
     EXPECT_DOUBLE_EQ(cfg.lidar_ratio, kObscurantLidarRatio);
     EXPECT_DOUBLE_EQ(cfg.albedo, kObscurantAlbedo);
+    EXPECT_DOUBLE_EQ(cfg.multiple_scattering, 1.0)
+        << "the default must be the pure single-scattering limit";
     EXPECT_DOUBLE_EQ(cfg.pulse_gate_m, kObscurantPulseGate);
     EXPECT_TRUE(cfg.volumes.empty());
 }
@@ -329,12 +341,14 @@ TEST(ObscurantSdf, ScalarKnobsAreRead)
         "<particle_growth>0.25</particle_growth>"
         "<obscurant_lidar_ratio>18</obscurant_lidar_ratio>"
         "<obscurant_albedo>0.95</obscurant_albedo>"
+        "<obscurant_multiple_scattering>0.6</obscurant_multiple_scattering>"
         "<pulse_length>0.9</pulse_length>"));
     EXPECT_FALSE(cfg.mirror_particles);
     EXPECT_DOUBLE_EQ(cfg.particle_extinction, 0.4);
     EXPECT_DOUBLE_EQ(cfg.particle_growth, 0.25);
     EXPECT_DOUBLE_EQ(cfg.lidar_ratio, 18.0);
     EXPECT_DOUBLE_EQ(cfg.albedo, 0.95);
+    EXPECT_DOUBLE_EQ(cfg.multiple_scattering, 0.6);
     EXPECT_DOUBLE_EQ(cfg.pulse_gate_m, 0.9);
 }
 
@@ -359,6 +373,7 @@ TEST(ObscurantSdf, ReadsEveryObscurantBlock)
         "  <extinction>0.6</extinction>"
         "  <lidar_ratio>30</lidar_ratio>"
         "  <albedo>0.5</albedo>"
+        "  <multiple_scattering>0.7</multiple_scattering>"
         "</obscurant>"
         "<obscurant>"
         "  <type>cylinder</type>"
@@ -373,6 +388,7 @@ TEST(ObscurantSdf, ReadsEveryObscurantBlock)
     EXPECT_DOUBLE_EQ(cfg.volumes[0].extinction, 0.6);
     EXPECT_DOUBLE_EQ(cfg.volumes[0].lidar_ratio, 30.0);
     EXPECT_DOUBLE_EQ(cfg.volumes[0].albedo, 0.5);
+    EXPECT_DOUBLE_EQ(cfg.volumes[0].multiple_scattering, 0.7);
 
     EXPECT_EQ(cfg.volumes[1].type, rc::ObscurantType::kCylinder);
     EXPECT_NEAR(cfg.volumes[1].extinction, kKoschmieder / 10.0, 1e-12);
@@ -383,10 +399,12 @@ TEST(ObscurantSdf, VolumeInheritsTheGlobalOpticalDefaults)
     const auto cfg = parseObscurantConfig(pluginElement(
         "<obscurant_lidar_ratio>18</obscurant_lidar_ratio>"
         "<obscurant_albedo>0.95</obscurant_albedo>"
+        "<obscurant_multiple_scattering>0.55</obscurant_multiple_scattering>"
         "<obscurant><extinction>0.2</extinction></obscurant>"));
     ASSERT_EQ(cfg.volumes.size(), 1u);
     EXPECT_DOUBLE_EQ(cfg.volumes[0].lidar_ratio, 18.0);
     EXPECT_DOUBLE_EQ(cfg.volumes[0].albedo, 0.95);
+    EXPECT_DOUBLE_EQ(cfg.volumes[0].multiple_scattering, 0.55);
 }
 
 TEST(ObscurantSdf, ExplicitExtinctionBeatsVisibility)

@@ -84,6 +84,26 @@ struct RcObscurant {
     float sigma = 0.0f;     ///< extinction coefficient σ_ext [1/m]
     float lidar_ratio = 50.0f;  ///< S = σ_ext/β_π [sr]
     float albedo = 0.8f;    ///< single-scattering albedo ω (NEAR_IR airlight)
+    /// Platt's multiple-scattering factor η ∈ (0, 1]: the fraction of the
+    /// extinction that the RECEIVER actually experiences.
+    ///
+    /// σ_ext removes light in every direction, but smoke, dust and fog are
+    /// strongly forward-peaked (asymmetry g ≈ 0.7–0.9), so much of that light
+    /// is deflected by only a few milliradians and stays inside a real
+    /// receiver's field of view. Treating it as lost — η = 1, pure single
+    /// scattering — makes dense media too opaque. Platt's approximation keeps
+    /// the single-scattering form and folds the recovery into one path
+    /// factor, so the measured backscatter is β_π·exp(−2·η·τ).
+    ///
+    /// η ≈ 1 for optically thin media or a narrow field of view (the
+    /// default, which reproduces the pure single-scattering limit exactly);
+    /// η ≈ 0.5–0.8 for dense fog and smoke at typical lidar fields of view.
+    /// Real η varies along the path as multiple scattering builds up; a
+    /// single path-averaged value is Platt's own working approximation and
+    /// is all this model can support without a beam-cone model.
+    ///
+    /// Platt, J. Atmos. Sci. 30, 1973; J. Appl. Meteorol. 20, 1981.
+    float ms_factor = 1.0f;
     ObscurantType type = ObscurantType::kEllipsoid;
 };
 
@@ -111,6 +131,10 @@ constexpr float kRcObscurantMinHalf = 1.0e-3f;
 /// from 1 by < 0.02% here, so neither the attenuation nor a backscatter
 /// return is observable.
 constexpr float kRcTauMin = 1.0e-4f;
+/// Floor for Platt's multiple-scattering factor. η = 0 would make a medium
+/// perfectly transparent to the laser while still returning backscatter,
+/// which is not a physical state.
+constexpr double kRcMinMultipleScattering = 1.0e-3;
 
 struct ScanParams {
     int H = 0;                 ///< beam count (output rows)
@@ -734,12 +758,20 @@ GZ_OUSTER_HD inline bool rcObscurantContains(const RcObscurant & ob, RcV3 p_w)
 /// One-way optical depth τ = ∫σ_ext ds accumulated over every obscurant on
 /// [t_lo, t_hi]. Overlapping volumes are handled EXACTLY without any interval
 /// merging, because the integral of a sum is the sum of the integrals:
-/// ∫Σσ_i ds = Σ∫σ_i ds. `albedo_out` (optional) receives the τ-weighted mean
-/// single-scattering albedo over the same path.
+/// ∫Σσ_i ds = Σ∫σ_i ds.
+///
+/// The return value is the PHYSICAL optical depth, which is what the passive
+/// NEAR_IR airlight transfer uses. `tau_eff_out` (optional) receives the
+/// ATTENUATING optical depth ∫η·σ_ext ds that the active lidar round trip
+/// sees instead (see RcObscurant::ms_factor); the two are equal when every
+/// volume on the path leaves η at 1. `albedo_out` (optional) receives the
+/// τ-weighted mean single-scattering albedo over the same path.
 GZ_OUSTER_HD inline float rcOpticalDepth(const ScanParams & sp,
-    RcV3 o, RcV3 d, float t_lo, float t_hi, float * albedo_out = nullptr)
+    RcV3 o, RcV3 d, float t_lo, float t_hi, float * albedo_out = nullptr,
+    float * tau_eff_out = nullptr)
 {
     float tau = 0.0f;
+    float tau_eff = 0.0f;
     float w_albedo = 0.0f;
     for (int i = 0; i < sp.n_obscurants; ++i) {
         const RcObscurant & ob = sp.obscurants[i];
@@ -748,11 +780,13 @@ GZ_OUSTER_HD inline float rcOpticalDepth(const ScanParams & sp,
         if (!rcObscurantSpan(ob, o, d, t_lo, t_hi, a, b)) continue;
         const float dtau = ob.sigma * (b - a);
         tau += dtau;
+        tau_eff += dtau * ob.ms_factor;
         w_albedo += dtau * ob.albedo;
     }
     if (albedo_out != nullptr) {
         *albedo_out = (tau > 0.0f) ? (w_albedo / tau) : 0.0f;
     }
+    if (tau_eff_out != nullptr) *tau_eff_out = tau_eff;
     return tau;
 }
 
@@ -772,11 +806,14 @@ GZ_OUSTER_HD inline void rcMediumProps(const ScanParams & sp, RcV3 p,
     }
 }
 
-/// Geometric depth at which the accumulated one-way optical depth first
-/// reaches `tau_target`, i.e. the inverse of τ(s) over [t_lo, t_hi].
+/// Geometric depth at which the accumulated ATTENUATING optical depth
+/// ∫η·σ_ext ds first reaches `tau_target`, i.e. the inverse of τ_eff(s) over
+/// [t_lo, t_hi]. That is the quantity the transmittance profile is built
+/// from, so the scatter-depth sampler inverts against it; with η = 1
+/// everywhere it is the inverse of the plain optical depth.
 ///
-/// τ(s) is piecewise linear with slope Σσ_i over the volumes covering s, so
-/// the inverse is exact if the walk stops at every span endpoint. Each
+/// τ_eff(s) is piecewise linear with slope Ση_i·σ_i over the volumes covering
+/// s, so the inverse is exact if the walk stops at every span endpoint. Each
 /// iteration advances to the next endpoint and there are at most 2·n of them,
 /// which bounds the loop without needing a sorted index array on device.
 GZ_OUSTER_HD inline float rcDepthAtOpticalDepth(const ScanParams & sp,
@@ -791,7 +828,7 @@ GZ_OUSTER_HD inline float rcDepthAtOpticalDepth(const ScanParams & sp,
         if (!rcObscurantSpan(ob, o, d, t_lo, t_hi, a, b)) continue;
         sa[n] = a;
         sb[n] = b;
-        ss[n] = ob.sigma;
+        ss[n] = ob.sigma * ob.ms_factor;
         ++n;
     }
 
@@ -850,8 +887,11 @@ GZ_OUSTER_HD inline float rcHashUnit(uint32_t a, uint32_t b)
 ///
 ///  1. **Two-way extinction.** The pulse crosses the medium going out and
 ///     coming back, so the target's apparent reflectance is scaled by
-///     exp(−2τ). Because the whole downstream pipeline is driven by that one
-///     number, this single multiply correctly dims SIGNAL, lowers the
+///     exp(−2·η·τ) — Platt's form, where η ≤ 1 credits back the
+///     forward-scattered light a real receiver still collects (see
+///     RcObscurant::ms_factor). Because the whole downstream pipeline is
+///     driven by that one number, this single multiply correctly dims
+///     SIGNAL, lowers the
 ///     calibrated REFLECTIVITY byte, widens the range noise and — through
 ///     the √ρ detection limit in rpmath::dropoutProbability — makes targets
 ///     disappear entirely once the smoke is thick enough. No downstream
@@ -866,7 +906,11 @@ GZ_OUSTER_HD inline float rcHashUnit(uint32_t a, uint32_t b)
 ///     returns in dense smoke and sparse penetrating returns in thin smoke.
 ///     (The 1/r² weighting is kept in the amplitude but omitted from the
 ///     sampling density — it varies slowly across the ≲1/σ penetration
-///     depth.) A single-return sensor reports whichever candidate is
+///     depth. With media of DIFFERENT lidar ratios overlapping on one ray
+///     the sampling is extinction-weighted where the true return profile is
+///     backscatter-weighted, so which volume a return is drawn from is
+///     mildly biased; the amplitude reported for wherever it lands is
+///     still exact.) A single-return sensor reports whichever candidate is
 ///     stronger, the same strongest-return rule the glass/mirror paths use.
 ///
 ///  3. **NEAR_IR airlight.** Illuminated smoke scatters ambient light into
@@ -900,10 +944,24 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
     if (t_end <= 0.0f) return;
 
     float path_albedo = 0.0f;
-    const float tau = rcOpticalDepth(sp, o, d, 0.0f, t_end, &path_albedo);
+    float tau_eff = 0.0f;
+    const float tau =
+        rcOpticalDepth(sp, o, d, 0.0f, t_end, &path_albedo, &tau_eff);
     if (tau <= kRcTauMin) return;
 
-    const float trans_1way = rpmath::gzm::exp_(-tau);
+    // Two transmittances, because the two channels see different physics.
+    //
+    // The ACTIVE laser round trip uses the attenuating depth η·τ: forward
+    // scattering deflects light by only a few milliradians in a
+    // forward-peaked medium, so a real receiver recovers much of what σ_ext
+    // formally removes (RcObscurant::ms_factor).
+    //
+    // The PASSIVE ambient channel uses the physical depth τ, because its
+    // Koschmieder composite below already accounts for the light scattered
+    // back into a wide field of view — that IS the airlight term. Applying η
+    // there too would correct for the same effect twice.
+    const float trans_ambient = rpmath::gzm::exp_(-tau);
+    const float trans_1way = rpmath::gzm::exp_(-tau_eff);
     const float trans_2way = trans_1way * trans_1way;
 
     // 1. Two-way extinction of the hard-target return.
@@ -915,13 +973,16 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
     //    a gated sample at the reported range.
     if (nir_val != nullptr) {
         const float illum = sp.sun_ambient + sp.sun_diffuse;
-        *nir_val = *nir_val * trans_1way +
-                   path_albedo * illum * (1.0f - trans_1way);
+        *nir_val = *nir_val * trans_ambient +
+                   path_albedo * illum * (1.0f - trans_ambient);
     }
 
     // 2. Medium backscatter candidate. Inverse-CDF sample of the scatter
     //    depth over the truncated two-way transmittance profile: ξ = 0 lands
-    //    at the near face, ξ → 1 at the far end of the medium.
+    //    at the near face, ξ → 1 at the far end of the medium. Sampling and
+    //    inversion both live in η·τ space, so a medium with η < 1 is
+    //    penetrated deeper — which is exactly what recovering the
+    //    forward-scattered light means.
     const float xi = rcHashUnit(idx, sp.rng_salt);
     const float tau_s = -0.5f * rpmath::gzm::log_(
         1.0f - xi * (1.0f - trans_2way));

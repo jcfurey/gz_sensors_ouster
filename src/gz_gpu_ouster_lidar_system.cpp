@@ -137,11 +137,12 @@ void GzGpuOusterLidarSystem::parseObscurants(
             RCLCPP_INFO(kLogger,
                 "obscuration: %zu authored volume(s), particle emitters %s "
                 "(sigma=%.3f/m per unit scatter ratio, growth=%.2f), "
-                "S=%.1f sr, albedo=%.2f, pulse gate=%.2f m",
+                "S=%.1f sr, albedo=%.2f, eta=%.2f, pulse gate=%.2f m",
                 cfg->volumes.size(),
                 cfg->mirror_particles ? "mirrored" : "ignored",
                 cfg->particle_extinction, cfg->particle_growth,
-                cfg->lidar_ratio, cfg->albedo, cfg->pulse_gate_m);
+                cfg->lidar_ratio, cfg->albedo, cfg->multiple_scattering,
+                cfg->pulse_gate_m);
         }
     }
     obscurants_ = std::move(cfg);

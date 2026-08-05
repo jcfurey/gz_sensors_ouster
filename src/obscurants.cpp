@@ -68,6 +68,10 @@ ObscurantConfig parseObscurantConfig(const ::sdf::ElementConstPtr & elem)
     if (elem->HasElement("obscurant_albedo")) {
         cfg.albedo = elem->Get<double>("obscurant_albedo");
     }
+    if (elem->HasElement("obscurant_multiple_scattering")) {
+        cfg.multiple_scattering =
+            elem->Get<double>("obscurant_multiple_scattering");
+    }
     if (elem->HasElement("pulse_length")) {
         cfg.pulse_gate_m = std::max(0.0, elem->Get<double>("pulse_length"));
     }
@@ -77,6 +81,7 @@ ObscurantConfig parseObscurantConfig(const ::sdf::ElementConstPtr & elem)
         ObscurantVolume v;
         v.lidar_ratio = cfg.lidar_ratio;
         v.albedo = cfg.albedo;
+        v.multiple_scattering = cfg.multiple_scattering;
 
         const std::string type =
             e->HasElement("type") ? e->Get<std::string>("type") : "ellipsoid";
@@ -114,6 +119,9 @@ ObscurantConfig parseObscurantConfig(const ::sdf::ElementConstPtr & elem)
         if (e->HasElement("albedo")) {
             v.albedo = e->Get<double>("albedo");
         }
+        if (e->HasElement("multiple_scattering")) {
+            v.multiple_scattering = e->Get<double>("multiple_scattering");
+        }
 
         if (!(v.extinction > 0.0)) {
             RCLCPP_WARN(lidarLogger(),
@@ -131,7 +139,7 @@ void makeObscurant(rc::ObscurantType type,
                    const ::gz::math::Pose3d & world_pose,
                    const ::gz::math::Vector3d & half,
                    double sigma, double lidar_ratio, double albedo,
-                   rc::RcObscurant & out)
+                   double multiple_scattering, rc::RcObscurant & out)
 {
     // local→world rotation, then store its transpose (= world→local) plus
     // t = −rᵀ·T, matching rc::Scene::computeXform's convention.
@@ -163,6 +171,11 @@ void makeObscurant(rc::ObscurantType type,
     out.lidar_ratio = static_cast<float>(
         lidar_ratio > 0.0 ? lidar_ratio : kObscurantLidarRatio);
     out.albedo = static_cast<float>(std::clamp(albedo, 0.0, 1.0));
+    // η is a fraction of the extinction, so it lives in (0, 1]; 0 would make
+    // the medium perfectly transparent to the laser while still returning
+    // backscatter, which is not a physical state.
+    out.ms_factor = static_cast<float>(
+        std::clamp(multiple_scattering, rc::kRcMinMultipleScattering, 1.0));
     out.type = type;
 }
 
@@ -170,7 +183,7 @@ bool obscurantFromVolume(const ObscurantVolume & vol, rc::RcObscurant & out)
 {
     if (vol.extinction <= 0.0) return false;
     makeObscurant(vol.type, vol.pose, vol.size / 2.0, vol.extinction,
-                  vol.lidar_ratio, vol.albedo, out);
+                  vol.lidar_ratio, vol.albedo, vol.multiple_scattering, out);
     return true;
 }
 
@@ -229,7 +242,7 @@ bool obscurantFromEmitter(const ::gz::msgs::ParticleEmitter & em,
     if (half.X() <= 0.0 && half.Y() <= 0.0 && half.Z() <= 0.0) return false;
 
     makeObscurant(type, world_pose, half, sigma, cfg.lidar_ratio, cfg.albedo,
-                  out);
+                  cfg.multiple_scattering, out);
     return true;
 }
 

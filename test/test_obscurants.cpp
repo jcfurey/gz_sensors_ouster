@@ -46,7 +46,8 @@ rc::ScanParams baseParams()
 /// Axis-aligned obscurant centred on the +x axis, identity rotation.
 rc::RcObscurant obscurantAt(rc::ObscurantType type, float cx,
                             float hx, float hy, float hz, float sigma,
-                            float lidar_ratio = 50.0f, float albedo = 0.8f)
+                            float lidar_ratio = 50.0f, float albedo = 0.8f,
+                            float ms_factor = 1.0f)
 {
     rc::RcObscurant ob;
     for (int i = 0; i < 9; ++i) ob.r[i] = kIdentityR[i];
@@ -59,6 +60,7 @@ rc::RcObscurant obscurantAt(rc::ObscurantType type, float cx,
     ob.sigma = sigma;
     ob.lidar_ratio = lidar_ratio;
     ob.albedo = albedo;
+    ob.ms_factor = ms_factor;
     ob.type = type;
     return ob;
 }
@@ -342,6 +344,171 @@ TEST(ObscurantExtinction, ThickerSmokeAlwaysDimsMore)
         EXPECT_LT(r.retro, previous) << "sigma=" << sigma;
         previous = r.retro;
     }
+}
+
+// ── Forward scattering: Platt's multiple-scattering factor ───────────────────
+//
+// σ_ext removes light in every direction, but forward-peaked media deflect
+// most of it by only milliradians, so a real receiver still collects it.
+// η credits that back: the round trip attenuates by exp(−2·η·τ).
+
+TEST(ObscurantForwardScatter, EtaScalesTheAttenuatingOpticalDepth)
+{
+    rc::ScanParams sp = baseParams();
+    // 4 m at σ = 0.25 → τ = 1; η = 0.6 → τ_eff = 0.6.
+    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                 2.0f, 5.0f, 5.0f, 0.25f, 50.0f, 0.8f, 0.6f));
+    float tau_eff = -1.0f;
+    const float tau = rc::rcOpticalDepth(sp, kOrigin, kForward, 0.0f, 100.0f,
+                                         nullptr, &tau_eff);
+    EXPECT_NEAR(tau, 1.0f, 1e-5f) << "physical depth must be untouched";
+    EXPECT_NEAR(tau_eff, 0.6f, 1e-5f);
+}
+
+TEST(ObscurantForwardScatter, EtaMixesPerVolumeAlongOnePath)
+{
+    // Two media with different η on one ray: the attenuating depth is the
+    // η-weighted sum, not η applied to the total.
+    rc::ScanParams sp = baseParams();
+    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 5.0f,
+                                 1.0f, 5.0f, 5.0f, 0.5f, 50.0f, 0.8f, 1.0f));
+    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 20.0f,
+                                 1.0f, 5.0f, 5.0f, 0.5f, 50.0f, 0.8f, 0.5f));
+    float tau_eff = -1.0f;
+    const float tau = rc::rcOpticalDepth(sp, kOrigin, kForward, 0.0f, 100.0f,
+                                         nullptr, &tau_eff);
+    EXPECT_NEAR(tau, 2.0f, 1e-5f);                 // 2 × (0.5 × 2 m)
+    EXPECT_NEAR(tau_eff, 1.0f * 1.0f + 0.5f * 1.0f, 1e-5f);
+}
+
+TEST(ObscurantForwardScatter, DefaultEtaIsTheSingleScatteringLimit)
+{
+    // η = 1 must reproduce the pre-existing behaviour bit for bit, so the
+    // correction is opt-in and nobody's world changes under them.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makeWall(scene, xf, 20.0f, 0.8f);
+
+    rc::ScanParams unset = baseParams();
+    addObscurant(unset, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                    2.0f, 5.0f, 5.0f, 0.2f, kNoBackscatter));
+    ASSERT_FLOAT_EQ(unset.obscurants[0].ms_factor, 1.0f) << "default is 1";
+
+    rc::ScanParams explicit_one = baseParams();
+    addObscurant(explicit_one,
+                 obscurantAt(rc::ObscurantType::kBox, 10.0f, 2.0f, 5.0f, 5.0f,
+                             0.2f, kNoBackscatter, 0.8f, 1.0f));
+
+    const RayResult a = castOne(scene, xf, unset);
+    const RayResult b = castOne(scene, xf, explicit_one);
+    EXPECT_EQ(a.range, b.range);
+    EXPECT_EQ(a.retro, b.retro);
+    // ...and it is exactly the closed-form single-scattering value.
+    EXPECT_NEAR(a.retro, 0.8f * std::exp(-2.0f * 0.2f * 4.0f), 1e-5f);
+}
+
+TEST(ObscurantForwardScatter, LowerEtaLetsMoreLightThrough)
+{
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makeWall(scene, xf, 25.0f, 0.9f);
+
+    // τ = 0.3 × 6 m = 1.8. Attenuation must follow exp(-2·η·τ) exactly.
+    float previous = 0.0f;
+    for (float eta : {1.0f, 0.8f, 0.6f, 0.4f}) {
+        rc::ScanParams sp = baseParams();
+        addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 12.0f,
+                                     3.0f, 6.0f, 6.0f, 0.3f, kNoBackscatter,
+                                     0.8f, eta));
+        const RayResult r = castOne(scene, xf, sp);
+        EXPECT_NEAR(r.range, 25.0f, 1e-3f);
+        EXPECT_NEAR(r.retro, 0.9f * std::exp(-2.0f * eta * 1.8f), 1e-5f)
+            << "eta=" << eta;
+        EXPECT_GT(r.retro, previous) << "less loss must mean a brighter return";
+        previous = r.retro;
+    }
+}
+
+TEST(ObscurantForwardScatter, RecoversTargetsTheSingleScatteringLimitDrops)
+{
+    // The point of the correction: at high optical depth η = 1 is pessimistic
+    // enough to push a real target past the detection limit that η < 1 keeps
+    // it inside.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makeWall(scene, xf, 45.0f, 0.8f);
+
+    rc::ScanParams pessimistic = baseParams();
+    addObscurant(pessimistic, obscurantAt(rc::ObscurantType::kBox, 15.0f,
+                                          4.0f, 8.0f, 8.0f, 0.2f,
+                                          kNoBackscatter));
+    rc::ScanParams corrected = baseParams();
+    addObscurant(corrected, obscurantAt(rc::ObscurantType::kBox, 15.0f,
+                                        4.0f, 8.0f, 8.0f, 0.2f,
+                                        kNoBackscatter, 0.8f, 0.5f));
+
+    const RayResult a = castOne(scene, xf, pessimistic);
+    const RayResult b = castOne(scene, xf, corrected);
+    EXPECT_FLOAT_EQ(rpmath::dropoutProbability(a.range, a.retro, 0.0005f,
+                                               0.03f, 120.0f), 1.0f);
+    EXPECT_LT(rpmath::dropoutProbability(b.range, b.retro, 0.0005f, 0.03f,
+                                         120.0f), 1.0f);
+}
+
+TEST(ObscurantForwardScatter, AmbientChannelIgnoresEta)
+{
+    // Koschmieder's airlight term IS the multiply-scattered light for a wide
+    // passive field of view, so applying η there as well would correct for
+    // the same physics twice. The NEAR_IR value must not move with η.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makeWall(scene, xf, 20.0f, 0.2f);
+
+    float reference = -1.0f;
+    for (float eta : {1.0f, 0.5f, 0.2f}) {
+        rc::ScanParams sp = baseParams();
+        addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                     2.0f, 5.0f, 5.0f, 0.5f, kNoBackscatter,
+                                     0.9f, eta));
+        const RayResult r = castOne(scene, xf, sp);
+        if (reference < 0.0f) {
+            reference = r.nir;
+            const float trans = std::exp(-2.0f);   // physical τ = 0.5 × 4
+            EXPECT_NEAR(reference, 0.2f * trans + 0.9f * (1.0f - trans),
+                        1e-5f);
+        } else {
+            EXPECT_FLOAT_EQ(r.nir, reference) << "eta=" << eta;
+        }
+    }
+}
+
+TEST(ObscurantForwardScatter, ScatterDepthSamplingPenetratesDeeper)
+{
+    // Sampling lives in η·τ space, so recovering forward-scattered light
+    // must also push the medium's own returns further into the cloud.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+
+    auto medianDepth = [&](float eta) {
+        rc::ScanParams sp = baseParams();
+        addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                     5.0f, 5.0f, 5.0f, 1.0f, 50.0f, 0.8f,
+                                     eta));
+        std::vector<float> depths;
+        for (uint32_t i = 1; i <= 600; ++i) {
+            sp.rng_salt = i;
+            const RayResult r = castOne(scene, xf, sp);
+            if (std::isfinite(r.range)) depths.push_back(r.range);
+        }
+        std::sort(depths.begin(), depths.end());
+        return depths.empty() ? 0.0f : depths[depths.size() / 2];
+    };
+
+    const float deep = medianDepth(0.25f);
+    const float shallow = medianDepth(1.0f);
+    EXPECT_GT(deep, shallow);
+    // Mean penetration is 1/(2ησ): 0.5 m at η = 0.25 against 0.125 m at 1.
+    EXPECT_NEAR(deep - 5.0f, 4.0f * (shallow - 5.0f), 0.15f);
 }
 
 // ── Backscatter from the medium itself ───────────────────────────────────────
