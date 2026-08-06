@@ -5,6 +5,7 @@ Catches regressions like accidentally adding gz-sim-sensors-system to a
 raycast world or removing gz-sim-altimeter-system.
 """
 import pathlib
+import struct
 import xml.dom.minidom
 
 import pytest
@@ -34,7 +35,10 @@ def test_all_worlds_have_physics(name):
                                    'ouster_demo_panels.sdf',
                                    'ouster_showcase.sdf',
                                    'ouster_smoke.sdf',
-                                   'turtlebot3_ouster_headless.sdf'])
+                                   'turtlebot3_ouster_headless.sdf',
+                                   'turtlebot3_ouster_warehouse.sdf',
+                                   'turtlebot3_ouster_hills.sdf',
+                                   'turtlebot3_ouster_sewer.sdf'])
 def test_example_worlds_have_imu(name):
     assert 'gz-sim-imu-system' in _plugins(name)
 
@@ -42,7 +46,10 @@ def test_example_worlds_have_imu(name):
 # ── Raycast worlds: no rendering system, yes altimeter ───────────────────────
 
 RAYCAST_WORLDS = ['ouster_demo.sdf', 'ouster_showcase.sdf', 'ouster_smoke.sdf',
-                  'turtlebot3_ouster_headless.sdf']
+                  'turtlebot3_ouster_headless.sdf',
+                  'turtlebot3_ouster_warehouse.sdf',
+                  'turtlebot3_ouster_hills.sdf',
+                  'turtlebot3_ouster_sewer.sdf']
 
 
 @pytest.mark.parametrize('name', RAYCAST_WORLDS)
@@ -53,6 +60,24 @@ def test_raycast_worlds_have_no_sensors_system(name):
 @pytest.mark.parametrize('name', RAYCAST_WORLDS)
 def test_raycast_worlds_have_altimeter_system(name):
     assert 'gz-sim-altimeter-system' in _plugins(name)
+
+
+@pytest.mark.parametrize('name', WORLD_NAMES)
+def test_world_physics_is_paced_at_authored_real_time_factor(name):
+    """A max step without its matching update rate can let sim time sprint,
+    flooding ouster_ros lidar_scans queues with packets."""
+    doc = xml.dom.minidom.parse(str(WORLDS / name))
+    physics = doc.getElementsByTagName('physics')[0]
+
+    def value(tag: str) -> float:
+        node = physics.getElementsByTagName(tag)[0]
+        return float(node.firstChild.nodeValue.strip())
+
+    step = value('max_step_size')
+    factor = value('real_time_factor')
+    update_rate = value('real_time_update_rate')
+    assert step > 0 and update_rate > 0
+    assert step * update_rate == pytest.approx(factor)
 
 
 # The raycast scene mirror only handles box / sphere / cylinder / plane /
@@ -156,6 +181,44 @@ def test_visual_geometry_is_mirrorable(name):
     assert not offenders, (
         f'{name} has visual geometry the raycast mirror cannot see '
         f'(silently invisible to the lidar): {offenders}')
+
+
+def _png_header(path: pathlib.Path) -> tuple:
+    data = path.read_bytes()[:29]
+    assert data[:8] == b'\x89PNG\r\n\x1a\n'
+    assert data[12:16] == b'IHDR'
+    width, height = struct.unpack('>II', data[16:24])
+    return width, height, data[24], data[25]
+
+
+def test_brick_graffiti_response_map_is_aligned_rgba8():
+    textures = EXAMPLES / 'media' / 'materials' / 'textures'
+    visible = textures / 'brick_graffiti.png'
+    response = textures / 'brick_graffiti.ouster.png'
+    assert visible.is_file() and response.is_file()
+    vw, vh, vdepth, _ = _png_header(visible)
+    rw, rh, rdepth, rtype = _png_header(response)
+    assert (rw, rh) == (vw, vh)
+    assert vdepth == rdepth == 8
+    assert rtype == 6, 'response companion must be RGBA8'
+
+
+def test_response_textured_worlds_reference_the_visible_companion_base():
+    for name in ('turtlebot3_ouster_warehouse.sdf',
+                 'turtlebot3_ouster_hills.sdf',
+                 'turtlebot3_ouster_sewer.sdf'):
+        text = (WORLDS / name).read_text()
+        assert '../media/materials/textures/brick_graffiti.png' in text
+        # The nonstandard physics map stays out of SDF; the plugin discovers
+        # the adjacent `<stem>.ouster.png` companion from this albedo path.
+        assert '.ouster.png</albedo_map>' not in text
+
+
+def test_hilly_world_uses_an_installed_mesh_not_heightmap():
+    text = (WORLDS / 'turtlebot3_ouster_hills.sdf').read_text()
+    assert '../media/meshes/hilly_terrain.obj' in text
+    assert '<heightmap>' not in text
+    assert (EXAMPLES / 'media' / 'meshes' / 'hilly_terrain.obj').is_file()
 
 
 # ── Smoke world: the obscuration demo ────────────────────────────────────────

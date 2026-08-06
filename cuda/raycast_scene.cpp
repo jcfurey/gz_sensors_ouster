@@ -172,7 +172,8 @@ void buildTlas(const InstanceXform * xforms, int n_instances, Tlas & out)
 }
 
 int Scene::addMesh(const std::vector<float> & verts,
-                   const std::vector<int> & tris)
+                   const std::vector<int> & tris,
+                   const std::vector<float> & texcoords)
 {
     const int n_tris = static_cast<int>(tris.size()) / 3;
     if (n_tris == 0 || verts.size() < 9) return -1;
@@ -182,6 +183,15 @@ int Scene::addMesh(const std::vector<float> & verts,
     const int order_base = static_cast<int>(order_.size());
 
     verts_.insert(verts_.end(), verts.begin(), verts.end());
+    const size_t n_verts = verts.size() / 3;
+    if (texcoords.size() == n_verts * 2) {
+        texcoords_.insert(texcoords_.end(), texcoords.begin(), texcoords.end());
+    } else {
+        // Preserve one-to-one global vertex indexing even for untextured
+        // meshes. A response map is never attached to a mesh without UVs,
+        // but zero fill keeps every backend's flat-array contract simple.
+        texcoords_.insert(texcoords_.end(), n_verts * 2, 0.0f);
+    }
     tris_.reserve(tris_.size() + tris.size());
     std::transform(tris.begin(), tris.end(), std::back_inserter(tris_),
                    [vert_base](int vi) { return vi + vert_base; });
@@ -215,9 +225,26 @@ int Scene::addMesh(const std::vector<float> & verts,
     return root;
 }
 
+int Scene::addResponseTexture(int width, int height,
+                              const std::vector<uint8_t> & rgba)
+{
+    if (width <= 0 || height <= 0) return -1;
+    const size_t expected = static_cast<size_t>(width) *
+                            static_cast<size_t>(height) * 4;
+    if (rgba.size() != expected ||
+        response_texels_.size() >
+            static_cast<size_t>(std::numeric_limits<int>::max()) - expected) {
+        return -1;
+    }
+    const int offset = static_cast<int>(response_texels_.size());
+    response_texels_.insert(response_texels_.end(), rgba.begin(), rgba.end());
+    return offset;
+}
+
 int Scene::addInstance(GeomType type, const float size[3], float retro,
                        int root_node, float spec, float transmit,
-                       bool has_retro)
+                       bool has_retro, int response_offset,
+                       int response_width, int response_height)
 {
     RcInstance inst;
     inst.type = type;
@@ -230,6 +257,11 @@ int Scene::addInstance(GeomType type, const float size[3], float retro,
     inst.transmit = (transmit > 0.0f)
         ? ((transmit < 1.0f) ? transmit : 1.0f) : 0.0f;
     inst.root_node = (type == GeomType::kMesh) ? root_node : -1;
+    if (response_offset >= 0 && response_width > 0 && response_height > 0) {
+        inst.response_offset = response_offset;
+        inst.response_width = response_width;
+        inst.response_height = response_height;
+    }
 
     LocalBounds lb{};
     switch (type) {
@@ -283,12 +315,16 @@ SceneView Scene::view() const
     v.n_instances = static_cast<int>(instances_.size());
     v.verts = verts_.data();
     v.n_vert_floats = static_cast<int>(verts_.size());
+    v.texcoords = texcoords_.data();
+    v.n_texcoord_floats = static_cast<int>(texcoords_.size());
     v.tris = tris_.data();
     v.n_tri_ints = static_cast<int>(tris_.size());
     v.order = order_.data();
     v.n_order = static_cast<int>(order_.size());
     v.nodes = nodes_.data();
     v.n_nodes = static_cast<int>(nodes_.size());
+    v.response_texels = response_texels_.data();
+    v.n_response_bytes = static_cast<int>(response_texels_.size());
     return v;
 }
 
@@ -344,7 +380,9 @@ void castScan(const SceneView & scene,
     for (int idx = 0; idx < n; ++idx) {
         float range, retro;
         rcCastOneRay(scene.instances, scene.n_instances,
-                     scene.verts, scene.tris, scene.order, scene.nodes,
+                     scene.verts, scene.texcoords,
+                     scene.tris, scene.order, scene.nodes,
+                     scene.response_texels,
                      xforms, beam_alt_deg, beam_az_deg,
                      sensor_r, sensor_t, sp, idx, kInf, range, retro,
                      col_r, col_t,

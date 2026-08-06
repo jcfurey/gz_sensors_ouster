@@ -94,9 +94,11 @@ struct RcCastArgsHip {
 __global__ void castScanKernelHip(
     const rc::RcInstance * __restrict__ instances,
     const float * __restrict__ verts,
+    const float * __restrict__ texcoords,
     const int * __restrict__ tris,
     const int * __restrict__ order,
     const rc::MeshBvhNode * __restrict__ nodes,
+    const uint8_t * __restrict__ response_texels,
     const rc::InstanceXform * __restrict__ xforms,
     const float * __restrict__ beam_alt,
     const float * __restrict__ beam_az,
@@ -117,7 +119,8 @@ __global__ void castScanKernelHip(
     if (idx >= n) return;
 
     float range, retro, nirv;
-    rc::rcCastOneRay(instances, args.n_instances, verts, tris, order, nodes,
+    rc::rcCastOneRay(instances, args.n_instances, verts, texcoords,
+                     tris, order, nodes, response_texels,
                      xforms, beam_alt, beam_az, args.sr, args.st, args.sp,
                      idx, __int_as_float(0x7f800000), range, retro,
                      col_r, col_t, nir_out ? &nirv : nullptr,
@@ -302,9 +305,11 @@ public:
         maybeFree(d_beam_az_);
         maybeFree(d_rc_insts_);
         maybeFree(d_rc_verts_);
+        maybeFree(d_rc_texcoords_);
         maybeFree(d_rc_tris_);
         maybeFree(d_rc_order_);
         maybeFree(d_rc_nodes_);
+        maybeFree(d_rc_response_);
         maybeFree(d_rc_xforms_);
         maybeFree(d_tlas_nodes_);
         maybeFree(d_tlas_order_);
@@ -496,9 +501,11 @@ public:
         hipLaunchKernelGGL(castScanKernelHip, dim3(grid), dim3(kBlock), 0, stream_,
             static_cast<const rc::RcInstance *>(d_rc_insts_),
             static_cast<const float *>(d_rc_verts_),
+            static_cast<const float *>(d_rc_texcoords_),
             static_cast<const int *>(d_rc_tris_),
             static_cast<const int *>(d_rc_order_),
             static_cast<const rc::MeshBvhNode *>(d_rc_nodes_),
+            static_cast<const uint8_t *>(d_rc_response_),
             static_cast<const rc::InstanceXform *>(d_rc_xforms_),
             static_cast<const float *>(d_beam_alt_),
             static_cast<const float *>(d_beam_az_),
@@ -545,12 +552,16 @@ private:
                static_cast<size_t>(sv.n_instances) * sizeof(rc::RcInstance));
         upload(d_rc_verts_, rc_verts_cap_, sv.verts,
                static_cast<size_t>(sv.n_vert_floats) * sizeof(float));
+        upload(d_rc_texcoords_, rc_texcoords_cap_, sv.texcoords,
+               static_cast<size_t>(sv.n_texcoord_floats) * sizeof(float));
         upload(d_rc_tris_, rc_tris_cap_, sv.tris,
                static_cast<size_t>(sv.n_tri_ints) * sizeof(int));
         upload(d_rc_order_, rc_order_cap_, sv.order,
                static_cast<size_t>(sv.n_order) * sizeof(int));
         upload(d_rc_nodes_, rc_nodes_cap_, sv.nodes,
                static_cast<size_t>(sv.n_nodes) * sizeof(rc::MeshBvhNode));
+        upload(d_rc_response_, rc_response_cap_, sv.response_texels,
+               static_cast<size_t>(sv.n_response_bytes));
         if (rc_xforms_cap_ < sv.n_instances) {
             allocDev(d_rc_xforms_,
                 static_cast<size_t>(sv.n_instances) *
@@ -722,9 +733,11 @@ private:
     void * d_beam_az_ = nullptr;
     void * d_rc_insts_  = nullptr;
     void * d_rc_verts_  = nullptr;
+    void * d_rc_texcoords_ = nullptr;
     void * d_rc_tris_   = nullptr;
     void * d_rc_order_  = nullptr;
     void * d_rc_nodes_  = nullptr;
+    void * d_rc_response_ = nullptr;
     void * d_rc_xforms_ = nullptr;
     // Top-level BVH: host build buffer (capacity reused across scans) plus
     // its device mirrors. Caps are in BYTES.
@@ -735,9 +748,11 @@ private:
     int tlas_order_cap_ = 0;
     int rc_insts_cap_ = 0;
     int rc_verts_cap_ = 0;
+    int rc_texcoords_cap_ = 0;
     int rc_tris_cap_ = 0;
     int rc_order_cap_ = 0;
     int rc_nodes_cap_ = 0;
+    int rc_response_cap_ = 0;
     int rc_xforms_cap_ = 0;
     uint64_t rc_scene_version_ = 0;
     bool rc_scene_version_valid_ = false;

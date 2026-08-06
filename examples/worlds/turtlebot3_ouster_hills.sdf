@@ -1,0 +1,111 @@
+<?xml version="1.0"?>
+<!-- Download-free rolling terrain with response-textured buildings and sun. -->
+<sdf version="1.9">
+  <world name="turtlebot3_hills">
+    <physics name="default" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-altimeter-system" name="gz::sim::systems::Altimeter"/>
+
+    <scene>
+      <ambient>0.42 0.44 0.48 1</ambient>
+      <background>0.43 0.68 0.9 1</background>
+      <shadows>true</shadows>
+      <grid>false</grid>
+    </scene>
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 15 0 0 0</pose>
+      <diffuse>1 0.95 0.82 1</diffuse>
+      <specular>0.35 0.35 0.3 1</specular>
+      <direction>-0.45 0.18 -1</direction>
+    </light>
+
+    <!-- A triangle mesh is used instead of SDF heightmap geometry because the
+         exact-ray scene mirror supports meshes on CPU/CUDA/HIP/SYCL. The
+         origin is level so the launch's standard TurtleBot spawn is valid. -->
+    <model name="rolling_terrain">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision"><geometry><mesh><uri>../media/meshes/hilly_terrain.obj</uri></mesh></geometry></collision>
+        <visual name="visual">
+          <laser_retro>0.34</laser_retro>
+          <geometry><mesh><uri>../media/meshes/hilly_terrain.obj</uri></mesh></geometry>
+          <material><ambient>0.16 0.28 0.1 1</ambient><diffuse>0.28 0.46 0.17 1</diffuse><specular>0.02 0.02 0.02 1</specular></material>
+        </visual>
+      </link>
+    </model>
+    <model name="catch_ground">
+      <static>true</static><pose>0 0 -1 0 0 0</pose>
+      <link name="link"><collision name="collision"><geometry><plane><normal>0 0 1</normal><size>80 80</size></plane></geometry></collision>
+        <visual name="visual"><laser_retro>0.3</laser_retro><geometry><plane><normal>0 0 1</normal><size>80 80</size></plane></geometry><material><diffuse>0.2 0.32 0.12 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- The buildings' visible albedo has an aligned .ouster.png companion,
+         so cyan/magenta/yellow/white paint and the underlying brick separate
+         cleanly in REFLECTIVITY and NEAR_IR. -->
+    <model name="brick_pump_house">
+      <static>true</static><pose>-8 6 1.35 0 0 0.08</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>4 3 3.2</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>4 3 3.2</size></box></geometry>
+          <material><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
+        </visual>
+        <visual name="roof"><pose>0 0 1.72 0 0 0</pose><laser_retro>0.18</laser_retro><geometry><box><size>4.4 3.4 0.22</size></box></geometry><material><diffuse>0.12 0.12 0.13 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="brick_service_building">
+      <static>true</static><pose>8 -5.8 2.2 0 0 -0.18</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>4.5 3.5 3</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>4.5 3.5 3</size></box></geometry>
+          <material><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
+        </visual>
+        <visual name="roof"><pose>0 0 1.62 0 0 0</pose><laser_retro>0.18</laser_retro><geometry><box><size>4.9 3.9 0.2</size></box></geometry><material><diffuse>0.11 0.12 0.13 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="brick_shed">
+      <static>true</static><pose>9 5.8 1.9 0 0 -0.45</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3 2.5 2.4</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>3 2.5 2.4</size></box></geometry>
+          <material><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="boulder_west">
+      <static>true</static><pose>-5 -4 0.75 0 0 0</pose>
+      <link name="link"><collision name="collision"><geometry><sphere><radius>0.65</radius></sphere></geometry></collision>
+        <visual name="visual"><laser_retro>0.27</laser_retro><geometry><sphere><radius>0.65</radius></sphere></geometry><material><diffuse>0.32 0.3 0.27 1</diffuse></material></visual></link>
+    </model>
+    <model name="boulder_east">
+      <static>true</static><pose>5 3 1.0 0 0 0</pose>
+      <link name="link"><collision name="collision"><geometry><sphere><radius>0.8</radius></sphere></geometry></collision>
+        <visual name="visual"><laser_retro>0.25</laser_retro><geometry><sphere><radius>0.8</radius></sphere></geometry><material><diffuse>0.29 0.28 0.25 1</diffuse></material></visual></link>
+    </model>
+    <model name="tree_north">
+      <static>true</static><pose>-2 7 0.8 0 0 0</pose>
+      <link name="link">
+        <collision name="trunk_c"><geometry><cylinder><radius>0.18</radius><length>1.8</length></cylinder></geometry></collision>
+        <visual name="trunk"><laser_retro>0.22</laser_retro><geometry><cylinder><radius>0.18</radius><length>1.8</length></cylinder></geometry><material><diffuse>0.3 0.16 0.07 1</diffuse></material></visual>
+        <visual name="crown"><pose>0 0 1.35 0 0 0</pose><laser_retro>0.36</laser_retro><geometry><sphere><radius>1.05</radius></sphere></geometry><material><diffuse>0.12 0.35 0.08 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="tree_south">
+      <static>true</static><pose>-9 -4 1.2 0 0 0</pose>
+      <link name="link">
+        <collision name="trunk_c"><geometry><cylinder><radius>0.2</radius><length>2</length></cylinder></geometry></collision>
+        <visual name="trunk"><laser_retro>0.22</laser_retro><geometry><cylinder><radius>0.2</radius><length>2</length></cylinder></geometry><material><diffuse>0.3 0.16 0.07 1</diffuse></material></visual>
+        <visual name="crown"><pose>0 0 1.5 0 0 0</pose><laser_retro>0.36</laser_retro><geometry><sphere><radius>1.2</radius></sphere></geometry><material><diffuse>0.11 0.32 0.07 1</diffuse></material></visual>
+      </link>
+    </model>
+  </world>
+</sdf>

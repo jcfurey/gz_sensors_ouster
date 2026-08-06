@@ -3,6 +3,9 @@
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py headless:=true
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py rviz:=true
+#   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py world:=warehouse
+#   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py world:=hills
+#   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py world:=sewer
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py ray_mode:=panels
 #   ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py lidar_profile:=legacy
 #
@@ -53,12 +56,16 @@ def generate_launch_description():
     lidar_profile = LaunchConfiguration('lidar_profile')
     hardware_revision = LaunchConfiguration('hardware_revision')
     headless = LaunchConfiguration('headless')
+    world_profile = LaunchConfiguration('world')
 
-    # raycast (default) uses the GPU-free headless world; panels switches to the
-    # rendering world that loads gz-sim-sensors-system (ogre2).
+    # All named settings are GPU-free exact-ray worlds. Panels mode still
+    # switches to the rendering world that loads gz-sim-sensors-system (ogre2).
     world_name = PythonExpression(
         ["'ouster_demo_panels.sdf' if '", ray_mode,
-         "' == 'panels' else 'turtlebot3_ouster_headless.sdf'"])
+         "' == 'panels' else {'arena': 'turtlebot3_ouster_headless.sdf', "
+         "'warehouse': 'turtlebot3_ouster_warehouse.sdf', "
+         "'hills': 'turtlebot3_ouster_hills.sdf', "
+         "'sewer': 'turtlebot3_ouster_sewer.sdf'}['", world_profile, "']"])
     world = PathJoinSubstitution([pkg_share, 'examples', 'worlds', world_name])
 
     # ABSOLUTE metadata path — a model spawned from the robot_description topic
@@ -101,6 +108,10 @@ def generate_launch_description():
                                           'modern (RNG19_RFL8_SIG16_NIR16) | legacy.'),
         DeclareLaunchArgument('hardware_revision', default_value='rev07',
                               description='Ouster hardware physics revision.'),
+        DeclareLaunchArgument('world', default_value='arena',
+                              choices=['arena', 'warehouse', 'hills', 'sewer'],
+                              description='TurtleBot raycast setting. Ignored when '
+                                          'ray_mode:=panels.'),
         DeclareLaunchArgument('headless', default_value='false',
                               description='Run gz server-only (no GUI client).'),
         DeclareLaunchArgument('rviz', default_value='false',
@@ -162,6 +173,9 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': True,
+                # Pre-seed packet processing so fast bag playback cannot race
+                # the metadata callback that creates the packet subscription.
+                'metadata': metadata,
                 # Build only the point cloud — the plugin publishes /imu itself.
                 'proc_mask': 'PCL',
                 # Stamp the cloud in the URDF lidar frame that
@@ -200,6 +214,9 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': True,
+                # Keep packet subscriptions ready before a bag starts; live
+                # metadata messages remain supported for reconfiguration.
+                'metadata': metadata,
                 'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
                 # Stamp images/camera_info in the URDF lidar frame. The os_image
                 # default 'os_lidar' is broadcast by nothing in this launch

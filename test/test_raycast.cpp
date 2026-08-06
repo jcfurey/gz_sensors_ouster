@@ -497,6 +497,83 @@ TEST(Raycast, PlaneRetroFollowsGrazingAngle)
     EXPECT_NEAR(retro[0], 0.5f, 1e-4f);
 }
 
+TEST(Raycast, ResponseMapBilinearRepeatAndChannels)
+{
+    // Image storage is top-down. Sampling the centre of its top-left texel
+    // uses bottom-left-origin UV (u=.25, v=.75); repeating by +1 in either
+    // direction must return the same RGBA material sample.
+    rc::RcInstance inst;
+    inst.response_offset = 0;
+    inst.response_width = 2;
+    inst.response_height = 2;
+    const std::vector<uint8_t> rgba = {
+        10, 20, 30, 40,    50, 60, 70, 80,
+        90, 100, 110, 120, 130, 140, 150, 160};
+
+    const auto a = rc::rcSampleResponse(rgba.data(), inst, 0.25f, 0.75f);
+    EXPECT_NEAR(a.diffuse, 10.0f / 255.0f, 1e-6f);
+    EXPECT_NEAR(a.nir, 20.0f / 255.0f, 1e-6f);
+    EXPECT_NEAR(a.spec, 30.0f / 255.0f, 1e-6f);
+    EXPECT_NEAR(a.transmit, 1.0f - 40.0f / 255.0f, 1e-6f);
+
+    const auto repeated =
+        rc::rcSampleResponse(rgba.data(), inst, 1.25f, -0.25f);
+    EXPECT_NEAR(repeated.diffuse, a.diffuse, 1e-6f);
+    EXPECT_NEAR(repeated.nir, a.nir, 1e-6f);
+    EXPECT_NEAR(repeated.spec, a.spec, 1e-6f);
+    EXPECT_NEAR(repeated.transmit, a.transmit, 1e-6f);
+
+    // At the UV seam all four texels contribute equally.
+    const auto centre = rc::rcSampleResponse(rgba.data(), inst, 0.5f, 0.5f);
+    EXPECT_NEAR(centre.diffuse, 70.0f / 255.0f, 1e-6f);
+    EXPECT_NEAR(centre.nir, 80.0f / 255.0f, 1e-6f);
+    EXPECT_NEAR(centre.spec, 90.0f / 255.0f, 1e-6f);
+    EXPECT_NEAR(centre.transmit, 1.0f - 100.0f / 255.0f, 1e-6f);
+}
+
+TEST(Raycast, MeshUvUsesBarycentricInterpolation)
+{
+    const std::vector<float> verts = {
+        0.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f};
+    const std::vector<int> tris = {0, 1, 2};
+    const std::vector<float> texcoords = {
+        0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+    rc::RcInstance inst;
+    inst.type = rc::GeomType::kMesh;
+    float u = 0.0f;
+    float v = 0.0f;
+    ASSERT_TRUE(rc::rcHitUv(inst, verts.data(), tris.data(),
+                            texcoords.data(),
+                            rc::RcV3{0.5f, 1.0f, 0.0f}, 0, u, v));
+    EXPECT_NEAR(u, 0.25f, 1e-6f);
+    EXPECT_NEAR(v, 0.5f, 1e-6f);
+}
+
+TEST(Raycast, ResponseMapOverridesScalarLidarAndNearIrMaterial)
+{
+    rc::Scene scene;
+    const std::vector<uint8_t> rgba = {128, 64, 26, 255};
+    const int response = scene.addResponseTexture(1, 1, rgba);
+    ASSERT_EQ(response, 0);
+
+    const float box_size[3] = {0.5f, 0.5f, 0.5f};
+    const int bi = scene.addInstance(
+        rc::GeomType::kBox, box_size,
+        /*retro=*/2.0f, -1, /*spec=*/0.9f, /*transmit=*/0.8f,
+        /*has_retro=*/true, response, 1, 1);
+    std::vector<rc::InstanceXform> xf = {
+        xformAt(scene, bi, 3.0f, 0.0f, 0.0f)};
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> range(4), retro(4), nir(4);
+    rc::castScan(scene.view(), xf.data(), alt.data(), az.data(),
+                 kIdentityR, kZeroT, scanParams(1, 4), range.data(),
+                 retro.data(), nullptr, nullptr, nir.data());
+
+    EXPECT_NEAR(range[0], 2.5f, 1e-4f);
+    EXPECT_NEAR(retro[0], (128.0f + 26.0f) / 255.0f, 1e-5f);
+    EXPECT_NEAR(nir[0], 64.0f / 255.0f, 1e-5f);
+}
+
 TEST(Raycast, NearClipSeesThroughCloseHit)
 {
     rc::Scene scene;

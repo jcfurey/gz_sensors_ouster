@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -20,6 +22,7 @@
 #include <gz/sim/components/Visual.hh>
 #include <gz/common/Mesh.hh>
 #include <gz/common/MeshManager.hh>
+#include <gz/common/Image.hh>
 #include <gz/common/SubMesh.hh>
 #include <gz/math/Matrix3.hh>
 
@@ -30,6 +33,7 @@
 #include <sdf/Geometry.hh>
 #include <sdf/Mesh.hh>
 #include <sdf/Plane.hh>
+#include <sdf/Pbr.hh>
 #include <sdf/Sphere.hh>
 
 namespace gz_gpu_ouster_lidar {
@@ -55,8 +59,10 @@ void poseToRT(const ::gz::math::Pose3d & pose, float r[9], float t[3])
 /// Flatten a gz mesh (all TRIANGLES submeshes, scale baked in).
 bool appendGzMesh(const ::gz::common::Mesh & mesh,
                   const ::gz::math::Vector3d & scale,
-                  std::vector<float> & verts, std::vector<int> & tris)
+                  std::vector<float> & verts, std::vector<int> & tris,
+                  std::vector<float> & texcoords, bool & has_texcoords)
 {
+    has_texcoords = true;
     for (unsigned int si = 0; si < mesh.SubMeshCount(); ++si) {
         auto sm = mesh.SubMeshByIndex(si).lock();
         if (!sm) continue;
@@ -69,6 +75,15 @@ bool appendGzMesh(const ::gz::common::Mesh & mesh,
             verts.push_back(static_cast<float>(p.X() * scale.X()));
             verts.push_back(static_cast<float>(p.Y() * scale.Y()));
             verts.push_back(static_cast<float>(p.Z() * scale.Z()));
+            if (sm->HasTexCoord(v)) {
+                const auto uv = sm->TexCoord(v);
+                texcoords.push_back(static_cast<float>(uv.X()));
+                texcoords.push_back(static_cast<float>(uv.Y()));
+            } else {
+                texcoords.push_back(0.0f);
+                texcoords.push_back(0.0f);
+                has_texcoords = false;
+            }
         }
         for (unsigned int k = 0; k + 2 < sm->IndexCount(); k += 3) {
             tris.push_back(base + static_cast<int>(sm->Index(k)));
@@ -78,6 +93,39 @@ bool appendGzMesh(const ::gz::common::Mesh & mesh,
     }
     return !tris.empty();
 }
+
+/// Standard SDF has no LiDAR response-map field. Associate one without
+/// vendor-specific tags by looking beside the visible PBR albedo map:
+///   brick.png -> brick.ouster.png
+/// The companion is RGBA8: diffuse-865nm, passive-NIR, specular, opacity.
+std::string responseMapPath(const sdf::Material & material)
+{
+    const sdf::Pbr * pbr = material.PbrMaterial();
+    if (!pbr) return {};
+    const sdf::PbrWorkflow * workflow =
+        pbr->Workflow(sdf::PbrWorkflowType::METAL);
+    if (!workflow) workflow = pbr->Workflow(sdf::PbrWorkflowType::SPECULAR);
+    if (!workflow || workflow->AlbedoMap().empty()) return {};
+
+    const std::string albedo = ::gz::sim::asFullPath(
+        workflow->AlbedoMap(), material.FilePath());
+    if (albedo.empty()) return {};
+    std::filesystem::path path(albedo);
+    const std::string extension = path.extension().string();
+    path.replace_filename(path.stem().string() + ".ouster" + extension);
+    return std::filesystem::is_regular_file(path) ? path.string() : std::string{};
+}
+
+struct CachedResponseTexture {
+    int offset = -1;
+    int width = 0;
+    int height = 0;
+};
+
+struct CachedMesh {
+    int root_node = -1;
+    bool has_texcoords = false;
+};
 
 }  // namespace
 
@@ -121,8 +169,10 @@ void RaycastMirror::rebuildScene(
 {
     auto scene = std::make_shared<rc::Scene>();
     std::vector<Ref> refs;
-    std::unordered_map<std::string, int> mesh_cache;  // key → BVH root node
+    std::unordered_map<std::string, CachedMesh> mesh_cache;
+    std::unordered_map<std::string, CachedResponseTexture> response_cache;
     int skipped = 0;
+    int response_instances = 0;
 
     ecm.Each<::gz::sim::components::Visual,
              ::gz::sim::components::Geometry>(
@@ -133,6 +183,7 @@ void RaycastMirror::rebuildScene(
             rc::GeomType type = rc::GeomType::kBox;
             float size[3] = {0.0f, 0.0f, 0.0f};
             int root_node = -1;
+            bool has_texcoords = true;  // analytic primitives derive UVs
             Ref ref;
             ref.entity = ent;
 
@@ -192,19 +243,25 @@ void RaycastMirror::rebuildScene(
                         }
                         std::vector<float> verts;
                         std::vector<int> tris;
-                        if (!appendGzMesh(*gz_mesh, scale, verts, tris)) {
+                        std::vector<float> texcoords;
+                        bool mesh_has_texcoords = false;
+                        if (!appendGzMesh(*gz_mesh, scale, verts, tris,
+                                         texcoords, mesh_has_texcoords)) {
                             ++skipped;
                             return true;
                         }
-                        const int root = scene->addMesh(verts, tris);
+                        const int root = scene->addMesh(verts, tris,
+                                                        texcoords);
                         if (root < 0) {
                             ++skipped;
                             return true;
                         }
-                        it = mesh_cache.emplace(key, root).first;
+                        it = mesh_cache.emplace(
+                            key, CachedMesh{root, mesh_has_texcoords}).first;
                     }
                     type = rc::GeomType::kMesh;
-                    root_node = it->second;
+                    root_node = it->second.root_node;
+                    has_texcoords = it->second.has_texcoords;
                     break;
                 }
                 default:
@@ -223,8 +280,9 @@ void RaycastMirror::rebuildScene(
             // the visual's <transparency>. Both default to 0 (pure
             // Lambertian, opaque) when unset.
             float spec = 0.0f;
-            if (const auto * mat =
-                    ecm.Component<::gz::sim::components::Material>(ent)) {
+            const auto * mat =
+                ecm.Component<::gz::sim::components::Material>(ent);
+            if (mat) {
                 const auto & s = mat->Data().Specular();
                 spec = static_cast<float>((s.R() + s.G() + s.B()) / 3.0);
             }
@@ -234,8 +292,51 @@ void RaycastMirror::rebuildScene(
                 transmit = static_cast<float>(tr->Data());
             }
 
+            CachedResponseTexture response;
+            if (mat) {
+                const std::string response_path =
+                    responseMapPath(mat->Data());
+                if (!response_path.empty() && !has_texcoords) {
+                    RCLCPP_WARN(kLogger,
+                        "raycast: response map '%s' ignored because mesh "
+                        "visual %lu has no texture coordinates",
+                        response_path.c_str(),
+                        static_cast<unsigned long>(ent));
+                } else if (!response_path.empty()) {
+                    auto it = response_cache.find(response_path);
+                    if (it == response_cache.end()) {
+                        ::gz::common::Image image;
+                        CachedResponseTexture loaded;
+                        const bool dimensions_fit =
+                            image.Load(response_path) == 0 && image.Valid() &&
+                            image.Width() <= static_cast<unsigned int>(
+                                std::numeric_limits<int>::max()) &&
+                            image.Height() <= static_cast<unsigned int>(
+                                std::numeric_limits<int>::max());
+                        if (dimensions_fit) {
+                            const auto rgba = image.RGBAData();
+                            loaded.width = static_cast<int>(image.Width());
+                            loaded.height = static_cast<int>(image.Height());
+                            loaded.offset = scene->addResponseTexture(
+                                loaded.width, loaded.height, rgba);
+                        }
+                        if (loaded.offset < 0) {
+                            RCLCPP_WARN(kLogger,
+                                "raycast: cannot load RGBA response map '%s'; "
+                                "using scalar material response",
+                                response_path.c_str());
+                        }
+                        it = response_cache.emplace(response_path,
+                                                    loaded).first;
+                    }
+                    response = it->second;
+                    if (response.offset >= 0) ++response_instances;
+                }
+            }
+
             scene->addInstance(type, size, retro, root_node, spec, transmit,
-                               lr != nullptr);
+                               lr != nullptr, response.offset,
+                               response.width, response.height);
             refs.push_back(ref);
             return true;
         });
@@ -252,10 +353,14 @@ void RaycastMirror::rebuildScene(
     }
 
     RCLCPP_INFO(kLogger,
-        "raycast scene mirror v%lu: %d instances (%d meshes, %d visuals "
-        "skipped) from %zu visuals",
+        "raycast scene mirror v%lu: %d instances (%d meshes, %d response "
+        "maps on %d instances, %d visuals skipped) from %zu visuals",
         static_cast<unsigned long>(scene_version_),
-        scene_->instanceCount(), scene_->meshCount(), skipped,
+        scene_->instanceCount(), scene_->meshCount(),
+        static_cast<int>(std::count_if(
+            response_cache.begin(), response_cache.end(),
+            [](const auto & item) { return item.second.offset >= 0; })),
+        response_instances, skipped,
         visual_count);
 }
 

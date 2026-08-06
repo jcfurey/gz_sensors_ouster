@@ -206,9 +206,13 @@ walk segments), with the same continuous→discrete conversions:
 
 ### 8. Specular and transparent surfaces (raycast mode)
 
-**Model:** per-visual material `(kd, ks, τ)` mirrored from SDF
-(`<laser_retro>`, material `<specular>` mean RGB, `<transparency>`); the
-monostatic apparent reflectance is
+**Model:** per-visual material `(kd, knir, ks, τ)` mirrored from SDF. The
+scalar fallback uses `<laser_retro>`, material `<specular>` mean RGB, and
+`<transparency>` (with `knir = kd`). When a PBR albedo named `name.png` has an
+aligned RGBA8 `name.ouster.png` companion, bilinear UV sampling supplies
+`R=kd`, `G=knir`, `B=ks`, and `A=opacity` (`τ=1−A`) per hit. Analytic
+primitives use deterministic UV mappings and triangle meshes use barycentric
+interpolation of authored vertex UVs. The monostatic apparent reflectance is
 
 ```
 ρ_app = kd·cos(α) + ks·max(0, cos 2α)⁸

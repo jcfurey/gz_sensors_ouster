@@ -105,9 +105,11 @@ public:
         maybeFree(u_beam_az_);
         maybeFree(u_rc_insts_);
         maybeFree(u_rc_verts_);
+        maybeFree(u_rc_texcoords_);
         maybeFree(u_rc_tris_);
         maybeFree(u_rc_order_);
         maybeFree(u_rc_nodes_);
+        maybeFree(u_rc_response_);
         maybeFree(u_rc_xforms_);
         maybeFree(u_tlas_nodes_);
         maybeFree(u_tlas_order_);
@@ -257,9 +259,11 @@ public:
 
         const rc::RcInstance * insts = u_rc_insts_;
         const float * verts = u_rc_verts_;
+        const float * texcoords = u_rc_texcoords_;
         const int * tris = u_rc_tris_;
         const int * order = u_rc_order_;
         const rc::MeshBvhNode * nodes = u_rc_nodes_;
+        const uint8_t * response_texels = u_rc_response_;
         const rc::InstanceXform * xf = u_rc_xforms_;
         const float * alt = u_beam_alt_;
         const float * az = u_beam_az_;
@@ -285,7 +289,8 @@ public:
             [=](sycl::id<1> it) {
                 const int idx = static_cast<int>(it[0]);
                 float range, retro, nirv;
-                rc::rcCastOneRay(insts, n_inst, verts, tris, order, nodes,
+                rc::rcCastOneRay(insts, n_inst, verts, texcoords,
+                                 tris, order, nodes, response_texels,
                                  xf, alt, az, pose.sr, pose.st, sp_copy,
                                  idx, kInf, range, retro, cols_r, cols_t,
                                  d_nir ? &nirv : nullptr,
@@ -326,9 +331,13 @@ private:
         };
         upload(u_rc_insts_, rc_insts_cap_, sv.instances, sv.n_instances);
         upload(u_rc_verts_, rc_verts_cap_, sv.verts, sv.n_vert_floats);
+        upload(u_rc_texcoords_, rc_texcoords_cap_, sv.texcoords,
+               sv.n_texcoord_floats);
         upload(u_rc_tris_, rc_tris_cap_, sv.tris, sv.n_tri_ints);
         upload(u_rc_order_, rc_order_cap_, sv.order, sv.n_order);
         upload(u_rc_nodes_, rc_nodes_cap_, sv.nodes, sv.n_nodes);
+        upload(u_rc_response_, rc_response_cap_, sv.response_texels,
+               sv.n_response_bytes);
         if (rc_xforms_cap_ < sv.n_instances) {
             allocShared(u_rc_xforms_,
                         static_cast<size_t>(sv.n_instances));
@@ -616,9 +625,11 @@ private:
     int beam_src_h_ = 0;
     rc::RcInstance *    u_rc_insts_  = nullptr;
     float *             u_rc_verts_  = nullptr;
+    float *             u_rc_texcoords_ = nullptr;
     int *               u_rc_tris_   = nullptr;
     int *               u_rc_order_  = nullptr;
     rc::MeshBvhNode *   u_rc_nodes_  = nullptr;
+    uint8_t *           u_rc_response_ = nullptr;
     rc::InstanceXform * u_rc_xforms_ = nullptr;
     // Top-level BVH: host build buffer (capacity reused across scans) plus
     // its shared-USM mirrors. Caps are in ELEMENTS (allocShared is typed).
@@ -629,9 +640,11 @@ private:
     int tlas_order_cap_ = 0;
     int rc_insts_cap_ = 0;
     int rc_verts_cap_ = 0;
+    int rc_texcoords_cap_ = 0;
     int rc_tris_cap_ = 0;
     int rc_order_cap_ = 0;
     int rc_nodes_cap_ = 0;
+    int rc_response_cap_ = 0;
     int rc_xforms_cap_ = 0;
     uint64_t rc_scene_version_ = 0;
     bool rc_scene_version_valid_ = false;

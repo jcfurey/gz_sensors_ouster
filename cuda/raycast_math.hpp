@@ -50,6 +50,19 @@ struct RcInstance {
     float transmit = 0.0f;  ///< transmittance τ ∈ [0,1] (visual transparency)
     int has_retro = 0;      ///< 1 when laser_retro was explicitly authored
     int root_node = -1;     ///< kMesh: global BVH root node index
+    /// Optional packed RGBA8 response map in SceneView::response_texels.
+    /// R=865 nm diffuse reflectance, G=passive NIR albedo, B=specular
+    /// coefficient, A=opacity. Negative offset means scalar SDF material.
+    int response_offset = -1;
+    int response_width = 0;
+    int response_height = 0;
+};
+
+struct RcMaterialSample {
+    float diffuse = 0.0f;
+    float nir = 0.0f;
+    float spec = 0.0f;
+    float transmit = 0.0f;
 };
 
 /// Per-scan rigid transform of one instance.
@@ -515,6 +528,169 @@ GZ_OUSTER_HD inline RcV3 rcSurfaceNormalLocal(const RcInstance & inst,
     return n;
 }
 
+/// Compute a conventional bottom-left-origin UV coordinate at a known local
+/// hit. Primitive mappings are deterministic and repeatable; triangle meshes
+/// interpolate their authored vertex UVs using barycentric coordinates.
+GZ_OUSTER_HD inline bool rcHitUv(const RcInstance & inst,
+    const float * verts, const int * tris, const float * texcoords,
+    RcV3 p, int hit_tri, float & u, float & v)
+{
+    switch (inst.type) {
+        case GeomType::kPlane: {
+            const float hx = rpmath::gzm::fmax_(inst.size[0], 1.0e-12f);
+            const float hy = rpmath::gzm::fmax_(inst.size[1], 1.0e-12f);
+            u = 0.5f + p.x / (2.0f * hx);
+            v = 0.5f + p.y / (2.0f * hy);
+            return true;
+        }
+        case GeomType::kBox: {
+            const float hx = rpmath::gzm::fmax_(inst.size[0], 1.0e-12f);
+            const float hy = rpmath::gzm::fmax_(inst.size[1], 1.0e-12f);
+            const float hz = rpmath::gzm::fmax_(inst.size[2], 1.0e-12f);
+            const float rx = rpmath::gzm::fabs_(p.x) / hx;
+            const float ry = rpmath::gzm::fabs_(p.y) / hy;
+            const float rz = rpmath::gzm::fabs_(p.z) / hz;
+            if (rx >= ry && rx >= rz) {
+                const float s = (p.x >= 0.0f) ? -1.0f : 1.0f;
+                u = 0.5f + s * p.y / (2.0f * hy);
+                v = 0.5f + p.z / (2.0f * hz);
+            } else if (ry >= rz) {
+                const float s = (p.y >= 0.0f) ? 1.0f : -1.0f;
+                u = 0.5f + s * p.x / (2.0f * hx);
+                v = 0.5f + p.z / (2.0f * hz);
+            } else {
+                u = 0.5f + p.x / (2.0f * hx);
+                const float s = (p.z >= 0.0f) ? 1.0f : -1.0f;
+                v = 0.5f + s * p.y / (2.0f * hy);
+            }
+            return true;
+        }
+        case GeomType::kSphere: {
+            const float r = rpmath::gzm::sqrt_(rcDot(p, p));
+            if (r <= 1.0e-12f) return false;
+            const float z = rpmath::gzm::fmin_(
+                rpmath::gzm::fmax_(p.z / r, -1.0f), 1.0f);
+            u = 0.5f + rpmath::gzm::atan2_(p.y, p.x) /
+                       (2.0f * rpmath::kPi);
+            v = 0.5f + rpmath::gzm::asin_(z) / rpmath::kPi;
+            return true;
+        }
+        case GeomType::kCylinder: {
+            const float radius = rpmath::gzm::fmax_(inst.size[0], 1.0e-12f);
+            const float half_len = rpmath::gzm::fmax_(inst.size[1], 1.0e-12f);
+            if (rpmath::gzm::fabs_(p.z) >= half_len * (1.0f - 1.0e-4f)) {
+                u = 0.5f + p.x / (2.0f * radius);
+                const float s = (p.z >= 0.0f) ? 1.0f : -1.0f;
+                v = 0.5f + s * p.y / (2.0f * radius);
+            } else {
+                u = 0.5f + rpmath::gzm::atan2_(p.y, p.x) /
+                           (2.0f * rpmath::kPi);
+                v = 0.5f + p.z / (2.0f * half_len);
+            }
+            return true;
+        }
+        case GeomType::kMesh: {
+            if (hit_tri < 0 || verts == nullptr || tris == nullptr ||
+                texcoords == nullptr) return false;
+            const int * idx = &tris[3 * hit_tri];
+            const RcV3 p0{verts[3 * idx[0]], verts[3 * idx[0] + 1],
+                          verts[3 * idx[0] + 2]};
+            const RcV3 p1{verts[3 * idx[1]], verts[3 * idx[1] + 1],
+                          verts[3 * idx[1] + 2]};
+            const RcV3 p2{verts[3 * idx[2]], verts[3 * idx[2] + 1],
+                          verts[3 * idx[2] + 2]};
+            const RcV3 e0 = rcSub(p1, p0);
+            const RcV3 e1 = rcSub(p2, p0);
+            const RcV3 ep = rcSub(p, p0);
+            const float d00 = rcDot(e0, e0);
+            const float d01 = rcDot(e0, e1);
+            const float d11 = rcDot(e1, e1);
+            const float d20 = rcDot(ep, e0);
+            const float d21 = rcDot(ep, e1);
+            const float denom = d00 * d11 - d01 * d01;
+            if (rpmath::gzm::fabs_(denom) <= 1.0e-20f) return false;
+            const float b1 = (d11 * d20 - d01 * d21) / denom;
+            const float b2 = (d00 * d21 - d01 * d20) / denom;
+            const float b0 = 1.0f - b1 - b2;
+            u = b0 * texcoords[2 * idx[0]] +
+                b1 * texcoords[2 * idx[1]] +
+                b2 * texcoords[2 * idx[2]];
+            v = b0 * texcoords[2 * idx[0] + 1] +
+                b1 * texcoords[2 * idx[1] + 1] +
+                b2 * texcoords[2 * idx[2] + 1];
+            return true;
+        }
+    }
+    return false;
+}
+
+GZ_OUSTER_HD inline int rcWrapIndex(int i, int n)
+{
+    const int r = i % n;
+    return (r < 0) ? r + n : r;
+}
+
+GZ_OUSTER_HD inline float rcResponseChannel(const uint8_t * texels,
+    const RcInstance & inst, int x, int y, int channel)
+{
+    x = rcWrapIndex(x, inst.response_width);
+    y = rcWrapIndex(y, inst.response_height);
+    const int pixel = y * inst.response_width + x;
+    return static_cast<float>(
+        texels[inst.response_offset + 4 * pixel + channel]) / 255.0f;
+}
+
+/// Bilinear, repeating response-map sample. UV is bottom-left-origin while
+/// image rows are top-down, hence the vertical flip before addressing texels.
+GZ_OUSTER_HD inline RcMaterialSample rcSampleResponse(
+    const uint8_t * texels, const RcInstance & inst, float u, float v)
+{
+    RcMaterialSample out;
+    const float uw = u - rpmath::gzm::floor_(u);
+    const float vw = v - rpmath::gzm::floor_(v);
+    const float x = uw * static_cast<float>(inst.response_width) - 0.5f;
+    const float y = (1.0f - vw) *
+                    static_cast<float>(inst.response_height) - 0.5f;
+    const int x0 = static_cast<int>(rpmath::gzm::floor_(x));
+    const int y0 = static_cast<int>(rpmath::gzm::floor_(y));
+    const float ax = x - static_cast<float>(x0);
+    const float ay = y - static_cast<float>(y0);
+    float channels[4];
+    for (int c = 0; c < 4; ++c) {
+        const float a00 = rcResponseChannel(texels, inst, x0, y0, c);
+        const float a10 = rcResponseChannel(texels, inst, x0 + 1, y0, c);
+        const float a01 = rcResponseChannel(texels, inst, x0, y0 + 1, c);
+        const float a11 = rcResponseChannel(texels, inst, x0 + 1, y0 + 1, c);
+        const float top = a00 * (1.0f - ax) + a10 * ax;
+        const float bot = a01 * (1.0f - ax) + a11 * ax;
+        channels[c] = top * (1.0f - ay) + bot * ay;
+    }
+    out.diffuse = channels[0];
+    out.nir = channels[1];
+    out.spec = channels[2];
+    out.transmit = 1.0f - channels[3];
+    return out;
+}
+
+GZ_OUSTER_HD inline RcMaterialSample rcMaterialAtHit(
+    const RcInstance & inst, const float * verts, const int * tris,
+    const float * texcoords, const uint8_t * response_texels,
+    RcV3 p, int hit_tri, float fallback_retro)
+{
+    RcMaterialSample out;
+    out.diffuse = inst.has_retro ? inst.retro : fallback_retro;
+    out.nir = out.diffuse;
+    out.spec = inst.spec;
+    out.transmit = inst.transmit;
+    if (response_texels == nullptr || inst.response_offset < 0 ||
+        inst.response_width <= 0 || inst.response_height <= 0) {
+        return out;
+    }
+    float u = 0.0f, v = 0.0f;
+    if (!rcHitUv(inst, verts, tris, texcoords, p, hit_tri, u, v)) return out;
+    return rcSampleResponse(response_texels, inst, u, v);
+}
+
 /// cos of the incidence angle between the (unit) ray direction and the
 /// surface normal at a known hit, computed in the instance-local frame.
 /// Clamped to [kRcMinCosInc, 1].
@@ -550,22 +726,28 @@ GZ_OUSTER_HD inline float rcCosIncidence(const RcInstance & inst,
 /// the missing-points signature of glossy black vehicles. n = 8 is a
 /// fixed lobe width (≈ half-power at ~9° off normal), chosen qualitative:
 /// real lobe widths vary per material and are not exposed by SDF.
-GZ_OUSTER_HD inline float rcApparentReflectance(const RcInstance & inst,
-                                                float cos_inc,
-                                                float fallback_retro)
+GZ_OUSTER_HD inline float rcApparentReflectance(float diffuse, float spec,
+                                                float cos_inc)
 {
-    const float diffuse = inst.has_retro ? inst.retro : fallback_retro;
     float rho = diffuse * cos_inc;
-    if (inst.spec > 0.0f) {
+    if (spec > 0.0f) {
         const float c2 = 2.0f * cos_inc * cos_inc - 1.0f;  // cos(2α)
         if (c2 > 0.0f) {
             float lobe = c2 * c2;   // cos(2α)²
             lobe *= lobe;           // ⁴
             lobe *= lobe;           // ⁸
-            rho += inst.spec * lobe;
+            rho += spec * lobe;
         }
     }
     return rho;
+}
+
+GZ_OUSTER_HD inline float rcApparentReflectance(const RcInstance & inst,
+                                                float cos_inc,
+                                                float fallback_retro)
+{
+    const float diffuse = inst.has_retro ? inst.retro : fallback_retro;
+    return rcApparentReflectance(diffuse, inst.spec, cos_inc);
 }
 
 /// Nearest hit of one ray over all instances. Returns the hit parameter
@@ -656,15 +838,23 @@ GZ_OUSTER_HD inline float rcNearestHit(
 /// recomputed from the world-frame ray).
 GZ_OUSTER_HD inline float rcHitReflectance(
     const RcInstance * instances, const InstanceXform * xforms,
-    const float * verts, const int * tris,
-    RcV3 o, RcV3 d, float t, int inst, int tri, float fallback_retro)
+    const float * verts, const int * tris, const float * texcoords,
+    const uint8_t * response_texels, RcV3 o, RcV3 d, float t,
+    int inst, int tri, float fallback_retro,
+    RcMaterialSample * material_out = nullptr)
 {
     const InstanceXform & x = xforms[inst];
     const RcV3 o_l = rcXformPoint(x.r, x.t, o);
     const RcV3 d_l = rcRotate(x.r, d);
+    const RcV3 p_l{o_l.x + t * d_l.x, o_l.y + t * d_l.y,
+                   o_l.z + t * d_l.z};
+    const RcMaterialSample material = rcMaterialAtHit(
+        instances[inst], verts, tris, texcoords, response_texels,
+        p_l, tri, fallback_retro);
+    if (material_out) *material_out = material;
     const float cos_inc =
         rcCosIncidence(instances[inst], verts, tris, o_l, d_l, t, tri);
-    return rcApparentReflectance(instances[inst], cos_inc, fallback_retro);
+    return rcApparentReflectance(material.diffuse, material.spec, cos_inc);
 }
 
 // ── Participating media: smoke / dust / fog obscuration ─────────────────────
@@ -1177,8 +1367,9 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
 /// distance travelled — see docs/MODEL_REFERENCES.md §9).
 GZ_OUSTER_HD inline void rcCastOneRay(
     const RcInstance * instances, int n_instances,
-    const float * verts, const int * tris, const int * order,
-    const MeshBvhNode * nodes,
+    const float * verts, const float * texcoords,
+    const int * tris, const int * order, const MeshBvhNode * nodes,
+    const uint8_t * response_texels,
     const InstanceXform * xforms,
     const float * beam_alt_deg, const float * beam_az_deg,
     const float * sensor_r, const float * sensor_t,
@@ -1262,12 +1453,14 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     // noise weighting all respond to oblique/glossy surfaces the way a real
     // return does. A missing laser_retro is resolved here to fallback_retro;
     // an explicitly authored zero remains zero.
-    const float tau =
-        rpmath::gzm::fmin_(rpmath::gzm::fmax_(instances[inst0].transmit, 0.0f),
-                           1.0f);
+    RcMaterialSample material0;
     float rho = rcHitReflectance(instances, xforms, verts, tris,
-                                 o, d, t0, inst0, tri0, sp.fallback_retro) *
-                (1.0f - tau);
+                                 texcoords, response_texels,
+                                 o, d, t0, inst0, tri0, sp.fallback_retro,
+                                 &material0);
+    const float tau = rpmath::gzm::fmin_(
+        rpmath::gzm::fmax_(material0.transmit, 0.0f), 1.0f);
+    rho *= (1.0f - tau);
     float range = t0 + n_off;
 
     // Transparent surface (glass): continue one segment behind it. The
@@ -1289,7 +1482,9 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                       tlas_nodes, tlas_order, n_tlas_nodes);
         if (inst1 >= 0) {
             const float rho1 = rcHitReflectance(instances, xforms, verts,
-                                                tris, p, d, t1, inst1, tri1,
+                                                tris, texcoords,
+                                                response_texels,
+                                                p, d, t1, inst1, tri1,
                                                 sp.fallback_retro) *
                                tau * tau;
             const float range1 = seg_start + t1 + n_off;
@@ -1308,7 +1503,7 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     // BEHIND the mirror along the original beam at the total path length
     // t0 + t2. The pulse interacts with the mirror twice, hence the
     // ((1−τ)·ks)² weight (glass ghosts are weak, true mirrors strong).
-    if (instances[inst0].spec >= kRcMirrorMin) {
+    if (material0.spec >= kRcMirrorMin) {
         const InstanceXform & x0 = xforms[inst0];
         const RcV3 o_l = rcXformPoint(x0.r, x0.t, o);
         const RcV3 d_l = rcRotate(x0.r, d);
@@ -1340,9 +1535,10 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                           tlas_nodes, tlas_order,
                                           n_tlas_nodes);
             if (inst2 >= 0) {
-                const float mirror_eff = (1.0f - tau) * instances[inst0].spec;
+                const float mirror_eff = (1.0f - tau) * material0.spec;
                 const float rho2 =
                     rcHitReflectance(instances, xforms, verts, tris,
+                                     texcoords, response_texels,
                                      g0, refl, t2, inst2, tri2,
                                      sp.fallback_retro) *
                     mirror_eff * mirror_eff;
@@ -1384,9 +1580,10 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                     n_w.z * sp.sun_dir[2]);
             illum += sp.sun_diffuse * rpmath::gzm::fmax_(lambert, 0.0f);
         }
-        const float nir_albedo = instances[w_inst].has_retro
-            ? instances[w_inst].retro : sp.fallback_retro;
-        nir_val = nir_albedo * illum;
+        const RcMaterialSample winning_material = rcMaterialAtHit(
+            instances[w_inst], verts, tris, texcoords, response_texels,
+            p_l, w_tri, sp.fallback_retro);
+        nir_val = winning_material.nir * illum;
     }
 
     // Smoke / dust / fog along the path: extinction of this return, a

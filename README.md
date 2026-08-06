@@ -127,6 +127,37 @@ Passing `ray_mode:=panels` loads `ouster_demo_panels.sdf` and derives
 render-capable host (ogre2/GPU); on broken-render hosts use the default
 `ray_mode:=raycast` instead.
 
+### Spatial Ouster response textures (raycast mode)
+
+SDF has no standard LiDAR-response texture field. In `raycast` mode this
+plugin therefore looks beside a visual's PBR albedo map for an optional
+aligned companion named `<stem>.ouster<extension>`:
+
+```text
+brick_graffiti.png          visible PBR albedo
+brick_graffiti.ouster.png   LiDAR response, same UV layout and dimensions
+```
+
+The companion must be RGBA8. Its channels are physical response inputs, not a
+false-color display:
+
+| Channel | Meaning | Range |
+|---------|---------|-------|
+| R | absolute diffuse reflectance at the Ouster's 865 nm laser wavelength (`kd`) | 0–1 |
+| G | passive near-IR albedo used by `NEAR_IR` | 0–1 |
+| B | monostatic specular coefficient (`ks`) | 0–1 |
+| A | opacity; transmittance is `1 − A` | 0–1 |
+
+Sampling is bilinear and repeating. Analytic primitives get deterministic UVs;
+triangle meshes use their authored vertex UVs. With no companion, the existing
+scalar mapping remains unchanged: `<laser_retro>`, material `<specular>`, and
+visual `<transparency>`. Response textures affect return strength and channel
+contrast; range relief still has to be modeled as geometry. Panels mode has no
+material-ID/UV return buffer and continues to use its scalar/rendered fallback.
+
+The bundled `brick_graffiti.png` / `brick_graffiti.ouster.png` pair is used by
+the TurtleBot warehouse, hills, and sewer worlds.
+
 ## Workspace setup
 
 `ouster-ros` is not available at the required API version via apt, so both
@@ -279,6 +310,9 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `worlds/ouster_demo.sdf` | Demo world (physics + altimeter + IMU systems, ground + obstacles). GPU-free: raycast mode, no rendering Sensors system |
 | `worlds/ouster_demo_panels.sdf` | Panels-mode counterpart of `ouster_demo.sdf` (loads gz-sim-sensors-system/ogre2). Selected automatically by example launches when `ray_mode:=panels` |
 | `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
+| `worlds/turtlebot3_ouster_warehouse.sdf` | Driveable warehouse with shelving, crates, retro signage, and response-textured masonry |
+| `worlds/turtlebot3_ouster_hills.sdf` | Rolling mesh terrain, sun-driven NEAR_IR, boulders/trees, and response-textured buildings |
+| `worlds/turtlebot3_ouster_sewer.sdf` | Segmented sewer conduit with masonry response maps, wet channels, glossy water, and retro markers |
 | `worlds/ouster_showcase.sdf` | **Guided tour of the sensor model** — labelled zones for range, reflectance, retroreflectors, calibrated detection rolloff, specular/mirror ghosts, glass, curvature, sun/NEAR_IR and a moving beacon. Raycast (GPU-free), built only from primitives so it needs no downloads. See [Showcase world](#showcase-world) |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
@@ -293,6 +327,8 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py
 # panels mode:   ros2 launch gz_sensors_ouster ouster_standalone.launch.py ray_mode:=panels
 # Rev8 physics:  ros2 launch gz_sensors_ouster ouster_standalone.launch.py hardware_revision:=rev08
 # WSL/headless:  ros2 launch gz_sensors_ouster ouster_standalone.launch.py headless:=true
+# TurtleBot:     ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py world:=warehouse
+# Other scenes:  ... world:=hills   or   ... world:=sewer
 ```
 
 Each launch starts Gazebo with the demo world, runs
@@ -911,7 +947,7 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
 | `test_imu_noise` | IMU white-noise variance vs. density²/dt, bias drift growth, RNG-draw gating, determinism under fixed seed |
 | `test_dispatch` | Backend selection: `GZ_OUSTER_BACKEND` override, auto fallback to CPU, `backendName()`/`usesCpuFallback()`, and `processRaw()` end-to-end through the `RayProcessor` wrapper |
-| `test_raycast` | Full raycast mode: sphere/box/cylinder/plane/mesh intersectors, BVH vs brute-force equivalence on a random triangle soup, beam-origin parallax (XYZ-LUT invariant), retro of nearest hit, near-clip behaviour, zero-error uniform shell, and fused-vs-two-stage backend equivalence |
+| `test_raycast` | Full raycast mode: sphere/box/cylinder/plane/mesh intersectors, BVH vs brute-force equivalence, beam-origin parallax, response-map UV/RGBA semantics, retro of nearest hit, near-clip behaviour, zero-error uniform shell, and fused-vs-two-stage backend equivalence |
 | `test_frame_exchange` | Lock-bounded newest-frame handoff, typed channel integrity, acquisition metadata, drop accounting, and cross-thread stress |
 | `test_scan_timing` / `test_sim_time_scheduler` / `test_packet_pacing` | Rolling-shutter column timestamps, exact IMU deadlines, non-divisible physics cadence, rewind handling, bounded catch-up, and RTF-aware packet pacing |
 | `test_lifecycle` | Plugin construct + destruct without ever calling `Configure` (catches member-init regressions; build-time vtable check against the vendored gz-sim) |
@@ -981,6 +1017,54 @@ previous one. Rare under the lidar_hz throttle; sustained drops mean
 PostUpdate is starved (sim-time stall, post-pause burst, or the GPU
 pipeline can't keep up with the configured rate). The cumulative
 counter is per-sensor and lifetime-of-process.
+
+Warnings from downstream `ouster_ros` such as
+
+```text
+[os_cloud] [WARN] [lidar_packet_hander]: lidar_scans full, DROPPING PACKET
+```
+
+mean scan packets are arriving faster than that consumer completes scans. A
+common simulation-specific cause is a world whose physics step is authored but
+whose update rate is not, allowing sim time—and packet production—to run much
+faster than wall time. Pace a custom world explicitly:
+
+```xml
+<max_step_size>0.004</max_step_size>
+<real_time_factor>1.0</real_time_factor>
+<real_time_update_rate>250</real_time_update_rate>
+```
+
+In general, `max_step_size × real_time_update_rate` should equal the requested
+`real_time_factor`. All bundled worlds enforce that invariant. If the world is
+already at 1× real time, the consumer is compute-bound: disable the unused
+image decoder with `images:=false` or lower `lidar_hz`; enlarging its queue only
+delays the same overload.
+
+### Simulation time and bag playback rate
+
+Acquisition time and delivery time are intentionally separate:
+
+- Gazebo `info.simTime` schedules LiDAR/IMU captures and stamps native images,
+  IMU messages, scan ends, and every packet column.
+- A monotonic wall clock only spreads an already-stamped packet batch. Its
+  drain span follows the observed producer interval, so live simulation at a
+  non-1× real-time factor does not burst each scan at once.
+- Pause freezes delivery; resume shifts pending deadlines instead of catching
+  up in a burst. A world reset increments a time epoch and cancels pre-reset
+  packets so timestamps from opposite sides of a rewind cannot form one scan.
+
+The example `os_cloud` and `os_image` nodes use `use_sim_time:=true` and
+`timestamp_mode:=TIME_FROM_INTERNAL_OSC`. They also pre-seed each decoder with
+the same metadata file used by the simulated sensor. This makes the packet
+subscription ready before playback begins instead of racing the bag's one-shot
+metadata message at high rates; the live metadata topic remains subscribed for
+updates. Consequently, `ros2 bag play --clock --rate 0.5` and `--rate 2.0`
+change wall-clock delivery speed but preserve the recorded acquisition stamps
+in clouds and images. Record `/clock`, `metadata`, and `lidar_packets` together.
+At replay rates faster than the machine can decode, `ouster_ros` can still
+report `lidar_scans full`; replay at a lower rate or omit `os_image` when only
+clouds are needed.
 
 ### One-shot ERROR: Sensors system not rendering
 

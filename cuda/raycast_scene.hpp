@@ -35,12 +35,19 @@ struct SceneView {
     int n_instances = 0;
     const float * verts = nullptr;
     int n_vert_floats = 0;
+    /// Mesh UVs, two floats per vertex, globally rebased exactly like verts.
+    const float * texcoords = nullptr;
+    int n_texcoord_floats = 0;
     const int * tris = nullptr;
     int n_tri_ints = 0;
     const int * order = nullptr;
     int n_order = 0;
     const MeshBvhNode * nodes = nullptr;
     int n_nodes = 0;
+    /// Concatenated RGBA8 Ouster response maps. RcInstance::response_offset
+    /// addresses this byte array; maps are immutable with the scene.
+    const uint8_t * response_texels = nullptr;
+    int n_response_bytes = 0;
 };
 
 /// Top-level acceleration structure: a BVH over the instances' per-scan world
@@ -82,7 +89,13 @@ public:
     /// baked in) and build its BVH into the global arrays. Returns the
     /// global root-node index, or -1 for an empty/degenerate mesh.
     int addMesh(const std::vector<float> & verts,
-                const std::vector<int> & tris);
+                const std::vector<int> & tris,
+                const std::vector<float> & texcoords = {});
+
+    /// Append one tightly-packed RGBA8 response map. Returns its byte offset
+    /// in SceneView::response_texels, or -1 for invalid input.
+    int addResponseTexture(int width, int height,
+                           const std::vector<uint8_t> & rgba);
 
     /// Append an instance. For kMesh pass the root node from addMesh().
     /// `retro` is the diffuse reflectance (laser_retro), `spec` the specular
@@ -93,7 +106,9 @@ public:
     /// Returns the instance index.
     int addInstance(GeomType type, const float size[3], float retro,
                     int root_node = -1, float spec = 0.0f,
-                    float transmit = 0.0f, bool has_retro = true);
+                    float transmit = 0.0f, bool has_retro = true,
+                    int response_offset = -1, int response_width = 0,
+                    int response_height = 0);
 
     SceneView view() const;
 
@@ -120,9 +135,11 @@ private:
     std::vector<RcInstance> instances_;
     std::vector<LocalBounds> bounds_;     // parallel to instances_
     std::vector<float> verts_;
+    std::vector<float> texcoords_;
     std::vector<int> tris_;
     std::vector<int> order_;
     std::vector<MeshBvhNode> nodes_;
+    std::vector<uint8_t> response_texels_;
     // Per-root local AABB of each added mesh, keyed by root node index.
     int mesh_count_ = 0;
 };

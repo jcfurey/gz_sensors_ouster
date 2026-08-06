@@ -68,9 +68,41 @@ def test_no_anchor_type_launch_arg(name):
     assert "DeclareLaunchArgument('anchor_type'" not in (LAUNCHES / name).read_text()
 
 
+def test_turtlebot_launch_exposes_all_raycast_world_profiles():
+    src = (LAUNCHES / 'turtlebot3_ouster.launch.py').read_text()
+    assert "DeclareLaunchArgument('world'" in src
+    for profile, filename in {
+            'arena': 'turtlebot3_ouster_headless.sdf',
+            'warehouse': 'turtlebot3_ouster_warehouse.sdf',
+            'hills': 'turtlebot3_ouster_hills.sdf',
+            'sewer': 'turtlebot3_ouster_sewer.sdf',
+    }.items():
+        assert profile in src
+        assert filename in src
+
+
 @pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
 def test_ouster_consumers_preserve_packet_acquisition_time(name):
     """Cloud/image stamps must be invariant to executor and playback rate."""
     src = (LAUNCHES / name).read_text()
     assert 'TIME_FROM_ROS_TIME' not in src
     assert 'TIME_FROM_INTERNAL_OSC' in src
+
+
+@pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
+def test_ouster_consumers_follow_sim_clock_for_live_and_bag_playback(name):
+    """Playback rate changes delivery, never the recorded acquisition stamps."""
+    src = (LAUNCHES / name).read_text()
+    assert "'use_sim_time': True" in src
+    if '/clock@rosgraph_msgs/msg/Clock' not in src:
+        assert 'ouster_bridge.yaml' in src
+        bridge = (LAUNCHES.parent / 'config' / 'ouster_bridge.yaml').read_text()
+        assert 'ros_topic_name: "/clock"' in bridge
+        assert 'gz_topic_name: "/clock"' in bridge
+
+
+@pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
+def test_ouster_consumers_preseed_metadata_before_fast_bag_playback(name):
+    """Avoid losing early packets while a one-shot metadata callback starts."""
+    src = (LAUNCHES / name).read_text()
+    assert src.count("'metadata': metadata") >= 2

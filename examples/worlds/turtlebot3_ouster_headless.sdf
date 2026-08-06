@@ -28,6 +28,7 @@
     <physics name="default" type="ignored">
       <max_step_size>0.004</max_step_size>
       <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
     </physics>
 
     <plugin filename="gz-sim-physics-system"
@@ -74,7 +75,7 @@
       <link name="link">
         <collision name="c"><geometry><box><size>10.2 0.2 1</size></box></geometry></collision>
         <visual name="v"><geometry><box><size>10.2 0.2 1</size></box></geometry>
-          <material><diffuse>0.6 0.6 0.65 1</diffuse></material></visual>
+          <material><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.85</roughness></metal></pbr></material></visual>
       </link>
     </model>
     <model name="wall_south">
@@ -92,7 +93,7 @@
       <link name="link">
         <collision name="c"><geometry><box><size>0.2 10.2 1</size></box></geometry></collision>
         <visual name="v"><geometry><box><size>0.2 10.2 1</size></box></geometry>
-          <material><diffuse>0.6 0.6 0.65 1</diffuse></material></visual>
+          <material><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.85</roughness></metal></pbr></material></visual>
       </link>
     </model>
     <model name="wall_west">

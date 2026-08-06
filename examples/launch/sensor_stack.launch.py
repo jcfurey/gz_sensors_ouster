@@ -49,7 +49,7 @@ def _metadata_path(pkg_share, lidar_profile, modern_name):
     return PathJoinSubstitution([pkg_share, 'config', 'metadata', name])
 
 
-def _os_cloud(name):
+def _os_cloud(name, metadata):
     """ouster_ros os_cloud for one sensor: assemble lidar_packets into a
     PointCloud2 on /sensor/lidar/<name>/points, stamped in <name>/lidar_frame.
 
@@ -79,6 +79,10 @@ def _os_cloud(name):
         output='screen',
         parameters=[{
             'use_sim_time': True,
+            # Initialize the decoder and packet subscription before a fast bag
+            # can publish its first packet batch. The metadata topic remains
+            # subscribed for live updates.
+            'metadata': metadata,
             'proc_mask': 'PCL',  # plugin publishes /imu itself; cloud only
             'point_cloud_frame': name + '/lidar_frame',
             'sensor_frame': name + '/os_sensor',   # != point_cloud_frame → identity LUT
@@ -92,7 +96,7 @@ def _os_cloud(name):
     )
 
 
-def _os_image(name):
+def _os_image(name, metadata):
     """ouster_ros os_image for one sensor: decodes lidar_packets + metadata into
     the range/signal/reflec/nearir images + camera_info under
     /sensor/lidar/<name>/. The single image source in sim (the plugin's native
@@ -110,6 +114,7 @@ def _os_image(name):
         output='screen',
         parameters=[{
             'use_sim_time': True,
+            'metadata': metadata,
             'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
             'sensor_frame': name + '/lidar_frame',
         }],
@@ -232,13 +237,13 @@ def generate_launch_description():
         # One os_cloud per sensor → /sensor/lidar/{front,rear}/points, each
         # stamped in <name>/lidar_frame with the identity LUT (no housing
         # rotation); see _os_cloud for the frame rationale.
-        _os_cloud('front'),
-        _os_cloud('rear'),
+        _os_cloud('front', metadata_front),
+        _os_cloud('rear', metadata_rear),
 
         # os_image per sensor → the range/signal/reflec/nearir images the RViz
         # config displays (single image source in sim; plugin native pubs off).
-        _os_image('front'),
-        _os_image('rear'),
+        _os_image('front', metadata_front),
+        _os_image('rear', metadata_rear),
 
         # Explicit mount transforms base_link -> {front,rear}/lidar_frame,
         # matching the URDF (front xyz 0.45 0 0.35; rear xyz -0.45 0 0.35 yaw π).

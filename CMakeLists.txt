@@ -42,6 +42,7 @@ ament_auto_find_build_dependencies()
 # (Set GZ_RELAX_VERSION_MATCH=1 to let a vendor build a different Gazebo from
 # source — e.g. Jetty on Jazzy — matching just the major version.)
 find_package(gz-sim REQUIRED)
+find_package(gz-common REQUIRED COMPONENTS graphics)
 find_package(gz-rendering REQUIRED)
 find_package(gz-sensors REQUIRED COMPONENTS gpu_lidar)
 find_package(gz-plugin REQUIRED COMPONENTS register)
@@ -291,6 +292,7 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
 # needs no link interface anyway.
 target_link_libraries(${PROJECT_NAME}
   gz-sim::gz-sim
+  gz-common::graphics
   gz-rendering::gz-rendering
   gz-sensors::gz-sensors
   gz-plugin::register

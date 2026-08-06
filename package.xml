@@ -21,6 +21,7 @@
 
   <!-- Gazebo vendor packages: headers at build, shared libs at runtime -->
   <depend>gz_sim_vendor</depend>
+  <depend>gz_common_vendor</depend>
   <depend>gz_rendering_vendor</depend>
   <depend>gz_sensors_vendor</depend>
   <depend>gz_plugin_vendor</depend>

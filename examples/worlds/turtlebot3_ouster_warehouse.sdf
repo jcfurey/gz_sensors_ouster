@@ -1,0 +1,131 @@
+<?xml version="1.0"?>
+<!-- Download-free TurtleBot3 + Ouster warehouse. Use ray_mode:=raycast. -->
+<sdf version="1.9">
+  <world name="turtlebot3_warehouse">
+    <physics name="default" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-altimeter-system" name="gz::sim::systems::Altimeter"/>
+
+    <scene>
+      <ambient>0.35 0.35 0.38 1</ambient>
+      <background>0.55 0.62 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+    <light type="directional" name="skylight">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.85 0.82 0.76 1</diffuse>
+      <specular>0.25 0.25 0.25 1</specular>
+      <direction>-0.4 0.25 -1</direction>
+    </light>
+
+    <model name="concrete_floor">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>28 18 0.1</size></box></geometry></collision>
+        <visual name="visual">
+          <laser_retro>0.42</laser_retro>
+          <geometry><box><size>28 18 0.1</size></box></geometry>
+          <material><diffuse>0.38 0.4 0.42 1</diffuse><specular>0.06 0.06 0.06 1</specular></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- The north and east walls use brick_graffiti.png. In raycast mode its
+         aligned brick_graffiti.ouster.png companion controls active return,
+         passive NIR, specularity, and opacity per texel. -->
+    <model name="graffiti_wall_north">
+      <static>true</static><pose>0 9 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>28 0.25 3</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>28 0.25 3</size></box></geometry>
+          <material><pbr><metal>
+            <albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map>
+            <metalness>0</metalness><roughness>0.82</roughness>
+          </metal></pbr></material>
+        </visual>
+      </link>
+    </model>
+    <model name="graffiti_wall_east">
+      <static>true</static><pose>14 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.25 18 3</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.25 18 3</size></box></geometry>
+          <material><pbr><metal>
+            <albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map>
+            <metalness>0</metalness><roughness>0.82</roughness>
+          </metal></pbr></material>
+        </visual>
+      </link>
+    </model>
+    <model name="wall_south">
+      <static>true</static><pose>0 -9 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>28 0.25 3</size></box></geometry></collision>
+        <visual name="visual"><laser_retro>0.58</laser_retro><geometry><box><size>28 0.25 3</size></box></geometry>
+          <material><diffuse>0.56 0.58 0.62 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_west">
+      <static>true</static><pose>-14 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.25 18 3</size></box></geometry></collision>
+        <visual name="visual"><laser_retro>0.58</laser_retro><geometry><box><size>0.25 18 3</size></box></geometry>
+          <material><diffuse>0.56 0.58 0.62 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Two shelf rows leave a broad centre aisle around the spawn point. -->
+    <model name="rack_row_north">
+      <static>true</static><pose>1 4.4 0 0 0 0</pose>
+      <link name="link">
+        <collision name="upright_a"><pose>-7 0 1.2 0 0 0</pose><geometry><box><size>0.12 0.8 2.4</size></box></geometry></collision>
+        <visual name="upright_a_v"><pose>-7 0 1.2 0 0 0</pose><laser_retro>0.62</laser_retro><geometry><box><size>0.12 0.8 2.4</size></box></geometry><material><diffuse>0.12 0.24 0.55 1</diffuse><specular>0.3 0.3 0.3 1</specular></material></visual>
+        <collision name="upright_b"><pose>0 0 1.2 0 0 0</pose><geometry><box><size>0.12 0.8 2.4</size></box></geometry></collision>
+        <visual name="upright_b_v"><pose>0 0 1.2 0 0 0</pose><laser_retro>0.62</laser_retro><geometry><box><size>0.12 0.8 2.4</size></box></geometry><material><diffuse>0.12 0.24 0.55 1</diffuse><specular>0.3 0.3 0.3 1</specular></material></visual>
+        <collision name="upright_c"><pose>7 0 1.2 0 0 0</pose><geometry><box><size>0.12 0.8 2.4</size></box></geometry></collision>
+        <visual name="upright_c_v"><pose>7 0 1.2 0 0 0</pose><laser_retro>0.62</laser_retro><geometry><box><size>0.12 0.8 2.4</size></box></geometry><material><diffuse>0.12 0.24 0.55 1</diffuse><specular>0.3 0.3 0.3 1</specular></material></visual>
+        <collision name="shelf_low"><pose>0 0 0.55 0 0 0</pose><geometry><box><size>14.2 0.8 0.1</size></box></geometry></collision>
+        <visual name="shelf_low_v"><pose>0 0 0.55 0 0 0</pose><laser_retro>0.48</laser_retro><geometry><box><size>14.2 0.8 0.1</size></box></geometry><material><diffuse>0.25 0.3 0.36 1</diffuse></material></visual>
+        <collision name="shelf_high"><pose>0 0 1.65 0 0 0</pose><geometry><box><size>14.2 0.8 0.1</size></box></geometry></collision>
+        <visual name="shelf_high_v"><pose>0 0 1.65 0 0 0</pose><laser_retro>0.48</laser_retro><geometry><box><size>14.2 0.8 0.1</size></box></geometry><material><diffuse>0.25 0.3 0.36 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rack_row_south">
+      <static>true</static><pose>1 -4.4 0 0 0 0</pose>
+      <link name="link">
+        <collision name="upright_a"><pose>-7 0 1.2 0 0 0</pose><geometry><box><size>0.12 0.8 2.4</size></box></geometry></collision>
+        <visual name="upright_a_v"><pose>-7 0 1.2 0 0 0</pose><laser_retro>0.62</laser_retro><geometry><box><size>0.12 0.8 2.4</size></box></geometry><material><diffuse>0.12 0.24 0.55 1</diffuse><specular>0.3 0.3 0.3 1</specular></material></visual>
+        <collision name="upright_b"><pose>0 0 1.2 0 0 0</pose><geometry><box><size>0.12 0.8 2.4</size></box></geometry></collision>
+        <visual name="upright_b_v"><pose>0 0 1.2 0 0 0</pose><laser_retro>0.62</laser_retro><geometry><box><size>0.12 0.8 2.4</size></box></geometry><material><diffuse>0.12 0.24 0.55 1</diffuse><specular>0.3 0.3 0.3 1</specular></material></visual>
+        <collision name="upright_c"><pose>7 0 1.2 0 0 0</pose><geometry><box><size>0.12 0.8 2.4</size></box></geometry></collision>
+        <visual name="upright_c_v"><pose>7 0 1.2 0 0 0</pose><laser_retro>0.62</laser_retro><geometry><box><size>0.12 0.8 2.4</size></box></geometry><material><diffuse>0.12 0.24 0.55 1</diffuse><specular>0.3 0.3 0.3 1</specular></material></visual>
+        <collision name="shelf_low"><pose>0 0 0.55 0 0 0</pose><geometry><box><size>14.2 0.8 0.1</size></box></geometry></collision>
+        <visual name="shelf_low_v"><pose>0 0 0.55 0 0 0</pose><laser_retro>0.48</laser_retro><geometry><box><size>14.2 0.8 0.1</size></box></geometry><material><diffuse>0.25 0.3 0.36 1</diffuse></material></visual>
+        <collision name="shelf_high"><pose>0 0 1.65 0 0 0</pose><geometry><box><size>14.2 0.8 0.1</size></box></geometry></collision>
+        <visual name="shelf_high_v"><pose>0 0 1.65 0 0 0</pose><laser_retro>0.48</laser_retro><geometry><box><size>14.2 0.8 0.1</size></box></geometry><material><diffuse>0.25 0.3 0.36 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="crate_stack">
+      <static>true</static><pose>9 2 0 0 0 0.18</pose>
+      <link name="link">
+        <collision name="c1"><pose>0 0 0.45 0 0 0</pose><geometry><box><size>1.1 1.1 0.9</size></box></geometry></collision>
+        <visual name="v1"><pose>0 0 0.45 0 0 0</pose><laser_retro>0.32</laser_retro><geometry><box><size>1.1 1.1 0.9</size></box></geometry><material><diffuse>0.48 0.28 0.1 1</diffuse></material></visual>
+        <collision name="c2"><pose>0 0 1.35 0 0 0</pose><geometry><box><size>1.0 1.0 0.9</size></box></geometry></collision>
+        <visual name="v2"><pose>0 0 1.35 0 0 0</pose><laser_retro>0.32</laser_retro><geometry><box><size>1.0 1.0 0.9</size></box></geometry><material><diffuse>0.48 0.28 0.1 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="retro_loading_sign">
+      <static>true</static><pose>-12 0 1.15 0 0 0</pose>
+      <link name="link"><visual name="visual"><laser_retro>6.0</laser_retro><geometry><box><size>0.05 1.4 0.7</size></box></geometry><material><diffuse>0.95 0.95 0.9 1</diffuse></material></visual></link>
+    </model>
+  </world>
+</sdf>

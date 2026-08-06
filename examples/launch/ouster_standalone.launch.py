@@ -173,6 +173,11 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': True,
+                # Seed the processing pipeline before packets arrive. This is
+                # especially important for fast rosbag playback: waiting for
+                # the bag's one-shot metadata message before creating the
+                # packet subscription can otherwise lose the first scans.
+                'metadata': metadata,
                 # Build only the point cloud. The plugin already publishes
                 # /sensor/lidar/lidar0/imu directly, so don't let os_cloud
                 # republish a second 'imu' from imu_packets.
@@ -229,6 +234,9 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': True,
+                # Pre-seed before packet subscription discovery during bag
+                # playback; live metadata updates are still subscribed below.
+                'metadata': metadata,
                 'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
                 # Stamp images/camera_info in the URDF lidar frame. The os_image
                 # default is 'os_lidar', a frame nothing broadcasts here
