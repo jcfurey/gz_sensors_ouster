@@ -46,7 +46,7 @@
       <link name="link">
         <collision name="collision"><geometry><box><size>28 0.25 3</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>28 0.25 3</size></box></geometry>
-          <material><pbr><metal>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal>
             <albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map>
             <metalness>0</metalness><roughness>0.82</roughness>
           </metal></pbr></material>
@@ -58,7 +58,7 @@
       <link name="link">
         <collision name="collision"><geometry><box><size>0.25 18 3</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>0.25 18 3</size></box></geometry>
-          <material><pbr><metal>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal>
             <albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map>
             <metalness>0</metalness><roughness>0.82</roughness>
           </metal></pbr></material>

@@ -214,6 +214,27 @@ def test_response_textured_worlds_reference_the_visible_companion_base():
         assert '.ouster.png</albedo_map>' not in text
 
 
+def test_response_textured_materials_use_neutral_visible_color_factors():
+    """Ogre multiplies PBR albedo maps by the material color factors.
+
+    Keep them explicit and neutral so the visible texture cannot render black
+    because of renderer/version-specific implicit material defaults.
+    """
+    for name in WORLD_NAMES:
+        doc = xml.dom.minidom.parse(str(WORLDS / name))
+        for material in doc.getElementsByTagName('material'):
+            maps = material.getElementsByTagName('albedo_map')
+            if not maps or 'brick_graffiti.png' not in maps[0].firstChild.nodeValue:
+                continue
+            for tag in ('ambient', 'diffuse'):
+                values = material.getElementsByTagName(tag)
+                assert len(values) == 1, f'{name}: textured material lacks {tag}'
+                color = [float(v) for v in
+                         values[0].firstChild.nodeValue.split()]
+                assert color == [1.0, 1.0, 1.0, 1.0], (
+                    f'{name}: {tag} must not tint its albedo map: {color}')
+
+
 def test_hilly_world_uses_an_installed_mesh_not_heightmap():
     text = (WORLDS / 'turtlebot3_ouster_hills.sdf').read_text()
     assert '../media/meshes/hilly_terrain.obj' in text

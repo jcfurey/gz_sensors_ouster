@@ -56,7 +56,7 @@
       <link name="link">
         <collision name="collision"><geometry><box><size>4 3 3.2</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>4 3 3.2</size></box></geometry>
-          <material><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
         </visual>
         <visual name="roof"><pose>0 0 1.72 0 0 0</pose><laser_retro>0.18</laser_retro><geometry><box><size>4.4 3.4 0.22</size></box></geometry><material><diffuse>0.12 0.12 0.13 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
       </link>
@@ -66,7 +66,7 @@
       <link name="link">
         <collision name="collision"><geometry><box><size>4.5 3.5 3</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>4.5 3.5 3</size></box></geometry>
-          <material><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
         </visual>
         <visual name="roof"><pose>0 0 1.62 0 0 0</pose><laser_retro>0.18</laser_retro><geometry><box><size>4.9 3.9 0.2</size></box></geometry><material><diffuse>0.11 0.12 0.13 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
       </link>
@@ -76,7 +76,7 @@
       <link name="link">
         <collision name="collision"><geometry><box><size>3 2.5 2.4</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>3 2.5 2.4</size></box></geometry>
-          <material><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map><metalness>0</metalness><roughness>0.86</roughness></metal></pbr></material>
         </visual>
       </link>
     </model>

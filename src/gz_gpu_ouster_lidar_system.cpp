@@ -589,7 +589,8 @@ void GzGpuOusterLidarSystem::Configure(
     if (ray_mode_ == "raycast") {
         RCLCPP_INFO(kLogger,
             "Full raycast mode: exact per-beam casting against the ECM scene "
-            "mirror (no rendering; laser_retro drives reflectivity).");
+            "mirror (no rendering; Ouster response maps drive per-hit material "
+            "channels, with laser_retro as the scalar fallback).");
         mirror_ = std::make_unique<RaycastMirror>(sensor_name_);
         RaycastMirror::Params mp;
         mp.H = meta_->H;

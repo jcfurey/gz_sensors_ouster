@@ -113,7 +113,10 @@
         <visual name="v">
           <laser_retro>0.5</laser_retro>
           <geometry><box><size>0.4 8 3</size></box></geometry>
-          <material><pbr><metal>
+          <material>
+            <!-- Neutral factors keep the visible albedo un-tinted in Ogre2. -->
+            <ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse>
+            <pbr><metal>
             <albedo_map>../media/materials/textures/brick_graffiti.png</albedo_map>
             <metalness>0</metalness><roughness>0.85</roughness>
           </metal></pbr></material></visual>
