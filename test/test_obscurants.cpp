@@ -930,4 +930,135 @@ TEST(ObscurantInteraction, MediumScalesWhicheverCandidateWinsUnchanged)
     EXPECT_NEAR(hazy.retro, clear.retro * std::exp(-0.08f), 1e-6f);
 }
 
+// ── Per-candidate attenuation ────────────────────────────────────────────────
+//
+// Candidates on one beam sit at DIFFERENT depths, so the medium dims them by
+// different amounts. The arbitration therefore has to compare what the
+// detector would actually receive, not the clear-air powers.
+
+namespace {
+
+/// Sub-millimetre pane so the glass continuation clears its own back face
+/// (kRcSegEps is 1 mm), with a bright object behind it.
+void makePaneAndObject(rc::Scene & scene, std::vector<rc::InstanceXform> & xf,
+                       float pane_x, float pane_retro, float transmit,
+                       float obj_face_x, float obj_retro)
+{
+    const float pane[3] = {2.0e-4f, 4.0f, 4.0f};
+    const int pi = scene.addInstance(rc::GeomType::kBox, pane, pane_retro,
+                                     -1, 0.0f, transmit);
+    const float pt[3] = {pane_x, 0.0f, 0.0f};
+    rc::InstanceXform px;
+    scene.computeXform(pi, kIdentityR, pt, px);
+    xf.push_back(px);
+    makeWall(scene, xf, obj_face_x, obj_retro);
+}
+
+}  // namespace
+
+TEST(ObscurantArbitration, CandidatesCompeteAfterTheirOwnAttenuation)
+{
+    // Pane (transmit 0.9, retro 0.05) at 5 m, bright object at 12 m, uniform
+    // smoke over the whole path. Clear air: the object wins by 25x. But the
+    // object is 7 m deeper, so it loses exp(-2*sigma*14) more than the pane —
+    // the winner crosses over at sigma = ln(25.3)/(2*7) = 0.231 /m, a
+    // visibility of about 17 m. Comparing unattenuated powers keeps reporting
+    // the object well past that.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makePaneAndObject(scene, xf, 5.0f, 0.05f, 0.9f, 12.0f, 0.9f);
+
+    auto reported = [&](float sigma) {
+        rc::ScanParams sp = baseParams();
+        if (sigma > 0.0f) {
+            // Slab spanning [0, 15] m; backscatter suppressed so this
+            // isolates the arbitration from the medium's own return.
+            addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 7.5f,
+                                         7.5f, 6.0f, 6.0f, sigma,
+                                         kNoBackscatter));
+        }
+        return castOne(scene, xf, sp);
+    };
+
+    // Below the crossover the object still wins, as in clear air.
+    for (float sigma : {0.0f, 0.10f, 0.20f}) {
+        const RayResult r = reported(sigma);
+        EXPECT_NEAR(r.range, 12.0f, 1e-2f) << "sigma=" << sigma;
+        EXPECT_NEAR(r.retro, 0.9f * 0.81f * std::exp(-2.0f * sigma * 12.0f),
+                    1e-5f) << "sigma=" << sigma;
+    }
+
+    // Past it the pane wins — and is reported with the pane's own optical
+    // depth (5 m), not the object's.
+    const RayResult thick = reported(0.30f);
+    EXPECT_NEAR(thick.range, 5.0f, 1e-2f)
+        << "past the crossover the near surface must win";
+    EXPECT_NEAR(thick.retro, 0.05f * (1.0f - 0.9f) * std::exp(-2.0f * 0.3f * 5.0f),
+                1e-6f);
+}
+
+TEST(ObscurantArbitration, EqualDepthCandidatesAreUnaffected)
+{
+    // The correction must only bite when candidate depths differ. Haze
+    // entirely in FRONT of the whole stack attenuates every candidate
+    // identically, so the winner and the ratio between candidates are
+    // unchanged — only the overall scale moves.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makePaneAndObject(scene, xf, 5.0f, 0.05f, 0.9f, 12.0f, 0.9f);
+
+    const RayResult clear = castOne(scene, xf, baseParams());
+
+    rc::ScanParams sp = baseParams();
+    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 2.0f,
+                                 1.0f, 4.0f, 4.0f, 0.4f, kNoBackscatter));
+    const RayResult hazy = castOne(scene, xf, sp);
+    EXPECT_FLOAT_EQ(hazy.range, clear.range);
+    EXPECT_NEAR(hazy.retro, clear.retro * std::exp(-2.0f * 0.4f * 2.0f), 1e-7f);
+}
+
+TEST(ObscurantArbitration, MirrorGhostIntegratesItsBentPathNotAStraightLine)
+{
+    // A mirror at 4 m reflects the beam sideways onto a target. The ghost is
+    // REPORTED at the folded path length (~14 m), but the pulse never travels
+    // the straight line out to 14 m. Smoke placed only along that straight
+    // continuation — behind the mirror, off the real path — must therefore
+    // not attenuate the ghost at all.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+
+    // Mirror at x=4, tilted 45 deg about z. Its face normal is local +x,
+    // which maps to world (0.707, 0.707, 0), so a +x beam reflects to -y.
+    const float mirror[3] = {0.05f, 3.0f, 3.0f};
+    const int mi = scene.addInstance(rc::GeomType::kBox, mirror, 0.0f, -1,
+                                     1.0f, 0.0f);
+    const float c = std::cos(static_cast<float>(M_PI) / 4.0f);
+    const float rm[9] = {c, -c, 0, c, c, 0, 0, 0, 1};
+    const float mt[3] = {4.0f, 0.0f, 0.0f};
+    rc::InstanceXform mx;
+    scene.computeXform(mi, rm, mt, mx);
+    xf.push_back(mx);
+
+    // Target off to -y, where the reflected leg lands.
+    const float tgt[3] = {3.0f, 0.3f, 3.0f};
+    const int ti = scene.addInstance(rc::GeomType::kBox, tgt, 0.9f);
+    const float tt[3] = {4.0f, -10.0f, 0.0f};
+    rc::InstanceXform tx;
+    scene.computeXform(ti, kIdentityR, tt, tx);
+    xf.push_back(tx);
+
+    const RayResult clear = castOne(scene, xf, baseParams());
+    ASSERT_GT(clear.range, 8.0f) << "expected the ghost, not the mirror face";
+
+    // Smoke ONLY behind the mirror, on the straight line the ghost is
+    // reported along but never travels.
+    rc::ScanParams sp = baseParams();
+    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 9.0f,
+                                 3.0f, 2.0f, 2.0f, 0.5f, kNoBackscatter));
+    const RayResult behind = castOne(scene, xf, sp);
+    EXPECT_FLOAT_EQ(behind.range, clear.range);
+    EXPECT_NEAR(behind.retro, clear.retro, 1e-7f)
+        << "medium behind the mirror is not on the ghost's path";
+}
+
 }  // namespace gz_gpu_ouster_lidar

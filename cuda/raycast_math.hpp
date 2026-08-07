@@ -992,6 +992,34 @@ GZ_OUSTER_HD inline float rcOpticalDepth(const ScanParams & sp,
     return tau;
 }
 
+/// Two-way transmittance exp(−2·∫η·σ_ext ds) along ONE STRAIGHT LEG.
+///
+/// This belongs in the arbitration between candidate returns, not after it.
+/// The surface, behind-glass and mirror-ghost candidates on a single beam sit
+/// at different depths and therefore lose different amounts of light, so
+/// comparing their UNATTENUATED powers picks the wrong one as soon as the
+/// medium is thick enough. For a pane at 5 m in front of a bright object at
+/// 12 m the crossover is only σ ≈ 0.23 /m — a visibility of about 17 m, i.e.
+/// ordinary smoke, not a corner case.
+///
+/// Transmittance composes multiplicatively over legs, which is what the
+/// mirror ghost needs: it travels out to the mirror and then along a
+/// reflected leg, so each leg gets its own call and the two are multiplied.
+/// Integrating a single straight line to the ghost's reported range would
+/// sample the medium behind the mirror, which the pulse never enters.
+///
+/// Returns exactly 1 when no media are configured, keeping the whole feature
+/// free for worlds that do not use it.
+GZ_OUSTER_HD inline float rcMediumTransmit2(const ScanParams & sp,
+    RcV3 o, RcV3 d, float t_lo, float t_hi)
+{
+    if (sp.n_obscurants <= 0 || t_hi <= t_lo) return 1.0f;
+    float tau_eff = 0.0f;
+    (void)rcOpticalDepth(sp, o, d, t_lo, t_hi, nullptr, &tau_eff);
+    if (tau_eff <= kRcTauMin) return 1.0f;
+    return rpmath::gzm::exp_(-2.0f * tau_eff);
+}
+
 /// Deterministic uniform draw in (0, 1), shared by every backend.
 ///
 /// Native GPU RNGs would make CUDA, HIP and SYCL produce different clouds.
@@ -1278,11 +1306,12 @@ GZ_OUSTER_HD inline bool rcSampleMediumReturn(
 ///     equation. Dense smoke therefore GLOWS in NEAR_IR while it darkens the
 ///     laser channels, matching what a real Ouster shows in fog or smoke.
 ///
-/// One approximation to note: the medium is integrated along the STRAIGHT
-/// ray out to the reported range. That is exact for the direct and
-/// behind-glass candidates, but a mirror-ghost return actually travels a
-/// bent path of the same total length, so its optical depth is taken over
-/// the straight segment instead of the two real legs.
+/// Extinction of the hard target is NOT done here: each candidate carries its
+/// own exp(−2·η·τ) into the arbitration in rcCastOneRay (rcMediumTransmit2),
+/// because candidates at different depths lose different amounts of light and
+/// the comparison must be made on what the detector would actually receive.
+/// The mirror ghost composes the transmittance of its two legs rather than
+/// integrating the straight line to its folded reported range.
 ///
 /// References: Rasshofer et al., Adv. Radio Sci. 9, 2011 (lidar in adverse
 /// weather); Hahner et al., *Fog Simulation on Real LiDAR Point Clouds*,
@@ -1290,46 +1319,39 @@ GZ_OUSTER_HD inline bool rcSampleMediumReturn(
 /// (the same extinction + medium-backscatter decomposition applied as point
 /// cloud augmentation); Koschmieder 1924 for the airlight composite.
 GZ_OUSTER_HD inline void rcApplyObscurants(
-    const ScanParams & sp, RcV3 o, RcV3 d, float n_off, float t_budget,
+    const ScanParams & sp, RcV3 o, RcV3 d, float n_off, float t_los,
     uint32_t pixel, float & range, float & rho, float * nir_val)
 {
     const bool hit = rpmath::gzm::isfinite_(range);
-    // Path the medium is integrated over: out to the hard target, or the
+    // `t_los` is the forward extent of the LINE OF SIGHT, supplied by the
+    // caller — the geometric depth at which the sight line terminates, or the
     // whole range budget when the beam missed (smoke against open sky still
-    // returns). Integration starts at the sensor rather than at near_clip so
-    // a sensor sitting inside a cloud is attenuated correctly; observable
-    // medium-return support starts at near_clip in the sampler below.
-    const float t_end = hit ? (range - n_off) : t_budget;
-    if (t_end <= 0.0f) return;
+    // returns). It is deliberately NOT `range - n_off`: a mirror ghost is
+    // reported at its folded path length while the sight line stops at the
+    // mirror, and the medium beyond the mirror is not on the beam's path.
+    if (t_los <= 0.0f) return;
 
+    // The hard-target candidate arrives already attenuated: each candidate
+    // multiplies in its own exp(−2·η·τ) before the arbitration in
+    // rcCastOneRay, because candidates at different depths lose different
+    // amounts of light and the comparison has to be made on what the
+    // detector would actually receive.
     float path_albedo = 0.0f;
-    float tau_eff = 0.0f;
     const float tau =
-        rcOpticalDepth(sp, o, d, 0.0f, t_end, &path_albedo, &tau_eff);
+        rcOpticalDepth(sp, o, d, 0.0f, t_los, &path_albedo, nullptr);
     if (tau <= kRcTauMin) return;
 
-    // Two transmittances, because the two channels see different physics.
-    //
-    // The ACTIVE laser round trip uses the attenuating depth η·τ: forward
-    // scattering deflects light by only a few milliradians in a
-    // forward-peaked medium, so a real receiver recovers much of what σ_ext
-    // formally removes (RcObscurant::ms_factor).
-    //
-    // The PASSIVE ambient channel uses the physical depth τ, because its
-    // Koschmieder composite below already accounts for the light scattered
-    // back into a wide field of view — that IS the airlight term. Applying η
-    // there too would correct for the same effect twice.
+    // The PASSIVE ambient channel uses the PHYSICAL depth τ, not the
+    // η-weighted one the laser round trip sees: its Koschmieder composite
+    // below already accounts for light scattered back into a wide field of
+    // view — that IS the airlight term. Applying η here too would correct
+    // for the same physics twice.
     const float trans_ambient = rpmath::gzm::exp_(-tau);
-    const float trans_1way = rpmath::gzm::exp_(-tau_eff);
-    const float trans_2way = trans_1way * trans_1way;
 
-    // 1. Two-way extinction of the hard-target return.
-    rho *= trans_2way;
-
-    // 3. NEAR_IR airlight — computed from the FULL line-of-sight optical
-    //    depth regardless of which candidate wins below, because Ouster's
-    //    ambient channel is a passive measurement of the whole column, not
-    //    a gated sample at the reported range.
+    // 1. NEAR_IR airlight, over the whole sight line regardless of which
+    //    candidate won, because Ouster's ambient channel is a passive
+    //    measurement of the column rather than a gated sample at the
+    //    reported range.
     if (nir_val != nullptr) {
         const float illum = sp.sun_ambient + sp.sun_diffuse;
         *nir_val = *nir_val * trans_ambient +
@@ -1341,7 +1363,7 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
     //    supplies electronic shot/range/dropout noise afterward.
     float range_m = 0.0f, rho_m = 0.0f;
     if (!rcSampleMediumReturn(
-            sp, o, d, t_end, n_off, pixel, range_m, rho_m)) return;
+            sp, o, d, t_los, n_off, pixel, range_m, rho_m)) return;
 
     // Strongest-return arbitration by received power ρ/R² (same rule as the
     // glass and mirror candidates). Written as a cross-multiplication so the
@@ -1463,6 +1485,29 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     rho *= (1.0f - tau);
     float range = t0 + n_off;
 
+    // Candidates sit at DIFFERENT depths, so a medium dims them by different
+    // amounts and the arbitration below has to compare what the detector
+    // would actually receive rather than the clear-air powers.
+    //
+    // Every candidate travels the leg [0, t0] on (o, d) — the surface stops
+    // there, the behind-glass return continues past it, the mirror ghost
+    // turns there. Its transmittance is therefore a common POSITIVE factor,
+    // which cannot change the argmax: factor it out, arbitrate on the extra
+    // depth each candidate adds, and apply the shared leg once to the
+    // winner. Two things fall out of that. In dense smoke the shared factor
+    // can underflow to zero, which would collapse every candidate to the
+    // same value and make the comparison meaningless — the relative form
+    // stays well-conditioned. And the glass candidate then only has to
+    // integrate its extra leg rather than the whole path.
+    //
+    // `rho` holds the surface candidate, whose relative factor is 1.
+    //
+    // Forward extent of the LINE OF SIGHT, which is not the reported range:
+    // a mirror ghost is reported at its total folded path length, but the
+    // sight line still stops at the mirror. Drives the ambient airlight and
+    // the medium's own return below.
+    float t_los = t0;
+
     // Transparent surface (glass): continue one segment behind it. The
     // surface return keeps (1−τ); the behind-glass return is attenuated by
     // τ² (the pulse crosses the pane twice); single-return mode reports the
@@ -1488,9 +1533,15 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                                 sp.fallback_retro) *
                                tau * tau;
             const float range1 = seg_start + t1 + n_off;
-            if (rho1 * range * range > rho * range1 * range1) {
-                rho = rho1;
+            // Same straight ray, but deeper. Only the EXTRA leg past t0
+            // counts here; the shared prefix is applied to the winner below.
+            const float t_far = seg_start + t1;
+            const float rho1_rel =
+                rho1 * rcMediumTransmit2(sp, o, d, t0, t_far);
+            if (rho1_rel * range * range > rho * range1 * range1) {
+                rho = rho1_rel;
                 range = range1;
+                t_los = t_far;
                 w_inst = inst1; w_tri = tri1;
                 w_o = p; w_d = d; w_t = t1;
             }
@@ -1543,15 +1594,29 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                      sp.fallback_retro) *
                     mirror_eff * mirror_eff;
                 const float range2 = t0 + kRcSegEps + t2 + n_off;
-                if (rho2 * range * range > rho * range2 * range2) {
-                    rho = rho2;
+                // The ghost's path BENDS: out to the mirror — which is the
+                // shared prefix leg, applied below — and then along the
+                // reflected leg, which is all that is relative here.
+                // Transmittance composes over legs; a single straight
+                // integral to range2 would instead pass through the mirror
+                // and sample medium the pulse never met.
+                const float rho2_rel = rho2 *
+                    rcMediumTransmit2(sp, g0, refl, 0.0f, t2);
+                if (rho2_rel * range * range > rho * range2 * range2) {
+                    rho = rho2_rel;
                     range = range2;
+                    // The sight line still terminates at the mirror.
+                    t_los = t0;
                     w_inst = inst2; w_tri = tri2;
                     w_o = g0; w_d = refl; w_t = t2;
                 }
             }
         }
     }
+
+    // The leg every candidate shared, applied exactly once now that the
+    // winner is known (see the factoring note above the glass block).
+    rho *= rcMediumTransmit2(sp, o, d, 0.0f, t0);
 
     // NEAR_IR ambient factor at the winning hit: albedo × Lambert sun term
     // (view-independent — ambient radiance off a Lambertian surface does not
@@ -1586,10 +1651,11 @@ GZ_OUSTER_HD inline void rcCastOneRay(
         nir_val = winning_material.nir * illum;
     }
 
-    // Smoke / dust / fog along the path: extinction of this return, a
-    // competing backscatter return from the medium, and NEAR_IR airlight.
+    // Smoke / dust / fog: the winning candidate is already attenuated by its
+    // own path (above); what remains is the medium's competing backscatter
+    // return and the NEAR_IR airlight, both over the sight line.
     if (sp.n_obscurants > 0) {
-        rcApplyObscurants(sp, o, d, n_off, t_budget,
+        rcApplyObscurants(sp, o, d, n_off, t_los,
                           static_cast<uint32_t>(idx), range, rho,
                           nir_out ? &nir_val : nullptr);
     }

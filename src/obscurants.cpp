@@ -46,6 +46,42 @@ double extinctionFromVisibility(double visibility_m)
     return (visibility_m > 0.0) ? (kKoschmieder / visibility_m) : 0.0;
 }
 
+double impliedPhaseFunction(double lidar_ratio, double albedo)
+{
+    if (lidar_ratio <= 0.0 || albedo <= 0.0) return 0.0;
+    return 4.0 * GZ_PI / (lidar_ratio * albedo);
+}
+
+bool phaseFunctionIsPlausible(double lidar_ratio, double albedo)
+{
+    const double p = impliedPhaseFunction(lidar_ratio, albedo);
+    return p >= kObscurantMinPhase && p <= kObscurantMaxPhase;
+}
+
+namespace {
+
+/// Report a (lidar ratio, albedo) pair that describes no real aerosol.
+/// A warning, never an error: the pair still simulates, it just is not a
+/// combination any measured obscurant exhibits, and silently accepting it is
+/// how a typo turns into hours of confusion.
+void warnImplausiblePhase(double lidar_ratio, double albedo,
+                          const char * what)
+{
+    if (phaseFunctionIsPlausible(lidar_ratio, albedo)) return;
+    RCLCPP_WARN(lidarLogger(),
+        "%s: lidar_ratio=%.4g sr with albedo=%.3g implies a 180 deg phase "
+        "function of %.4g, outside the plausible range [%.2g, %.2g] for an "
+        "atmospheric obscurant (beta_pi = sigma_ext*albedo*P(pi)/4pi, so "
+        "S = 4pi/(albedo*P(pi))). The laser return uses the lidar ratio and "
+        "only NEAR_IR uses the albedo, so this simulates but describes no "
+        "real aerosol.",
+        what, lidar_ratio, albedo,
+        impliedPhaseFunction(lidar_ratio, albedo),
+        kObscurantMinPhase, kObscurantMaxPhase);
+}
+
+}  // namespace
+
 ObscurantConfig parseObscurantConfig(const ::sdf::ElementConstPtr & elem)
 {
     ObscurantConfig cfg;
@@ -130,7 +166,19 @@ ObscurantConfig parseObscurantConfig(const ::sdf::ElementConstPtr & elem)
                 v.pose.Pos().X(), v.pose.Pos().Y(), v.pose.Pos().Z());
             continue;
         }
+        // Only report a volume that overrides the shared pair; one that just
+        // inherits it would repeat the message below for every volume.
+        if (v.lidar_ratio != cfg.lidar_ratio || v.albedo != cfg.albedo) {
+            warnImplausiblePhase(v.lidar_ratio, v.albedo, "obscurant volume");
+        }
         cfg.volumes.push_back(v);
+    }
+
+    // The shared pair is what mirrored particle emitters and any volume that
+    // does not override it will use, so it is worth one check.
+    if (cfg.mirror_particles || !cfg.volumes.empty()) {
+        warnImplausiblePhase(cfg.lidar_ratio, cfg.albedo,
+                             "obscurant defaults");
     }
     return cfg;
 }

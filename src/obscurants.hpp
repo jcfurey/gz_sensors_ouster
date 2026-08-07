@@ -106,9 +106,34 @@ struct ObscurantConfig {
     }
 };
 
+/// Widest plausible values of the 180° phase function for an atmospheric
+/// obscurant, used only to catch authoring mistakes.
+///
+/// Every regime this plugin documents lands in P(π) ≈ 0.24–0.74 (fog 0.70–0.74,
+/// dust 0.31–0.35, biomass smoke 0.24–0.28). The bounds below are deliberately
+/// far outside that: 0.01 sits below Henyey–Greenstein at g = 0.95 (0.014) and
+/// 3.0 sits above Rayleigh (1.5) and the Mie backscatter peak of water
+/// droplets. A pair that escapes this band is not an unusual aerosol, it is a
+/// typo — or a deliberately unphysical value such as the enormous lidar ratio
+/// the unit tests use to switch backscatter off.
+constexpr double kObscurantMinPhase = 0.01;
+constexpr double kObscurantMaxPhase = 3.0;
+
 /// Meteorological optical range [m] → extinction coefficient [1/m].
 /// Returns 0 for a non-positive visibility (treated as "not specified").
 double extinctionFromVisibility(double visibility_m);
+
+/// The 180° phase function value implied by a (lidar ratio, albedo) pair.
+///
+/// β_π = σ_ext·ω·P(π)/4π and S = σ_ext/β_π together give P(π) = 4π/(S·ω), so
+/// the two knobs are not independent: choosing both pins the scattering phase
+/// function, whether or not the author meant to. Returns 0 when either input
+/// is non-positive.
+double impliedPhaseFunction(double lidar_ratio, double albedo);
+
+/// False when the implied P(π) falls outside [kObscurantMinPhase,
+/// kObscurantMaxPhase], i.e. when the pair describes no real aerosol.
+bool phaseFunctionIsPlausible(double lidar_ratio, double albedo);
 
 /// Read the obscuration knobs and every <obscurant> child of the plugin's
 /// SDF element. Unparseable or optically empty volumes are warned about and

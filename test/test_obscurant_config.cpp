@@ -90,6 +90,67 @@ TEST(ObscurantConfig, VisibilityConvertsThroughKoschmieder)
     EXPECT_EQ(extinctionFromVisibility(-5.0), 0.0);
 }
 
+// ── Albedo / lidar-ratio consistency ─────────────────────────────────────────
+//
+// omega and S describe the same scattering from two sides:
+// beta_pi = sigma_ext*omega*P(pi)/4pi, so S = 4pi/(omega*P(pi)). Nothing
+// enforces it — the laser path reads S alone and only NEAR_IR reads omega —
+// so the check exists to catch a pair that describes no real aerosol.
+
+TEST(ObscurantPhase, ImpliedPhaseFunctionMatchesTheClosedForm)
+{
+    EXPECT_NEAR(impliedPhaseFunction(50.0, 0.8), 4.0 * GZ_PI / 40.0, 1e-12);
+    EXPECT_NEAR(impliedPhaseFunction(18.0, 0.95), 4.0 * GZ_PI / 17.1, 1e-12);
+    // Degenerate inputs are 0, not a division blow-up.
+    EXPECT_EQ(impliedPhaseFunction(0.0, 0.8), 0.0);
+    EXPECT_EQ(impliedPhaseFunction(50.0, 0.0), 0.0);
+    EXPECT_EQ(impliedPhaseFunction(-1.0, 0.8), 0.0);
+}
+
+TEST(ObscurantPhase, EveryDocumentedRegimeIsPlausible)
+{
+    // A warning that fires on a legitimate configuration is worse than none,
+    // so pin every (S, omega) pair the docs recommend.
+    const std::pair<double, double> regimes[] = {
+        {kObscurantLidarRatio, kObscurantAlbedo},  // the plugin defaults
+        {18.0, 0.95}, {20.0, 0.90},                // fog / water cloud
+        {40.0, 0.90}, {50.0, 0.80},                // dust
+        {50.0, 0.90}, {70.0, 0.75},                // biomass smoke
+        {70.0, 0.30},                              // sooty, low albedo
+        {25.0, 0.98},                              // marine aerosol
+    };
+    for (const auto & [S, w] : regimes) {
+        EXPECT_TRUE(phaseFunctionIsPlausible(S, w))
+            << "S=" << S << " omega=" << w
+            << " implies P(pi)=" << impliedPhaseFunction(S, w);
+    }
+}
+
+TEST(ObscurantPhase, CatchesPairsThatDescribeNoRealAerosol)
+{
+    // The unit tests' own "switch backscatter off" idiom is exactly the kind
+    // of unphysical pair this is meant to name.
+    EXPECT_FALSE(phaseFunctionIsPlausible(1.0e6, 0.8));
+    // An absurdly small lidar ratio implies more backscatter than the
+    // particle scatters in total.
+    EXPECT_FALSE(phaseFunctionIsPlausible(1.0, 0.8));
+    // Degenerate inputs are implausible rather than silently accepted.
+    EXPECT_FALSE(phaseFunctionIsPlausible(50.0, 0.0));
+    EXPECT_FALSE(phaseFunctionIsPlausible(0.0, 0.8));
+}
+
+TEST(ObscurantPhase, BandStraddlesTheScatteringModelsItIsDrawnFrom)
+{
+    // Henyey-Greenstein at strong forward peaking is the low end of anything
+    // real; Rayleigh is the high end. Both must sit INSIDE the band, or it
+    // would reject a legitimate medium.
+    auto hg = [](double g) {
+        return (1.0 - g * g) / std::pow(1.0 + g * g + 2.0 * g, 1.5);
+    };
+    EXPECT_GT(hg(0.9), kObscurantMinPhase);
+    EXPECT_LT(1.5, kObscurantMaxPhase) << "Rayleigh P(pi) must be accepted";
+}
+
 // ── Transform convention ─────────────────────────────────────────────────────
 
 TEST(ObscurantConfig, StoresTheWorldToLocalTransform)

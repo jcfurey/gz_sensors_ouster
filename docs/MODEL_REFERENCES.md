@@ -408,9 +408,12 @@ absorbing smoke and dust; η ≈ 1 thin, 0.5–0.8 dense.
 Two coupling caveats worth knowing when tuning:
 
 - **ω and S are not independent.** S = 4π/(ω·P(π)) ties them to the phase
-  function, but nothing enforces it — the laser path reads S alone and only
-  the ambient channel reads ω, so an inconsistent pair describes no real
-  aerosol even though it simulates fine.
+  function. The laser path reads S alone and only the ambient channel reads
+  ω, so an inconsistent pair still simulates; the parser therefore warns when
+  the implied P(π) leaves [0.01, 3.0], a band drawn wide enough to contain
+  Henyey–Greenstein at g = 0.9 (0.028) and Rayleigh (1.5) and so to catch
+  only genuine authoring mistakes. Every regime quoted above lands in
+  P(π) ≈ 0.24–0.74.
 - **ΔR is a rectangular slab approximation**, not an explicitly convolved
   emitted-pulse waveform. It preserves the distributed-return scaling, but
   does not broaden or shift a sharp cloud boundary the way a measured pulse
