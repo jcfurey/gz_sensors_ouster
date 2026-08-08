@@ -420,6 +420,16 @@ Two coupling caveats worth knowing when tuning:
   response would. The stochastic range draw represents finite-population
   variability rather than claiming to reproduce a particular detector's full
   waveform processing.
+- **Candidate attenuation happens before the arbitration**, not after it. The
+  surface, behind-glass and mirror-ghost candidates sit at different depths,
+  so a medium dims them by different amounts and the strongest-return rule
+  has to compare what the detector would actually receive. The shared leg out
+  to the first hit is factored out of the comparison — it cannot change the
+  argmax — and applied once to the winner, which keeps the ranking
+  well-conditioned where the shared factor underflows. The mirror ghost
+  composes the transmittance of its two legs rather than integrating the
+  straight line to its folded reported range, which would sample medium the
+  pulse never enters.
 
 - Rasshofer et al. — *Influences of weather phenomena on automotive laser
   radar systems*, Adv. Radio Sci. 9, 2011. The extinction + backscatter

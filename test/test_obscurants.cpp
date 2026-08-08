@@ -752,6 +752,56 @@ TEST(ObscurantBackscatter, ZeroSensorGainCannotDetectTheMedium)
     }
 }
 
+TEST(ObscurantSampling, DecayInversionIsAccurateAcrossTheSeriesSwitch)
+{
+    // rcDecayInvert solves int_0^x exp(-2ku) du = u * int_0^L exp(-2ku) du.
+    // The closed form loses meaning as k -> 0, so a thin segment takes a
+    // series; the tolerance here is tight enough to reject the leading term
+    // alone, which is 4.8e-4 short right at the q = 1e-3 switch — 5.7 cm on
+    // a 120 m segment, a visible bias in thin-haze return ranges.
+    auto exact = [](double u, double k, double L) {
+        const double q = 2.0 * k * L;
+        return -std::log(1.0 - u * (1.0 - std::exp(-q))) / (2.0 * k);
+    };
+    constexpr double kL = 120.0;
+    for (double q : {1e-5, 5e-4, 1e-3, 1e-2, 0.5, 5.0}) {
+        const double k = q / (2.0 * kL);
+        for (double u : {0.05, 0.25, 0.5, 0.75, 0.95}) {
+            const double want = exact(u, k, kL);
+            const float got = rc::rcDecayInvert(static_cast<float>(u),
+                                                static_cast<float>(k),
+                                                static_cast<float>(kL));
+            EXPECT_NEAR(got, want, 1e-5 * want) << "q=" << q << " u=" << u;
+        }
+    }
+}
+
+TEST(ObscurantSampling, DecayInversionDegradesToUniformAsDensityVanishes)
+{
+    // With no extinction the decayed mass is uniform, so the draw must be
+    // exactly u*L — the limit the series exists to reach without dividing
+    // by k.
+    for (float u : {0.1f, 0.5f, 0.9f}) {
+        EXPECT_NEAR(rc::rcDecayInvert(u, 0.0f, 40.0f), u * 40.0f, 1e-5f);
+    }
+}
+
+TEST(ObscurantSampling, DecayInversionSpansTheSegmentMonotonically)
+{
+    // Basic sanity the sampler relies on: the draw stays inside [0, L] and
+    // increases with u, for a thin segment and a thick one alike.
+    for (float k : {1.0e-6f, 0.05f, 2.0f}) {
+        float previous = -1.0f;
+        for (float u : {0.01f, 0.2f, 0.4f, 0.6f, 0.8f, 0.99f}) {
+            const float x = rc::rcDecayInvert(u, k, 12.0f);
+            EXPECT_GE(x, 0.0f) << "k=" << k;
+            EXPECT_LE(x, 12.0f) << "k=" << k;
+            EXPECT_GT(x, previous) << "k=" << k << " u=" << u;
+            previous = x;
+        }
+    }
+}
+
 TEST(ObscurantBackscatter, HashDrawIsUniformAndOpenIntervalled)
 {
     int bins[10] = {0};
