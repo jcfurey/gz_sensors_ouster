@@ -1188,7 +1188,11 @@ GZ_OUSTER_HD inline bool rcSelectMediumSegment(
         }
         if (next <= t) break;
 
-        if (beta > 0.0f && k > 0.0f) {
+        // k > 0 is guaranteed by the collection screen above, so only the
+        // backscatter needs testing: a volume may carry extinction without
+        // contributing any (a non-positive lidar ratio), and its attenuation
+        // still accumulates below whether or not it weights a segment.
+        if (beta > 0.0f) {
             const float r0 = rpmath::gzm::fmax_(t + n_off, 1.0e-3f);
             const float r1 = rpmath::gzm::fmax_(next + n_off, r0 + 1.0e-6f);
             const float w_exp = beta * trans_rel *
@@ -1250,7 +1254,15 @@ GZ_OUSTER_HD inline bool rcSampleMediumReturn(
     int n = 0;
     for (int i = 0; i < sp.n_obscurants; ++i) {
         const RcObscurant & ob = sp.obscurants[i];
-        if (ob.sigma <= 0.0f) continue;
+        // A volume needs both a density and a non-zero share of its
+        // extinction actually reaching the receiver to attenuate anything.
+        // Screening on eta HERE rather than trusting the clamp in
+        // makeObscurant() is what lets the per-segment weight below test
+        // beta alone: every collected volume then contributes a strictly
+        // positive k, so `k > 0` there would be dead weight in the innermost
+        // loop of the walk. eta = 0 would otherwise describe a medium that
+        // backscatters while being perfectly transparent to the same beam.
+        if (ob.sigma <= 0.0f || ob.ms_factor <= 0.0f) continue;
         float a, b;
         if (!rcObscurantSpan(ob, o, d, 0.0f, t_end, a, b)) continue;
         sa[n] = a;

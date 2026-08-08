@@ -776,6 +776,58 @@ TEST(ObscurantSampling, DecayInversionIsAccurateAcrossTheSeriesSwitch)
     }
 }
 
+TEST(ObscurantSampling, ZeroEtaVolumeContributesNoBackscatter)
+{
+    // The segment weight tests only beta, which is safe because the span
+    // collection screens out eta <= 0 first. Pin that pairing: a volume with
+    // eta = 0 — built directly, bypassing the clamp in makeObscurant — must
+    // produce no medium return, since backscattering while staying perfectly
+    // transparent to the same beam would be energy from nowhere.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+
+    rc::ScanParams live = baseParams();
+    addObscurant(live, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                   5.0f, 5.0f, 5.0f, 1.0f, 50.0f, 0.8f, 1.0f));
+    rc::ScanParams inert = live;
+    inert.obscurants[0].ms_factor = 0.0f;
+
+    int live_hits = 0, inert_hits = 0;
+    for (uint32_t i = 1; i <= 400; ++i) {
+        live.rng_salt = i;
+        inert.rng_salt = i;
+        if (std::isfinite(castOne(scene, xf, live).range)) ++live_hits;
+        if (std::isfinite(castOne(scene, xf, inert).range)) ++inert_hits;
+    }
+    // The control only has to prove the configuration is live, so that zero
+    // means something; the exact fraction is set by the Poisson detection
+    // probability and is not what this test is about (it measures ~235/400).
+    EXPECT_GT(live_hits, 100) << "the control must return from the medium";
+    EXPECT_EQ(inert_hits, 0);
+}
+
+TEST(ObscurantSampling, NonPositiveLidarRatioAttenuatesButNeverReturns)
+{
+    // The complementary case the beta-only guard has to keep handling: a
+    // volume with no backscatter still has to attenuate what is behind it.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makeWall(scene, xf, 20.0f, 0.8f);
+
+    rc::ScanParams sp = baseParams();
+    addObscurant(sp, obscurantAt(rc::ObscurantType::kBox, 10.0f,
+                                 2.0f, 5.0f, 5.0f, 0.2f, 50.0f));
+    sp.obscurants[0].lidar_ratio = 0.0f;      // no backscatter at all
+
+    for (uint32_t i = 1; i <= 50; ++i) {
+        sp.rng_salt = i;
+        const RayResult r = castOne(scene, xf, sp);
+        ASSERT_NEAR(r.range, 20.0f, 1e-3f) << "must still report the wall";
+        // 4 m at sigma 0.2 -> tau 0.8, two-way exp(-1.6).
+        EXPECT_NEAR(r.retro, 0.8f * std::exp(-1.6f), 1e-5f);
+    }
+}
+
 TEST(ObscurantSampling, DecayInversionDegradesToUniformAsDensityVanishes)
 {
     // With no extinction the decayed mass is uniform, so the draw must be
