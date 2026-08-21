@@ -544,6 +544,23 @@ TEST(NoiseModel, CalibratedDetectionIsSmoothAndMonotonic)
     EXPECT_GT(p100, 0.0f);  // no hard cliff immediately beyond D90
 }
 
+TEST(NoiseModel, RetroreflectorsMaintainHighDetectionProbability)
+{
+    // OS1 profile: max_range 120, d90 anchors 45 m / 100 m
+    const float p_retro1 = rpmath::detectionProbability(
+        5.0f, 1.0f, 45.0f, 100.0f, 0.0f, 0.0f, 0.15f, 120.0f);
+    const float p_retro13 = rpmath::detectionProbability(
+        5.0f, 1.3f, 45.0f, 100.0f, 0.0f, 0.0f, 0.15f, 120.0f);
+    const float p_retro8 = rpmath::detectionProbability(
+        5.0f, 8.0f, 45.0f, 100.0f, 0.0f, 0.0f, 0.15f, 120.0f);
+
+    EXPECT_GE(p_retro1, 0.999f);
+    EXPECT_GE(p_retro13, 0.999f);
+    EXPECT_GE(p_retro8, 0.999f);
+    EXPECT_LE(p_retro1, p_retro13);
+    EXPECT_LE(p_retro13, p_retro8);
+}
+
 TEST(NoiseModel, MinimumRangeAndResolutionAreProductSpecific)
 {
     constexpr int H = 1, W = 3;

@@ -107,15 +107,18 @@ void PacketEncoder::encodeScan(int64_t stamp_ns, uint64_t epoch,
     // zero allocations in steady state.
     encode_pkts_.resize(static_cast<size_t>(n_packets));
 
+    const size_t pkt_sz = meta_->pw->lidar_packet_size;
     for (int p = 0; p < n_packets; ++p) {
-        std::memset(pkt_buf_.data(), 0, pkt_buf_.size());
+        auto & pkt_buf = encode_pkts_[static_cast<size_t>(p)].buf;
+        pkt_buf.assign(pkt_sz, 0);
+        uint8_t * pkt_data = pkt_buf.data();
 
         const int col_start = p * cpp;
-        pw.set_frame_id(pkt_buf_.data(), frame_id_);
+        pw.set_frame_id(pkt_data, frame_id_);
 
         for (int c_local = 0; c_local < cpp; ++c_local) {
             const int col_global = col_start + c_local;
-            uint8_t * col = pw.nth_col(c_local, pkt_buf_.data());
+            uint8_t * col = pw.nth_col(c_local, pkt_data);
             const int64_t col_ts = columnTimestampNs(
                 stamp_ns, scan_period_ns, col_global, W);
             pw.set_col_timestamp(col, static_cast<uint64_t>(col_ts));
@@ -123,13 +126,10 @@ void PacketEncoder::encodeScan(int64_t stamp_ns, uint64_t epoch,
             pw.set_col_status(col, 0x01u);
         }
 
-        pw.set_block<uint32_t>(range_mat.data(),  W, ouster::sdk::core::ChanField::RANGE,        pkt_buf_.data());
-        pw.set_block<uint16_t>(signal_mat.data(), W, ouster::sdk::core::ChanField::SIGNAL,       pkt_buf_.data());
-        pw.set_block<uint8_t> (refl_mat.data(),   W, ouster::sdk::core::ChanField::REFLECTIVITY, pkt_buf_.data());
-        pw.set_block<uint16_t>(nearir_mat.data(), W, ouster::sdk::core::ChanField::NEAR_IR,      pkt_buf_.data());
-
-        encode_pkts_[static_cast<size_t>(p)].buf.assign(
-            pkt_buf_.begin(), pkt_buf_.end());
+        pw.set_block<uint32_t>(range_mat.data(),  W, ouster::sdk::core::ChanField::RANGE,        pkt_data);
+        pw.set_block<uint16_t>(signal_mat.data(), W, ouster::sdk::core::ChanField::SIGNAL,       pkt_data);
+        pw.set_block<uint8_t> (refl_mat.data(),   W, ouster::sdk::core::ChanField::REFLECTIVITY, pkt_data);
+        pw.set_block<uint16_t>(nearir_mat.data(), W, ouster::sdk::core::ChanField::NEAR_IR,      pkt_data);
     }
 
     ++frame_id_;
@@ -153,8 +153,8 @@ void PacketEncoder::encodeScan(int64_t stamp_ns, uint64_t epoch,
     }
     drain_cv_.notify_one();
     if (overwrote) {
-        RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 5000,
-            "packet drain replaced a complete pending scan; total dropped=%lu",
+        RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 1000,
+            "drainThread dropped %lu backlogged batches",
             static_cast<unsigned long>(dropped));
     }
 }
@@ -164,13 +164,13 @@ void PacketEncoder::drainThreadFunc()
     std::vector<ouster_sensor_msgs::msg::PacketMsg> local_pkts;
     std::chrono::steady_clock::time_point local_produced_at{};
     std::chrono::steady_clock::time_point prev_produced_at{};
-    uint64_t local_epoch = 0;
     uint64_t previous_epoch = 0;
-    uint64_t local_generation = 0;
     uint64_t previous_generation = 0;
     bool have_previous = false;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
+        uint64_t local_epoch = 0;
+        uint64_t local_generation = 0;
         {
             std::unique_lock<std::mutex> lk(drain_mtx_);
             drain_cv_.wait(lk, [this] {
@@ -242,6 +242,8 @@ void PacketEncoder::drainThreadFunc()
                         deadline = t0 + spacing * static_cast<int64_t>(i);
                         continue;
                     }
+                    // cppcheck-suppress knownConditionTrueFalse
+                    // paused_ and simulation_epoch_ are mutated across threads under drain_mtx_
                     if (drain_cv_.wait_until(lk, deadline,
                             [this, local_epoch] {
                                 return shutdown_.load(std::memory_order_acquire) ||

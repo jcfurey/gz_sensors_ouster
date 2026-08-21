@@ -299,10 +299,9 @@ GZ_OUSTER_HD inline float retroForNoise(const float * retro, int idx)
 GZ_OUSTER_HD inline float calibratedRangeAtReflectivity(
     float retro_val, float range_10, float range_80)
 {
-    if (range_10 <= 0.0f || range_80 <= range_10) return 0.0f;
-    const float rho = gzm::fmax_(retro_val, 0.01f);
+    if (range_10 <= 0.0f || range_80 <= range_10 || retro_val <= 0.0f) return 0.0f;
     const float exponent = gzm::log_(range_80 / range_10) / gzm::log_(8.0f);
-    return range_10 * gzm::exp_(exponent * gzm::log_(rho / 0.1f));
+    return range_10 * gzm::exp_(exponent * gzm::log_(retro_val / 0.1f));
 }
 
 /// Product-calibrated detection probability. D90 is exact at both vendor
@@ -316,15 +315,16 @@ GZ_OUSTER_HD inline float detectionProbability(
     float rolloff, float max_range)
 {
     if (d <= 0.0f || d >= max_range) return 0.0f;
+    if (range_10_d90 <= 0.0f || range_80_d90 <= range_10_d90) return 1.0f;  // profile detection disabled
+    if (retro_val <= 0.0f) return 0.0f;
+
     const float d90 = calibratedRangeAtReflectivity(
         retro_val, range_10_d90, range_80_d90);
-    if (d90 <= 0.0f) return 1.0f;  // profile detection disabled
+    if (d90 <= 0.0f) return 0.0f;
 
     float d50 = calibratedRangeAtReflectivity(
         retro_val, range_10_d50, range_80_d50);
     if (d50 <= d90) d50 = d90 * (1.0f + gzm::fmax_(rolloff, 0.01f));
-    d50 = gzm::fmin_(d50, max_range);
-    if (d50 <= d90) return d <= d90 ? 0.9f : 0.0f;
 
     constexpr float kLn9 = 2.19722457733622f;
     const float slope = kLn9 / (d50 - d90);

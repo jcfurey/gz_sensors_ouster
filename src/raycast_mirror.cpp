@@ -113,7 +113,8 @@ std::string responseMapPath(const sdf::Material & material)
     std::filesystem::path path(albedo);
     const std::string extension = path.extension().string();
     path.replace_filename(path.stem().string() + ".ouster" + extension);
-    return std::filesystem::is_regular_file(path) ? path.string() : std::string{};
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec) ? path.string() : std::string{};
 }
 
 struct CachedResponseTexture {
@@ -448,6 +449,27 @@ void RaycastMirror::postUpdate(
         }
     }
 
+    // Evaluate component changes on every tick to catch edge mutations that
+    // gz-sim clears at the end of each simulation step.
+    ecm.Each<::gz::sim::components::Visual,
+             ::gz::sim::components::Geometry>(
+        [&](const ::gz::sim::Entity & ent,
+            const ::gz::sim::components::Visual *,
+            const ::gz::sim::components::Geometry *) -> bool {
+            auto changed = [&](::gz::sim::ComponentTypeId type) {
+                return ecm.ComponentState(ent, type) !=
+                    ::gz::sim::ComponentState::NoChange;
+            };
+            if (changed(::gz::sim::components::Geometry::typeId) ||
+                changed(::gz::sim::components::LaserRetro::typeId) ||
+                changed(::gz::sim::components::Material::typeId) ||
+                changed(::gz::sim::components::Transparency::typeId)) {
+                pending_rebuild_ = true;
+                return false;  // early stop
+            }
+            return true;
+        });
+
     // Gate on sim time before traversing the scene. The deadline advances
     // from its previous target rather than re-anchoring at the current tick,
     // so a physics step that does not divide the scan period produces bounded
@@ -458,39 +480,27 @@ void RaycastMirror::postUpdate(
     const auto gate = scan_gate_.advance(sim_now, periodFromHz(params_.lidar_hz));
     if (!gate.due) return;
 
-    // Rebuild when visual identity or geometry/material state changes. A
-    // count-only trigger misses a despawn+spawn pair between scans and edits
-    // that replace geometry without changing the number of visuals.
+    // Rebuild when visual identity, geometry/material state, or pending changes occur.
     size_t visual_count = 0;
     uint64_t visual_signature = 0;
-    bool visual_data_changed = false;
     ecm.Each<::gz::sim::components::Visual,
              ::gz::sim::components::Geometry>(
         [&](const ::gz::sim::Entity & ent,
-                        const ::gz::sim::components::Visual *,
-                        const ::gz::sim::components::Geometry * geom) -> bool {
+            const ::gz::sim::components::Visual *,
+            const ::gz::sim::components::Geometry * geom) -> bool {
             ++visual_count;
             uint64_t x = static_cast<uint64_t>(ent) ^
                 (static_cast<uint64_t>(geom->Data().Type()) << 56);
             x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
             x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
             visual_signature ^= x ^ (x >> 31);
-
-            auto changed = [&](::gz::sim::ComponentTypeId type) {
-                return ecm.ComponentState(ent, type) !=
-                    ::gz::sim::ComponentState::NoChange;
-            };
-            visual_data_changed = visual_data_changed ||
-                changed(::gz::sim::components::Geometry::typeId) ||
-                changed(::gz::sim::components::LaserRetro::typeId) ||
-                changed(::gz::sim::components::Material::typeId) ||
-                changed(::gz::sim::components::Transparency::typeId);
             return true;
         });
     if (!scene_ || visual_count != visual_count_ ||
-        visual_signature != visual_signature_ || visual_data_changed) {
+        visual_signature != visual_signature_ || pending_rebuild_) {
         rebuildScene(ecm, visual_count);
         visual_signature_ = visual_signature;
+        pending_rebuild_ = false;
     }
 
     // ── Per-scan transforms + sensor pose ────────────────────────────────────

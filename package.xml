@@ -43,8 +43,10 @@
        so downstream consumers don't need to find it. Build-only. -->
   <build_depend>eigen</build_depend>
 
-  <!-- Runtime-only deps for the examples/ launch files (URDF demo bringup).
-       Not needed to build the plugin itself. -->
+  <!-- Runtime-only deps shared by the core examples/ launch files (URDF demo
+       bringup). Not needed to build the plugin itself. turtlebot3_description
+       is intentionally not declared here: it is an optional dependency used
+       only by turtlebot3_ouster.launch.py, which diagnoses its absence. -->
   <exec_depend>ros_gz_sim</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
   <exec_depend>xacro</exec_depend>

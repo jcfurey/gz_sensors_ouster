@@ -21,7 +21,11 @@
 # bridged.
 import os
 
-from ament_index_python.packages import get_package_prefix, get_package_share_directory
+from ament_index_python.packages import (
+    PackageNotFoundError,
+    get_package_prefix,
+    get_package_share_directory,
+)
 from launch import LaunchDescription
 from launch.actions import (
     AppendEnvironmentVariable,
@@ -44,10 +48,24 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     pkg_share = get_package_share_directory('gz_sensors_ouster')
     pkg_lib = os.path.join(get_package_prefix('gz_sensors_ouster'), 'lib')
+
+    # TurtleBot3 is deliberately optional: the plugin and the other examples
+    # do not need it, and not every supported ROS distribution releases it.
+    # Diagnose the opt-in demo dependency here instead of making rosdep reject
+    # installation of the core package on those distributions.
+    try:
+        tb3_share = get_package_share_directory('turtlebot3_description')
+    except PackageNotFoundError as exc:
+        raise RuntimeError(
+            'The optional TurtleBot3 demo requires turtlebot3_description. '
+            'Install ros-$ROS_DISTRO-turtlebot3-description when available, '
+            'or add turtlebot3_description to this workspace and source its '
+            'install setup file before launching.'
+        ) from exc
+
     # Parent of turtlebot3_description's share dir, so gz can resolve the waffle's
     # `package://turtlebot3_description/meshes/...` visual meshes.
-    tb3_share_parent = os.path.dirname(
-        get_package_share_directory('turtlebot3_description'))
+    tb3_share_parent = os.path.dirname(tb3_share)
 
     urdf = os.path.join(pkg_share, 'examples', 'urdf', 'turtlebot3_ouster.urdf.xacro')
     rviz_cfg = os.path.join(pkg_share, 'examples', 'rviz', 'ouster.rviz')

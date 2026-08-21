@@ -27,6 +27,7 @@
 #include <gz/sim/EntityComponentManager.hh>
 #include <sdf/Element.hh>
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
 
@@ -99,10 +100,9 @@ struct ObscurantConfig {
     bool active() const
     {
         if (mirror_particles && particle_extinction > 0.0) return true;
-        for (const auto & v : volumes) {
-            if (v.extinction > 0.0) return true;
-        }
-        return false;
+        return std::any_of(volumes.begin(), volumes.end(), [](const ObscurantVolume & v) {
+            return v.extinction > 0.0;
+        });
     }
 };
 

@@ -99,6 +99,7 @@ private:
     std::vector<Ref> refs_;          // parallel to scene_->instances
     size_t visual_count_ = 0;        // rebuild trigger
     uint64_t visual_signature_ = 0;  // detects same-count entity replacement
+    bool pending_rebuild_ = false;   // latched change trigger across physics ticks
     SimTimeGate scan_gate_;
 
     // Sensor pose history (sim time, sensor→world pose), recorded every

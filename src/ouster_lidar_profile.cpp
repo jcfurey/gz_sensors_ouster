@@ -11,7 +11,7 @@
 namespace gz_gpu_ouster_lidar {
 namespace {
 
-std::string canonical(std::string value)
+std::string canonical(const std::string & value)
 {
     std::string out;
     out.reserve(value.size());
@@ -373,7 +373,7 @@ OusterLidarProfile resolveOusterLidarProfile(const OusterProfileRequest & reques
         } else if (p.revision == OusterRevision::Unknown &&
                    request.firmware_major >= 3 &&
                    (p.model == OusterModel::OS0 || p.model == OusterModel::OS1 ||
-                    p.model == OusterModel::OSDome)) {
+                    p.model == OusterModel::OS2 || p.model == OusterModel::OSDome)) {
             p.revision = OusterRevision::Rev07;
             p.revision_inferred = true;
         }

@@ -97,15 +97,7 @@ endif()
 # error (previously any unrecognized string — e.g. lowercase 'auto' — fell
 # through if()'s truthiness and force-enabled the backend).
 macro(gz_ouster_backend_option VAR DOC)
-  get_property(_gz_ouster_opt_type CACHE ${VAR} PROPERTY TYPE)
-  if(_gz_ouster_opt_type STREQUAL "BOOL")
-    message(STATUS
-      "${PROJECT_NAME}: migrating legacy ${VAR} cache entry (BOOL "
-      "'${${VAR}}', written unconditionally by the pre-tri-state build) to AUTO")
-    set(${VAR} AUTO CACHE STRING "${DOC}" FORCE)
-  else()
-    set(${VAR} AUTO CACHE STRING "${DOC}")
-  endif()
+  set(${VAR} AUTO CACHE STRING "${DOC}")
   set_property(CACHE ${VAR} PROPERTY STRINGS AUTO ON OFF)
   string(TOUPPER "${${VAR}}" _gz_ouster_opt_norm)
   if(_gz_ouster_opt_norm STREQUAL "AUTO")
@@ -118,7 +110,6 @@ macro(gz_ouster_backend_option VAR DOC)
     message(FATAL_ERROR
       "${PROJECT_NAME}: ${VAR}='${${VAR}}' is not one of AUTO | ON | OFF")
   endif()
-  unset(_gz_ouster_opt_type)
   unset(_gz_ouster_opt_norm)
 endmacro()
 
@@ -426,8 +417,13 @@ install(FILES
   DESTINATION include/gz_gpu_ouster_lidar
 )
 
+install(DIRECTORY examples
+  DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+)
+
 # Installs the plugin library + include/ headers, exports the ament package,
 # and installs the runtime config (metadata JSONs + example SDF) to
-# share/${PROJECT_NAME}/config plus the example URDFs / world / launch files to
-# share/${PROJECT_NAME}/examples.
-ament_auto_package(INSTALL_TO_SHARE config examples)
+# share/${PROJECT_NAME}/config.
+ament_auto_package(INSTALL_TO_SHARE config)

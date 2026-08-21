@@ -903,8 +903,10 @@ void GzGpuOusterLidarSystem::PostUpdate(
                 rand_bytes / 1048576.0);
             memory_logged_ = true;
         }
-        mirror_->postUpdate(
-            info, ecm, sensor_pose, sim_epoch_, process_params);
+        guarded("raycast mirror", [&] {
+            mirror_->postUpdate(
+                info, ecm, sensor_pose, sim_epoch_, process_params);
+        });
     }
 
     // ── Process any pending frame ────────────────────────────────────────────

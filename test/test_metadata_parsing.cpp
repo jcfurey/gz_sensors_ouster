@@ -101,7 +101,15 @@ TEST_P(MetadataParsingTest, ProductLineIsSupported)
                   pl.find("OS2") != std::string::npos ||
                   pl.find("OSDome") != std::string::npos);
     EXPECT_TRUE(known) << "Unknown product line: " << pl;
+}
 
+TEST_P(MetadataParsingTest, BeamToLidarTransformMatchesBeamOrigin)
+{
+    const std::string path = std::string(TEST_METADATA_DIR) + "/" + GetParam();
+    const auto json = readFile(path);
+    ouster::sdk::core::SensorInfo info(json);
+    EXPECT_NEAR(info.beam_to_lidar_transform(0, 3), info.lidar_origin_to_beam_origin_mm, 1e-3);
+    EXPECT_NEAR(info.beam_to_lidar_transform(2, 3), 0.0, 1e-3);
 }
 
 TEST_P(MetadataParsingTest, PixelsPerColumnMatchesBeamCount)

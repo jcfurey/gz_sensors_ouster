@@ -11,7 +11,8 @@
 
 namespace gz_gpu_ouster_lidar {
 namespace {
-using namespace std::chrono_literals;
+using std::chrono_literals::operator""ms;
+using std::chrono_literals::operator""ns;
 }
 
 TEST(SimTimeScheduler, ConvertsRatesSafely)

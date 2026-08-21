@@ -306,7 +306,7 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `urdf/ouster_macro.xacro` | Reusable `ouster_sensor` xacro macro (the building block) |
 | `urdf/ouster_standalone.urdf.xacro` | Single OS1-64 + IMU on a pedestal |
 | `urdf/sensor_stack.urdf.xacro` | Platform with front OS1-64+IMU and rear OS0-128 |
-| `urdf/turtlebot3_ouster.urdf.xacro` | A drivable TurtleBot3 waffle carrying the Ouster (used by the Docker test) |
+| `urdf/turtlebot3_ouster.urdf.xacro` | A drivable TurtleBot3 waffle carrying the Ouster (optional; used by the Docker test) |
 | `worlds/ouster_demo.sdf` | Demo world (physics + altimeter + IMU systems, ground + obstacles). GPU-free: raycast mode, no rendering Sensors system |
 | `worlds/ouster_demo_panels.sdf` | Panels-mode counterpart of `ouster_demo.sdf` (loads gz-sim-sensors-system/ogre2). Selected automatically by example launches when `ray_mode:=panels` |
 | `worlds/turtlebot3_ouster_headless.sdf` | GPU-free arena (no rendering Sensors system) for raycast mode |
@@ -316,7 +316,7 @@ Ready-to-run examples live in [`examples/`](examples/) and install to
 | `worlds/ouster_showcase.sdf` | **Guided tour of the sensor model** — labelled zones for range, reflectance, retroreflectors, calibrated detection rolloff, specular/mirror ghosts, glass, curvature, sun/NEAR_IR and a moving beacon. Raycast (GPU-free), built only from primitives so it needs no downloads. See [Showcase world](#showcase-world) |
 | `launch/ouster_standalone.launch.py` | Bring up the standalone example end-to-end |
 | `launch/sensor_stack.launch.py` | Bring up the multi-sensor example |
-| `launch/turtlebot3_ouster.launch.py` | Bring up the TurtleBot3 waffle + Ouster (drivable, raycast by default) |
+| `launch/turtlebot3_ouster.launch.py` | Bring up the optional TurtleBot3 waffle + Ouster demo (drivable, raycast by default) |
 
 Run (after `colcon build` + `source install/setup.bash`):
 
@@ -330,6 +330,19 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py
 # TurtleBot:     ros2 launch gz_sensors_ouster turtlebot3_ouster.launch.py world:=warehouse
 # Other scenes:  ... world:=hills   or   ... world:=sewer
 ```
+
+The core package and the standalone/sensor-stack examples do not require
+`turtlebot3_description`. To run only the optional TurtleBot demo, install its
+description package separately when your ROS distribution provides it:
+
+```bash
+sudo apt install ros-${ROS_DISTRO}-turtlebot3-description
+```
+
+If no binary package exists for the distribution, add
+`turtlebot3_description` to the source workspace instead. The supplied Docker
+build already does this with a pinned TurtleBot3 checkout. Launching the demo
+without the optional package reports these installation choices directly.
 
 Each launch starts Gazebo with the demo world, runs
 `robot_state_publisher` on the xacro, spawns the model with

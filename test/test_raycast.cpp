@@ -449,6 +449,27 @@ TEST(Raycast, GlassTransmissionReportsStrongestReturn)
     EXPECT_NEAR(retro[0], 0.4f, 1e-3f);
 }
 
+TEST(Raycast, SolidBoxGlassPaneAllowsRayContinuation)
+{
+    rc::Scene scene;
+    const float pane_size[3] = {0.04f, 1.0f, 1.0f};
+    const int pane = scene.addInstance(rc::GeomType::kBox, pane_size,
+                                       /*retro=*/0.0f, -1, /*spec=*/0.5f,
+                                       /*transmit=*/0.92f);
+    const float wall_size[3] = {0.5f, 0.5f, 0.5f};
+    const int wall = scene.addInstance(rc::GeomType::kBox, wall_size, /*retro=*/1.0f);
+
+    std::vector<rc::InstanceXform> xf = {
+        xformAt(scene, pane, 2.0f, 0.0f, 0.0f),
+        xformAt(scene, wall, 5.0f, 0.0f, 0.0f)};
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    std::vector<float> retro;
+    auto range = cast(scene, xf, alt, az, scanParams(1, 4), &retro);
+
+    EXPECT_NEAR(range[0], 4.5f, 1e-3f);
+    EXPECT_NEAR(retro[0], 0.92f * 0.92f * 1.0f, 1e-3f);
+}
+
 TEST(Raycast, MirrorGhostReportedBehindMirror)
 {
     // Velas et al. §III: a mirror bounces the beam onto a side object; the

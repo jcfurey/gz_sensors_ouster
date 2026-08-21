@@ -537,10 +537,9 @@ GZ_OUSTER_HD inline bool rcHitUv(const RcInstance & inst,
 {
     switch (inst.type) {
         case GeomType::kPlane: {
-            const float hx = rpmath::gzm::fmax_(inst.size[0], 1.0e-12f);
-            const float hy = rpmath::gzm::fmax_(inst.size[1], 1.0e-12f);
-            u = 0.5f + p.x / (2.0f * hx);
-            v = 0.5f + p.y / (2.0f * hy);
+            if (inst.size[0] <= 0.0f || inst.size[1] <= 0.0f) return false;
+            u = 0.5f + p.x / (2.0f * inst.size[0]);
+            v = 0.5f + p.y / (2.0f * inst.size[1]);
             return true;
         }
         case GeomType::kBox: {
@@ -760,8 +759,10 @@ GZ_OUSTER_HD inline void rcTestInstance(
     const float * verts, const int * tris, const int * order,
     const MeshBvhNode * nodes, const InstanceXform * xforms,
     RcV3 o, RcV3 d, float tmin, int i,
-    float & best, int & inst_out, int & tri_out)
+    float & best, int & inst_out, int & tri_out,
+    int ignore_inst = -1)
 {
+    if (i == ignore_inst) return;
     const InstanceXform & x = xforms[i];
     if (!rcHitAabb(o, d, x.bmin, x.bmax, tmin, best)) return;
     const RcV3 o_l = rcXformPoint(x.r, x.t, o);
@@ -796,7 +797,8 @@ GZ_OUSTER_HD inline float rcNearestHit(
     int & inst_out, int & tri_out,
     const MeshBvhNode * tlas_nodes = nullptr,
     const int * tlas_order = nullptr,
-    int n_tlas_nodes = 0)
+    int n_tlas_nodes = 0,
+    int ignore_inst = -1)
 {
     float best = tmax;
     inst_out = -1;
@@ -805,7 +807,7 @@ GZ_OUSTER_HD inline float rcNearestHit(
     if (tlas_nodes == nullptr || tlas_order == nullptr || n_tlas_nodes <= 0) {
         for (int i = 0; i < n_instances; ++i) {
             rcTestInstance(instances, verts, tris, order, nodes, xforms,
-                           o, d, tmin, i, best, inst_out, tri_out);
+                           o, d, tmin, i, best, inst_out, tri_out, ignore_inst);
         }
         return (inst_out >= 0) ? best : -1.0f;
     }
@@ -824,7 +826,7 @@ GZ_OUSTER_HD inline float rcNearestHit(
             for (int k = 0; k < nd.count; ++k) {
                 rcTestInstance(instances, verts, tris, order, nodes, xforms,
                                o, d, tmin, tlas_order[nd.first + k],
-                               best, inst_out, tri_out);
+                               best, inst_out, tri_out, ignore_inst);
             }
         } else if (sp + 2 <= kRcBvhStack) {
             stack[sp++] = nd.left;
@@ -1144,7 +1146,7 @@ GZ_OUSTER_HD inline float rcProposalAcceptanceMean(
 /// A negative `pick` only computes the total proposal mass; otherwise this
 /// selects the segment containing that cumulative mass.
 GZ_OUSTER_HD inline bool rcSelectMediumSegment(
-    const ScanParams & sp, RcV3 o, RcV3 d, float n_off, float t_end,
+    const ScanParams & sp, float n_off, float t_end,
     const float * sa, const float * sb, const int * oi, int n,
     float tau_head, float pick, float & total_out, float & a_out,
     float & b_out, float & beta_out, float & k_out, float & tau_out,
@@ -1283,7 +1285,7 @@ GZ_OUSTER_HD inline bool rcSampleMediumReturn(
     float profile_mass = 0.0f;
     float a = 0.0f, b = 0.0f, beta = 0.0f, k = 0.0f, tau = 0.0f;
     bool use_exp = false;
-    (void)rcSelectMediumSegment(sp, o, d, n_off, t_end, sa, sb, oi, n,
+    (void)rcSelectMediumSegment(sp, n_off, t_end, sa, sb, oi, n,
                                 tau_head, -1.0f, total, a, b, beta, k, tau,
                                 use_exp, &profile_mass);
     if (total <= 0.0f || profile_mass <= 0.0f) return false;
@@ -1308,7 +1310,7 @@ GZ_OUSTER_HD inline bool rcSampleMediumReturn(
         const uint32_t stream = 1u + 3u * attempt;
         const float pick = rcHashUnit(pixel, sp.rng_salt, stream) * total;
         float walked = 0.0f;
-        if (!rcSelectMediumSegment(sp, o, d, n_off, t_end, sa, sb, oi, n,
+        if (!rcSelectMediumSegment(sp, n_off, t_end, sa, sb, oi, n,
                                    tau_head, pick, walked, a, b, beta, k, tau,
                                    use_exp, nullptr)) {
             continue;
@@ -1599,7 +1601,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
         const float t1 = rcNearestHit(instances, n_instances, verts, tris,
                                       order, nodes, xforms, p, d, kRcSegTmin,
                                       t_budget - seg_start, inst1, tri1,
-                                      tlas_nodes, tlas_order, n_tlas_nodes);
+                                      tlas_nodes, tlas_order, n_tlas_nodes,
+                                      inst0);
         if (inst1 >= 0) {
             const float rho1 = rcHitReflectance(instances, xforms, verts,
                                                 tris, texcoords,
@@ -1659,7 +1662,8 @@ GZ_OUSTER_HD inline void rcCastOneRay(
                                           t_budget - t0 - kRcSegEps,
                                           inst2, tri2,
                                           tlas_nodes, tlas_order,
-                                          n_tlas_nodes);
+                                          n_tlas_nodes,
+                                          inst0);
             if (inst2 >= 0) {
                 const float mirror_eff = (1.0f - tau) * material0.spec;
                 const float rho2 =

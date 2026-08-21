@@ -81,6 +81,16 @@ def test_turtlebot_launch_exposes_all_raycast_world_profiles():
         assert filename in src
 
 
+def test_turtlebot_description_is_optional_and_diagnosed():
+    repo = LAUNCHES.parent.parent
+    package_xml = (repo / 'package.xml').read_text()
+    launch_src = (LAUNCHES / 'turtlebot3_ouster.launch.py').read_text()
+
+    assert '<exec_depend>turtlebot3_description</exec_depend>' not in package_xml
+    assert 'except PackageNotFoundError' in launch_src
+    assert 'optional TurtleBot3 demo requires turtlebot3_description' in launch_src
+
+
 @pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
 def test_ouster_consumers_preserve_packet_acquisition_time(name):
     """Cloud/image stamps must be invariant to executor and playback rate."""

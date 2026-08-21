@@ -29,19 +29,9 @@ void processCpu(
     const int W = p.W;
     const int n = H * W;
 
-    // Seeded callers (tests) get a call-local RNG for reproducibility.
-    // Default callers (production) share a thread-local non-deterministic RNG
-    // to avoid reseeding every frame.
-    static thread_local std::mt19937 tl_rng{std::random_device{}()};
-    std::mt19937 local_rng;
-    if (seed != 0) local_rng.seed(static_cast<std::mt19937::result_type>(seed));
-    std::mt19937 & rng = (seed != 0) ? local_rng : tl_rng;
-    std::normal_distribution<float> norm(0.0f, 1.0f);
-    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
-
     const bool has_noise = noiseEnabled(p);
 
-    for (int idx = 0; idx < n; ++idx) {
+    auto processOne = [&](int idx, auto & rng, auto & norm, auto & uni) {
         float d = depth_host[idx];
         const bool valid = std::isfinite(d) && d > rpmath::kValidDepthMin;
 
@@ -64,13 +54,13 @@ void processCpu(
                 reflectivity_out[idx] =
                     static_cast<uint8_t>(p.base_reflectivity);
                 nearir_out[idx] = 0u;
-                continue;
+                return;
             }
             range_out[idx] = 0u;
             signal_out[idx] = 0u;
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
             nearir_out[idx] = 0u;
-            continue;
+            return;
         }
 
         // Product/firmware minimum-range threshold. The raycaster also uses
@@ -81,7 +71,7 @@ void processCpu(
             signal_out[idx] = 0u;
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
             nearir_out[idx] = 0u;
-            continue;
+            return;
         }
 
         // Depth-discontinuity suppression. (has_noise is redundant with
@@ -94,7 +84,7 @@ void processCpu(
                 signal_out[idx] = 0u;
                 reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
                 nearir_out[idx] = 0u;
-                continue;
+                return;
             }
         }
 
@@ -113,7 +103,7 @@ void processCpu(
                 signal_out[idx] = 0u;
                 reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
                 nearir_out[idx] = 0u;
-                continue;
+                return;
             }
         }
 
@@ -132,7 +122,7 @@ void processCpu(
             signal_out[idx] = 0u;
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
             nearir_out[idx] = 0u;
-            continue;
+            return;
         }
         range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
@@ -149,22 +139,6 @@ void processCpu(
         }
         signal_out[idx] = rpmath::clampU16(sig);
 
-        // Reflectivity (Ouster calibrated scale, mirrors firmware output):
-        //   0-100   Lambertian diffuse, linear in surface reflectance %
-        //   101-255 retroreflective, log-scaled so traffic-sign / retro-tape
-        //           returns don't saturate the linear band.
-        // Refs:
-        //   - ouster_client/include/ouster/chanfield.h: REFLECTIVITY field is
-        //     "calibrated by range and sensor sensitivity" (the on-sensor
-        //     firmware does this at production time).
-        //   - Ouster Sensor Documentation, "Reflectivity" section
-        //     (https://static.ouster.dev/sensor-docs/).
-        // Slope choice: 22 ≈ (255 - 100) / 7, so rv ∈ (1, 128] maps into
-        // [101, 254]; rv > 128 saturates at 255. That gives ~7 doublings of
-        // dynamic range above the Lambertian band before clipping, which
-        // matches how a real OS-1 grades retro-tape strength in practice. The
-        // mapping itself lives in rpmath::reflectivityToByte (shared by all
-        // backends); this comment is the canonical derivation.
         if (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f) {
             reflectivity_out[idx] = rpmath::reflectivityToByte(retro_host[idx]);
         } else {
@@ -188,6 +162,38 @@ void processCpu(
             nir = std::max(nir + norm(rng) * sigma_nir, 0.0f);
         }
         nearir_out[idx] = rpmath::clampU16(nir);
+    };
+
+    // Seeded callers (tests) stay serial with a call-local RNG for exact
+    // reproducibility. Default production callers use one persistent RNG per
+    // worker so an OpenMP scan neither shares RNG state nor reseeds per frame.
+    if (seed != 0 || !has_noise) {
+        std::mt19937 local_rng(static_cast<std::mt19937::result_type>(seed));
+        std::normal_distribution<float> norm(0.0f, 1.0f);
+        std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+        for (int idx = 0; idx < n; ++idx) {
+            processOne(idx, local_rng, norm, uni);
+        }
+    } else {
+#if defined(_OPENMP)
+        #pragma omp parallel
+        {
+            static thread_local std::mt19937 tl_rng{std::random_device{}()};
+            std::normal_distribution<float> norm(0.0f, 1.0f);
+            std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+            #pragma omp for schedule(static)
+            for (int idx = 0; idx < n; ++idx) {
+                processOne(idx, tl_rng, norm, uni);
+            }
+        }
+#else
+        static thread_local std::mt19937 tl_rng{std::random_device{}()};
+        std::normal_distribution<float> norm(0.0f, 1.0f);
+        std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+        for (int idx = 0; idx < n; ++idx) {
+            processOne(idx, tl_rng, norm, uni);
+        }
+#endif
     }
 }
 
