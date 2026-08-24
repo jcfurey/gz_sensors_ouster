@@ -46,6 +46,12 @@ def _obscurants(doc: xml.dom.minidom.Document) -> list:
     return list(doc.getElementsByTagName('obscurant'))
 
 
+def _text_values(doc: xml.dom.minidom.Document, tag: str) -> list[str]:
+    return [node.firstChild.nodeValue.strip()
+            for node in doc.getElementsByTagName(tag)
+            if node.firstChild is not None]
+
+
 # ── ouster_standalone ─────────────────────────────────────────────────────────
 
 def test_standalone_raycast_anchor_is_altimeter():
@@ -76,6 +82,12 @@ def test_standalone_smoke_profile_injects_explicit_volumes():
     assert not doc.getElementsByTagName('particle_obscuration')
 
 
+def test_standalone_imu_is_bound_to_its_sensor():
+    doc = _expand('ouster_standalone.urdf.xacro',
+                  ray_mode='raycast', metadata_lidar0=META0)
+    assert _text_values(doc, 'imu_name') == ['lidar0_imu']
+
+
 # ── sensor_stack (two sensors) ────────────────────────────────────────────────
 
 def test_sensor_stack_raycast_both_altimeter():
@@ -92,6 +104,13 @@ def test_sensor_stack_panels_both_camera():
                                metadata_front=META0, metadata_rear=META_R))
     assert t.get('front') == 'camera', f'anchor types: {t}'
     assert t.get('rear') == 'camera', f'anchor types: {t}'
+
+
+def test_sensor_stack_imu_is_not_auto_detected():
+    doc = _expand('sensor_stack.urdf.xacro',
+                  ray_mode='raycast',
+                  metadata_front=META0, metadata_rear=META_R)
+    assert _text_values(doc, 'imu_name') == ['front_imu']
 
 
 # ── turtlebot3_ouster (requires turtlebot3_description) ──────────────────────

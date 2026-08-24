@@ -163,7 +163,10 @@
           <xacro:ouster_smoke_obscurants/>
         </xacro:if>
         <xacro:if value="${enable_imu}">
-          <imu_name>auto</imu_name>
+          <!-- Bind this plugin instance to its own IMU. `auto` is ambiguous
+               when a model carries multiple Ousters and makes every instance
+               select the first IMU entity it discovers. -->
+          <imu_name>${name}_imu</imu_name>
           <imu_hz>${imu_hz}</imu_hz>
         </xacro:if>
       </plugin>
