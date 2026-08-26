@@ -32,6 +32,7 @@
 namespace gz_gpu_ouster_lidar {
 
 struct RosInterfaceConfig {
+    std::string node_name = "gz_gpu_ouster_lidar";
     std::string sensor_name;        ///< topic prefix + node namespace
     std::string image_qos = "reliable";
     std::string imu_qos = "sensor_data";

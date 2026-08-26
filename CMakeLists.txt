@@ -254,6 +254,22 @@ endif()
 # ── CUDA static library ──────────────────────────────────────────────────────
 add_subdirectory(cuda)
 
+# Metadata validation, packet encoding/pacing, and ROS publication are
+# simulator-neutral. Export them separately so another ray producer (notably
+# agx_sensors_ouster) can retain the exact same Ouster-facing ROS contract
+# without copying the wire-format implementation.
+ament_auto_add_library(${PROJECT_NAME}_core SHARED
+  src/ouster_lidar_profile.cpp
+  src/ouster_metadata.cpp
+  src/packet_encoder.cpp
+  src/ros_interface.cpp
+)
+target_include_directories(${PROJECT_NAME}_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}/core>
+)
+target_link_libraries(${PROJECT_NAME}_core Eigen3::Eigen)
+
 # ── Gazebo system plugin ─────────────────────────────────────────────────────
 # ament_auto_add_library auto-links the ament dependencies found above
 # (rclcpp, the msg packages, ouster_ros, the gz_*_vendor packages) and adds
@@ -261,12 +277,8 @@ add_subdirectory(cuda)
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/gz_gpu_ouster_lidar_system.cpp
   src/obscurants.cpp
-  src/ouster_lidar_profile.cpp
-  src/ouster_metadata.cpp
-  src/packet_encoder.cpp
   src/panel_rig.cpp
   src/raycast_mirror.cpp
-  src/ros_interface.cpp
 )
 
 # Link the non-ament targets. ament_auto_add_library already linked the ROS
@@ -288,6 +300,7 @@ target_link_libraries(${PROJECT_NAME}
   gz-sensors::gz-sensors
   gz-plugin::register
   Eigen3::Eigen
+  ${PROJECT_NAME}_core
   $<BUILD_INTERFACE:gz_gpu_ouster_lidar_cuda>
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
@@ -415,6 +428,17 @@ install(FILES
   cuda/raycast_math.hpp
   cuda/ray_processor_math.hpp
   DESTINATION include/gz_gpu_ouster_lidar
+)
+
+install(FILES
+  src/lidar_common.hpp
+  src/ouster_lidar_profile.hpp
+  src/ouster_metadata.hpp
+  src/packet_encoder.hpp
+  src/packet_pacing.hpp
+  src/ros_interface.hpp
+  src/scan_timing.hpp
+  DESTINATION include/${PROJECT_NAME}/core
 )
 
 install(DIRECTORY examples

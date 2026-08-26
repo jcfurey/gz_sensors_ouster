@@ -63,7 +63,7 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
     rclcpp::NodeOptions opts;
     opts.use_intra_process_comms(false);
     node_ = std::make_shared<rclcpp::Node>(
-        "gz_gpu_ouster_lidar", cfg_.sensor_name, opts);
+        cfg_.node_name, cfg_.sensor_name, opts);
 
     // Use absolute topic names derived from sensor_name so that Gazebo's
     // process-level namespace contamination doesn't affect topic routing.

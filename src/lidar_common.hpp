@@ -1,9 +1,9 @@
 // Copyright 2026 John C. Furey
 // SPDX-License-Identifier: Apache-2.0
 //
-// Shared constants + logger for the plugin's internal components. These
-// headers live in src/ (not installed): they are implementation detail of
-// the plugin .so, included by sibling .cpp files only.
+// Shared constants + logger for the simulator-neutral Ouster core and the
+// Gazebo plugin. This header is exported with gz_sensors_ouster_core so other
+// ray producers can use the same packet/publication path.
 
 #pragma once
 
