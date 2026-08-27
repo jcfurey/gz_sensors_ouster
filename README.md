@@ -16,8 +16,10 @@ hardware -- no driver changes needed.
   toolchain is compiled in or no device is found at runtime.
 - Native `PacketMsg` encoding via Ouster SDK `PacketWriter` (RANGE, SIGNAL,
   REFLECTIVITY, NEAR_IR channels)
-- Exported `gz_sensors_ouster_core` library for simulator-neutral metadata,
-  packet encoding/pacing, and ROS publication (used by `agx_sensors_ouster`)
+- Exported `gz_sensors_ouster_core` library for this standalone package's
+  metadata, packet encoding/pacing, and ROS publication. The dedicated AGX
+  package embeds `ouster_sim_core` independently; parity is maintained with
+  common conformance fixtures during the transition.
 - Simulated IMU packets from Gazebo's IMU sensor (optional, auto-detect)
 - Noise parameters reconfigurable at runtime via `ros2 param set`
 - Latched metadata republishing for rmw_zenoh_cpp compatibility
