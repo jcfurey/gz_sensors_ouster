@@ -34,6 +34,7 @@ set_target_properties(gz_gpu_ouster_lidar_cuda PROPERTIES
 target_include_directories(gz_gpu_ouster_lidar_cuda PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${OUSTER_SIM_CORE_SOURCE_DIR}/include
 )
 
 # ── CUDA backend (NVIDIA) ───────────────────────────────────────────────────

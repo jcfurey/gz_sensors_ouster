@@ -83,6 +83,7 @@ def _os_cloud(name, metadata):
             # can publish its first packet batch. The metadata topic remains
             # subscribed for live updates.
             'metadata': metadata,
+            'lidar_packet_reliable': True,
             'proc_mask': 'PCL',  # plugin publishes /imu itself; cloud only
             'point_cloud_frame': name + '/lidar_frame',
             'sensor_frame': name + '/os_sensor',   # != point_cloud_frame → identity LUT
@@ -115,6 +116,7 @@ def _os_image(name, metadata):
         parameters=[{
             'use_sim_time': True,
             'metadata': metadata,
+            'lidar_packet_reliable': True,
             'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
             'sensor_frame': name + '/lidar_frame',
         }],

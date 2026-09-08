@@ -58,32 +58,33 @@ jobs:
       # exposes an older PacketWriter::set_block signature that the plugin
       # source no longer targets.
       #
-      # OUSTER_ROS_REF is pinned to an exact commit (not the floating `ros2`
-      # branch) for reproducibility: a force-push to ros2 can no longer change
+      # OUSTER_ROS_REF is pinned to an exact commit (not the floating `cam-wip`
+      # branch) for reproducibility: a force-push to cam-wip can no longer change
       # what CI builds, and a dropped commit fails the checkout loudly instead
       # of silently building different source. To intentionally move forward,
-      # bump this to the new tip SHA of jcfurey/ouster-ros@ros2.
+      # bump this to the new tip SHA of jcfurey/ouster-ros@cam-wip.
       OUSTER_ROS_REPO: https://github.com/jcfurey/ouster-ros.git
-      OUSTER_ROS_REF: 6ab9402c1a8275f600945c3d8dfd5a73b40585c8
+      OUSTER_ROS_REF: 338fa84a9d988eaae762c79bdd7bacbae497280a
     steps:
       - uses: actions/checkout@v4
         with:
           path: src/gz_sensors_ouster
+          submodules: recursive
 
       - name: Clone ouster-ros (jcfurey fork, pinned commit)
         run: |
-          # Clone the ros2 branch specifically — NOT the fork's default branch
+          # Clone the cam-wip branch specifically — NOT the fork's default branch
           # (master), which has a different repo layout (a root-level ouster-sdk
-          # submodule). Cloning master and checking out a ros2 commit leaves
-          # master's stale ouster-sdk/ tree beside ros2's nested
+          # submodule). Cloning master and checking out a cam-wip commit leaves
+          # master's stale ouster-sdk/ tree beside cam-wip's nested
           # ouster-ros/ouster-sdk/, giving the workspace two `sophus` packages
           # and aborting colcon before anything builds.
           #
-          # A full (non-shallow) clone of ros2 keeps the pinned commit reachable
+          # A full (non-shallow) clone of cam-wip keeps the pinned commit reachable
           # even after the branch advances; we then check it out exactly and
           # resync submodules to that commit's gitlink (sync handles a submodule
           # URL/path change between the branch tip and the pinned commit).
-          git clone --branch ros2 --recurse-submodules "${OUSTER_ROS_REPO}" src/ouster-ros
+          git clone --branch cam-wip --recurse-submodules "${OUSTER_ROS_REPO}" src/ouster-ros
           git -C src/ouster-ros checkout "${OUSTER_ROS_REF}"
           git -C src/ouster-ros submodule sync --recursive
           git -C src/ouster-ros submodule update --init --recursive

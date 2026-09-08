@@ -145,7 +145,8 @@ public:
     /// Noise/channel stage only, for callers that already hold exact
     /// per-beam ranges (the full-raycast mode). depth_host is H×W metres
     /// (+inf for a miss); retro_host is an optional H×W laser_retro array
-    /// (nullptr → base_reflectivity / unit intensity).
+    /// (nullptr or invalid element → base_reflectivity / unit intensity;
+    /// a finite zero is an explicitly black material).
     /// `nir_host` (optional): per-pixel NEAR_IR ambient factor from the
     /// raycaster (albedo × sun illumination); nullptr keeps the legacy
     /// retro-based near-IR.

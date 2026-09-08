@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <algorithm>
+#include <ouster_sim_core/packet_pacing.hpp>
 #include <chrono>
 #include <cstdint>
 
@@ -19,16 +19,8 @@ inline std::chrono::nanoseconds packetBatchDrainSpan(
     std::chrono::nanoseconds observed,
     bool have_observation)
 {
-    auto source = (have_observation &&
-                   observed > std::chrono::nanoseconds::zero())
-        ? observed : nominal;
-    source = std::max(source, std::chrono::nanoseconds(
-        std::chrono::microseconds(100)));
-    // Divide before multiplying so a valid but very long configured period
-    // cannot overflow the signed nanosecond representation.
-    const auto ticks = source.count();
-    const auto scaled = (ticks / 5) * 4 + ((ticks % 5) * 4) / 5;
-    return std::chrono::nanoseconds(std::max<int64_t>(1, scaled));
+    return ouster_sim_core::packetBatchDrainSpan(
+        nominal, have_observation ? std::optional{observed} : std::nullopt);
 }
 
 }  // namespace gz_gpu_ouster_lidar

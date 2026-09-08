@@ -87,14 +87,10 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
         return q.keep_last(depth);
     };
 
-    // Packet publisher: SensorDataQoS (BEST_EFFORT), with enough writer
-    // history for one complete scan. The default depth of five represents
-    // only ~8 ms for a 64-packet/10 Hz sensor; transient executor or transport
-    // contention could then discard a packet and make os_cloud reject the
-    // entire scan. BEST_EFFORT preserves the non-blocking realtime contract,
-    // while a full-scan writer queue absorbs that short contention.
-    const auto pkt_qos = rclcpp::SensorDataQoS().keep_last(
-        cfg_.lidar_packet_qos_depth);
+    // A committed frame must retain every packet under transport congestion.
+    // RELIABLE + KEEP_ALL selects Zenoh BLOCK. The encoder admits only one
+    // active and one newest pending complete frame on a separate thread.
+    const auto pkt_qos = rclcpp::QoS(rclcpp::KeepAll()).reliable().durability_volatile();
     pkt_pub_ = node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
         abs_prefix + "/lidar_packets", pkt_qos);
 
@@ -440,7 +436,7 @@ void RosInterface::publishImages(int64_t stamp_ns,
 void RosInterface::publishLidarPacket(
     const ouster_sensor_msgs::msg::PacketMsg & pkt)
 {
-    std::lock_guard<std::mutex> pub_lk(publish_mtx_);
+    std::lock_guard<std::mutex> pub_lk(packet_publish_mtx_);
     pkt_pub_->publish(pkt);
 }
 

@@ -524,7 +524,7 @@ void GzGpuOusterLidarSystem::Configure(
         cfg.range_noise_reference_range = range_noise_reference_range_;
         cfg.beam_divergence_fwhm_deg =
             meta_->profile.beam_divergence_fwhm_deg;
-        cfg.max_returns = meta_->profile.max_returns;
+        cfg.max_returns = meta_->core().activeReturnCount();
         cfg.imu_hz = imu_hz_;
         cfg.imu_enabled = imu_enabled_;
         cfg.publish_imu_msg = publish_imu_msg_;

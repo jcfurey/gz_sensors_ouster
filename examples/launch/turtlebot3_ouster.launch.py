@@ -194,6 +194,7 @@ def generate_launch_description():
                 # Pre-seed packet processing so fast bag playback cannot race
                 # the metadata callback that creates the packet subscription.
                 'metadata': metadata,
+                'lidar_packet_reliable': True,
                 # Build only the point cloud — the plugin publishes /imu itself.
                 'proc_mask': 'PCL',
                 # Stamp the cloud in the URDF lidar frame that
@@ -235,6 +236,7 @@ def generate_launch_description():
                 # Keep packet subscriptions ready before a bag starts; live
                 # metadata messages remain supported for reconfiguration.
                 'metadata': metadata,
+                'lidar_packet_reliable': True,
                 'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
                 # Stamp images/camera_info in the URDF lidar frame. The os_image
                 # default 'os_lidar' is broadcast by nothing in this launch

@@ -32,7 +32,7 @@ REPO_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 # Same pin as ci.yaml / Dockerfile — bump all three together.
 OUSTER_ROS_REPO=https://github.com/jcfurey/ouster-ros.git
-OUSTER_ROS_REF=6ab9402c1a8275f600945c3d8dfd5a73b40585c8
+OUSTER_ROS_REF=338fa84a9d988eaae762c79bdd7bacbae497280a
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -97,13 +97,14 @@ provision() {
   # ── workspace: pinned ouster-ros + this repo (symlink) ──────────────────
   mkdir -p "$WS/src"
   if [ ! -d "$WS/src/ouster-ros/.git" ]; then
-    # Clone the ros2 branch specifically (master has a different layout that
+    # Clone the cam-wip branch specifically (master has a different layout that
     # leaves a duplicate sophus package in the workspace — see ci.yaml).
-    git clone --branch ros2 --recurse-submodules "$OUSTER_ROS_REPO" "$WS/src/ouster-ros"
+    git clone --branch cam-wip --recurse-submodules "$OUSTER_ROS_REPO" "$WS/src/ouster-ros"
     git -C "$WS/src/ouster-ros" checkout "$OUSTER_ROS_REF"
     git -C "$WS/src/ouster-ros" submodule sync --recursive
     git -C "$WS/src/ouster-ros" submodule update --init --recursive
   fi
+  git -C "$REPO_DIR" submodule update --init --recursive
   [ -e "$WS/src/gz_sensors_ouster" ] || ln -s "$REPO_DIR" "$WS/src/gz_sensors_ouster"
 
   # ── system deps via rosdep ──────────────────────────────────────────────

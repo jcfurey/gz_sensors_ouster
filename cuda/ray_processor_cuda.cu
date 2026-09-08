@@ -214,7 +214,7 @@ __global__ void rayProcessKernel(
         }
         range_out[idx]  = 0u;
         signal_out[idx] = 0u;
-        refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+        refl_out[idx]   = 0u;
         nearir_out[idx] = 0u;
         return;
     }
@@ -224,7 +224,7 @@ __global__ void rayProcessKernel(
     if (d < min_range || d >= max_range) {
         range_out[idx]  = 0u;
         signal_out[idx] = 0u;
-        refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+        refl_out[idx]   = 0u;
         nearir_out[idx] = 0u;
         return;
     }
@@ -239,7 +239,7 @@ __global__ void rayProcessKernel(
         curand_uniform(rs) < rpmath::kEdgeSuppressProb) {
         range_out[idx]  = 0u;
         signal_out[idx] = 0u;
-        refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+        refl_out[idx]   = 0u;
         nearir_out[idx] = 0u;
         return;
     }
@@ -259,7 +259,7 @@ __global__ void rayProcessKernel(
         if (curand_uniform(rs) < p_dropout) {
             range_out[idx]  = 0u;
             signal_out[idx] = 0u;
-            refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+            refl_out[idx]   = 0u;
             nearir_out[idx] = 0u;
             return;
         }
@@ -279,7 +279,7 @@ __global__ void rayProcessKernel(
     if (d < min_range || d >= max_range) {
         range_out[idx]  = 0u;
         signal_out[idx] = 0u;
-        refl_out[idx]   = static_cast<uint8_t>(base_reflectivity);
+        refl_out[idx]   = 0u;
         nearir_out[idx] = 0u;
         return;
     }
@@ -287,13 +287,8 @@ __global__ void rayProcessKernel(
     range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
     // ── Signal: 1/r² model with Poisson shot noise ──────────────────────────
-    float intensity = 1.0f;
-    if (retro != nullptr) {
-        float r = retro[idx];
-        if (isfinite(r) && r > 0.f) {
-            intensity = r;
-        }
-    }
+    const float intensity = ouster_sim_core::opticalValueOrDefault(retro, idx, 1.0f);
+
     float sig = rpmath::signalFromRange(d, intensity, base_signal);
 
     // Shot noise: σ = √(signal) × scale
@@ -307,7 +302,7 @@ __global__ void rayProcessKernel(
     // 0-100 = Lambertian (linear), 101-255 = retroreflective (log).
     // See ray_processor_cpu_impl.cpp for the full derivation; the mapping
     // itself is rpmath::reflectivityToByte (shared by all backends).
-    if (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f) {
+    if (ouster_sim_core::opticalValuePresent(retro, idx)) {
         refl_out[idx] = rpmath::reflectivityToByte(retro[idx]);
     } else {
         refl_out[idx] = static_cast<uint8_t>(base_reflectivity);
@@ -320,7 +315,7 @@ __global__ void rayProcessKernel(
         nir = (isfinite(nir_in[idx]) && nir_in[idx] > 0.f)
             ? nir_in[idx] * rpmath::kNearIrScale : 0.f;
     } else {
-        nir = (retro != nullptr && isfinite(retro[idx]) && retro[idx] > 0.f)
+        nir = (ouster_sim_core::opticalValuePresent(retro, idx))
             ? retro[idx] * rpmath::kNearIrScale : 0.f;
     }
     if (rs != nullptr && nearir_noise_scale > 0.f && nir > 0.f) {

@@ -150,8 +150,8 @@ TEST(NoiseModel, ReflectivityLambertianScale)
     processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
-    // retro=0 is invalid (<=0 check), falls through to base_reflectivity
-    EXPECT_EQ(refl[0], static_cast<uint8_t>(p.base_reflectivity));
+    // An explicitly black material is present and must remain black.
+    EXPECT_EQ(refl[0], 0u);
     EXPECT_EQ(refl[1], 50u);   // 0.5 * 100 = 50
     EXPECT_EQ(refl[2], 100u);  // 1.0 * 100 = 100
 }

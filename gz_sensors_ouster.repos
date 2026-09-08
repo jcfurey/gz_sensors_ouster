@@ -7,10 +7,10 @@ repositories:
   # The apt ros-<distro>-ouster-ros lags (currently 0.14.1) and exposes an
   # older PacketWriter API that gz_sensors_ouster no longer targets.
   # Pinned to an exact commit for reproducibility; bump to the new tip SHA
-  # of jcfurey/ouster-ros@ros2 when intentionally moving forward
+  # of jcfurey/ouster-ros@cam-wip when intentionally moving forward
   # (also update the matching pin in ci.yaml, Dockerfile, and
   # .claude/hooks/session-start.sh).
   ouster-ros:
     type: git
     url: https://github.com/jcfurey/ouster-ros.git
-    version: 6ab9402c1a8275f600945c3d8dfd5a73b40585c8
+    version: 338fa84a9d988eaae762c79bdd7bacbae497280a

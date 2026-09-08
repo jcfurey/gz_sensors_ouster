@@ -178,6 +178,7 @@ def generate_launch_description():
                 # the bag's one-shot metadata message before creating the
                 # packet subscription can otherwise lose the first scans.
                 'metadata': metadata,
+                'lidar_packet_reliable': True,
                 # Build only the point cloud. The plugin already publishes
                 # /sensor/lidar/lidar0/imu directly, so don't let os_cloud
                 # republish a second 'imu' from imu_packets.
@@ -237,6 +238,7 @@ def generate_launch_description():
                 # Pre-seed before packet subscription discovery during bag
                 # playback; live metadata updates are still subscribed below.
                 'metadata': metadata,
+                'lidar_packet_reliable': True,
                 'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
                 # Stamp images/camera_info in the URDF lidar frame. The os_image
                 # default is 'os_lidar', a frame nothing broadcasts here

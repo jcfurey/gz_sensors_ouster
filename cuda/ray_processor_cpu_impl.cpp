@@ -58,7 +58,7 @@ void processCpu(
             }
             range_out[idx] = 0u;
             signal_out[idx] = 0u;
-            reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+            reflectivity_out[idx] = 0u;
             nearir_out[idx] = 0u;
             return;
         }
@@ -69,7 +69,7 @@ void processCpu(
         if (d < p.min_range || d >= p.max_range) {
             range_out[idx] = 0u;
             signal_out[idx] = 0u;
-            reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+            reflectivity_out[idx] = 0u;
             nearir_out[idx] = 0u;
             return;
         }
@@ -82,7 +82,7 @@ void processCpu(
                 && uni(rng) < rpmath::kEdgeSuppressProb) {
                 range_out[idx] = 0u;
                 signal_out[idx] = 0u;
-                reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+                reflectivity_out[idx] = 0u;
                 nearir_out[idx] = 0u;
                 return;
             }
@@ -101,7 +101,7 @@ void processCpu(
             if (uni(rng) < p_drop) {
                 range_out[idx] = 0u;
                 signal_out[idx] = 0u;
-                reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+                reflectivity_out[idx] = 0u;
                 nearir_out[idx] = 0u;
                 return;
             }
@@ -120,17 +120,15 @@ void processCpu(
         if (d < p.min_range || d >= p.max_range) {
             range_out[idx] = 0u;
             signal_out[idx] = 0u;
-            reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
+            reflectivity_out[idx] = 0u;
             nearir_out[idx] = 0u;
             return;
         }
         range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
         // Signal with Poisson shot noise
-        float intensity = 1.0f;
-        if (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f) {
-            intensity = retro_host[idx];
-        }
+        const float intensity = ouster_sim_core::opticalValueOrDefault(retro_host, idx, 1.0f);
+
 
         float sig = rpmath::signalFromRange(d, intensity, p.base_signal);
         if (has_noise && p.signal_noise_scale > 0.f) {
@@ -139,7 +137,7 @@ void processCpu(
         }
         signal_out[idx] = rpmath::clampU16(sig);
 
-        if (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f) {
+        if (ouster_sim_core::opticalValuePresent(retro_host, idx)) {
             reflectivity_out[idx] = rpmath::reflectivityToByte(retro_host[idx]);
         } else {
             reflectivity_out[idx] = static_cast<uint8_t>(p.base_reflectivity);
@@ -154,7 +152,7 @@ void processCpu(
             nir = (std::isfinite(f) && f > 0.0f)
                 ? f * rpmath::kNearIrScale : 0.0f;
         } else {
-            nir = (retro_host && std::isfinite(retro_host[idx]) && retro_host[idx] > 0.0f)
+            nir = (ouster_sim_core::opticalValuePresent(retro_host, idx))
                 ? retro_host[idx] * rpmath::kNearIrScale : 0.0f;
         }
         if (has_noise && p.nearir_noise_scale > 0.f && nir > 0.f) {

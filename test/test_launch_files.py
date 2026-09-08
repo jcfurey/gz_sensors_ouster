@@ -116,3 +116,27 @@ def test_ouster_consumers_preseed_metadata_before_fast_bag_playback(name):
     """Avoid losing early packets while a one-shot metadata callback starts."""
     src = (LAUNCHES / name).read_text()
     assert src.count("'metadata': metadata") >= 2
+
+
+@pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
+def test_decoders_match_complete_frame_packet_reliability(name):
+    tree = ast.parse((LAUNCHES / name).read_text())
+    decoders = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        keywords = {item.arg: item.value for item in node.keywords}
+        executable = keywords.get('executable')
+        if not isinstance(executable, ast.Constant) or executable.value not in (
+                'os_cloud', 'os_image', 'os_pinhole'):
+            continue
+        decoders += 1
+        parameters = keywords['parameters']
+        assert any(
+            isinstance(item, ast.Dict) and any(
+                isinstance(key, ast.Constant) and key.value == 'lidar_packet_reliable'
+                and isinstance(value, ast.Constant) and value.value is True
+                for key, value in zip(item.keys, item.values))
+            for item in parameters.elts
+        ), f'{name}: {executable.value} must accept reliable simulation packets'
+    assert decoders >= 2

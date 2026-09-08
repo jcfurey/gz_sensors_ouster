@@ -10,11 +10,8 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstring>
-
-#include <ouster/impl/packet_writer.h>
-#include <ouster/lidar_scan.h>
-#include <ouster/types.h>
+#include <cmath>
+#include <stdexcept>
 
 namespace gz_gpu_ouster_lidar {
 
@@ -30,10 +27,34 @@ PacketEncoder::~PacketEncoder()
 void PacketEncoder::start(const OusterMetadata * meta, RosInterface * ros,
                           double lidar_hz)
 {
+    if (!ros) throw std::invalid_argument("packet publisher is null");
+    start(meta, [ros](const auto & packet) { ros->publishLidarPacket(packet); }, lidar_hz);
+}
+
+void PacketEncoder::start(const OusterMetadata * meta, PacketSink sink,
+                          double lidar_hz, ouster_sim_core::PacketDeliveryMode mode)
+{
+    if (!meta || !sink || !std::isfinite(lidar_hz) || lidar_hz <= 0.0) {
+        throw std::invalid_argument("packet encoder requires metadata, sink and positive rate");
+    }
+    auto encoder = std::make_unique<ouster_sim_core::OusterPacketEncoder>(meta->core());
+    stop();
     meta_ = meta;
-    ros_ = ros;
+    sink_ = std::move(sink);
+    encoder_ = std::move(encoder);
     lidar_hz_ = lidar_hz;
-    pkt_buf_.resize(meta_->pw->lidar_packet_size, 0);
+    delivery_mode_ = mode;
+    column_timestamps_.resize(static_cast<size_t>(meta_->W));
+    {
+        std::lock_guard lk(drain_mtx_);
+        shutdown_.store(false);
+        paused_ = false;
+        simulation_epoch_ = state_generation_ = 0;
+        revolution_ = 0;
+        dropped_batches_.store(0);
+        drain_ready_ = false;
+        drain_pkts_.clear();
+    }
     drain_thread_ = std::thread(&PacketEncoder::drainThreadFunc, this);
 }
 
@@ -73,66 +94,26 @@ void PacketEncoder::setSimulationState(bool paused, uint64_t epoch)
 }
 
 void PacketEncoder::encodeScan(int64_t stamp_ns, uint64_t epoch,
-                               uint32_t * range, uint16_t * signal,
-                               uint8_t * refl, uint16_t * nearir)
+                               const uint32_t * range, const uint16_t * signal,
+                               const uint8_t * refl, const uint16_t * nearir)
 {
-    if (!meta_ || !meta_->pw || pkt_buf_.empty()) return;
-    const auto produced_at = std::chrono::steady_clock::now();
-
-    const int H = meta_->H;
-    const int W = meta_->W;
-    const int cpp = meta_->cpp;
-    auto & pw = *meta_->pw;
-
-    const int n_packets = W / cpp;
-    const int64_t scan_period_ns = periodFromHz(lidar_hz_).count();
-    // Per-column timestamps use the same (m + 1) rolling-shutter convention
-    // as RaycastMirror's pose interpolation. The final measurement therefore
-    // coincides exactly with the actual acquisition timestamp.
-
-    // Map raw buffers into Eigen for PacketWriter
-    using RangeMatrix = Eigen::Map<ouster::sdk::core::img_t<uint32_t>>;
-    using SignalMatrix = Eigen::Map<ouster::sdk::core::img_t<uint16_t>>;
-    using ReflMatrix = Eigen::Map<ouster::sdk::core::img_t<uint8_t>>;
-    using NirMatrix = Eigen::Map<ouster::sdk::core::img_t<uint16_t>>;
-
-    RangeMatrix  range_mat(range, H, W);
-    SignalMatrix signal_mat(signal, H, W);
-    ReflMatrix   refl_mat(refl, H, W);
-    NirMatrix    nearir_mat(nearir, H, W);
-
-    // encode_pkts_ buffers (and the vector itself) are reused across scans:
-    // after the drain swap below it holds the drain thread's previously
-    // published packets, whose buf capacity the assign() below reuses —
-    // zero allocations in steady state.
-    encode_pkts_.resize(static_cast<size_t>(n_packets));
-
-    const size_t pkt_sz = meta_->pw->lidar_packet_size;
-    for (int p = 0; p < n_packets; ++p) {
-        auto & pkt_buf = encode_pkts_[static_cast<size_t>(p)].buf;
-        pkt_buf.assign(pkt_sz, 0);
-        uint8_t * pkt_data = pkt_buf.data();
-
-        const int col_start = p * cpp;
-        pw.set_frame_id(pkt_data, frame_id_);
-
-        for (int c_local = 0; c_local < cpp; ++c_local) {
-            const int col_global = col_start + c_local;
-            uint8_t * col = pw.nth_col(c_local, pkt_data);
-            const int64_t col_ts = columnTimestampNs(
-                stamp_ns, scan_period_ns, col_global, W);
-            pw.set_col_timestamp(col, static_cast<uint64_t>(col_ts));
-            pw.set_col_measurement_id(col, static_cast<uint16_t>(col_global));
-            pw.set_col_status(col, 0x01u);
-        }
-
-        pw.set_block<uint32_t>(range_mat.data(),  W, ouster::sdk::core::ChanField::RANGE,        pkt_data);
-        pw.set_block<uint16_t>(signal_mat.data(), W, ouster::sdk::core::ChanField::SIGNAL,       pkt_data);
-        pw.set_block<uint8_t> (refl_mat.data(),   W, ouster::sdk::core::ChanField::REFLECTIVITY, pkt_data);
-        pw.set_block<uint16_t>(nearir_mat.data(), W, ouster::sdk::core::ChanField::NEAR_IR,      pkt_data);
+    if (!encoder_ || shutdown_.load()) return;
+    if (!range || !signal || !refl || !nearir || stamp_ns <= 0) {
+        throw std::invalid_argument("scan requires channel buffers and a positive timestamp");
     }
-
-    ++frame_id_;
+    const auto produced_at = std::chrono::steady_clock::now();
+    const auto period = periodFromHz(lidar_hz_).count();
+    for (int column = 0; column < meta_->W; ++column) {
+        column_timestamps_[static_cast<size_t>(column)] = static_cast<uint64_t>(
+            columnTimestampNs(stamp_ns, period, column, meta_->W));
+    }
+    const auto count = static_cast<size_t>(meta_->H) * meta_->W;
+    const ouster_sim_core::OusterScanFrameView frame{
+        revolution_, std::max(int64_t{0}, stamp_ns - period),
+        static_cast<uint32_t>(meta_->W), static_cast<uint16_t>(meta_->H),
+        column_timestamps_, {range, count}, {signal, count}, {refl, count}, {nearir, count}};
+    encoder_->encode(frame, encode_pkts_);
+    ++revolution_;
 
     // ── Wake drain thread ────────────────────────────────────────────────────
     bool overwrote = false;
@@ -152,8 +133,8 @@ void PacketEncoder::encodeScan(int64_t stamp_ns, uint64_t epoch,
         drain_ready_ = true;
     }
     drain_cv_.notify_one();
-    if (overwrote) {
-        RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 1000,
+    if (overwrote && (dropped == 1 || (dropped & (dropped - 1)) == 0)) {
+        RCLCPP_WARN(kLogger,
             "drainThread dropped %lu backlogged batches",
             static_cast<unsigned long>(dropped));
     }
@@ -161,104 +142,69 @@ void PacketEncoder::encodeScan(int64_t stamp_ns, uint64_t epoch,
 
 void PacketEncoder::drainThreadFunc()
 {
-    std::vector<ouster_sensor_msgs::msg::PacketMsg> local_pkts;
-    std::chrono::steady_clock::time_point local_produced_at{};
-    std::chrono::steady_clock::time_point prev_produced_at{};
+    using ouster_sim_core::PacketPacingPolicy;
+    PacketPacingPolicy pacing(periodFromHz(lidar_hz_), delivery_mode_);
+    std::vector<ouster_sim_core::EncodedLidarPacket> local_pkts;
+    ouster_sensor_msgs::msg::PacketMsg message;
     uint64_t previous_epoch = 0;
     uint64_t previous_generation = 0;
-    bool have_previous = false;
 
     while (!shutdown_.load(std::memory_order_acquire)) {
-        uint64_t local_epoch = 0;
-        uint64_t local_generation = 0;
-        {
-            std::unique_lock<std::mutex> lk(drain_mtx_);
-            drain_cv_.wait(lk, [this] {
-                return (drain_ready_ && !paused_) ||
-                       shutdown_.load(std::memory_order_acquire);
-            });
-            if (shutdown_.load(std::memory_order_acquire)) break;
-            drain_ready_ = false;
-            local_pkts.swap(drain_pkts_);
-            local_produced_at = drain_produced_at_;
-            local_epoch = drain_epoch_;
-            local_generation = state_generation_;
+        std::unique_lock lk(drain_mtx_);
+        drain_cv_.wait(lk, [this] { return (drain_ready_ && !paused_) || shutdown_.load(); });
+        if (shutdown_.load()) return;
+        drain_ready_ = false;
+        local_pkts.swap(drain_pkts_);
+        const auto local_epoch = drain_epoch_;
+        auto local_generation = state_generation_;
+        if (previous_epoch != local_epoch || previous_generation != local_generation) {
+            pacing.reset();
         }
-
-        if (local_pkts.empty()) continue;
-
-        // Use absolute deadlines (sleep_until) instead of accumulating
-        // sleep_for(spacing) calls. At dense-sensor packet counts the per-
-        // packet spacing drops to hundreds of microseconds, where CFS
-        // scheduler jitter would round each sleep up and the packets would
-        // bunch toward the end of the scan. Anchoring on a fixed t0 lets
-        // any individual sleep finish late without pushing the next one.
-        //
-        // Pace from PRODUCER arrival times rather than drain start times. A
-        // busy drain otherwise measures its own backlog and feeds that error
-        // into the next scan. The observed interval is used above and below
-        // RTF 1, so slow simulation and rate-scaled recording are respected
-        // just as fast simulation is. Pause/reset invalidates the observation.
-        const auto nominal = periodFromHz(lidar_hz_);
-        const bool observation_valid =
-            have_previous && local_epoch == previous_epoch &&
-            local_generation == previous_generation;
-        const auto observed = observation_valid
-            ? std::chrono::duration_cast<std::chrono::nanoseconds>(
-                local_produced_at - prev_produced_at)
-            : std::chrono::nanoseconds::zero();
-        const auto span = packetBatchDrainSpan(
-            nominal, observed, observation_valid);
-        const auto spacing = span /
-            static_cast<int64_t>(local_pkts.size());
-        prev_produced_at = local_produced_at;
         previous_epoch = local_epoch;
         previous_generation = local_generation;
-        have_previous = true;
-
+        pacing.resume(std::chrono::steady_clock::now());
+        if (local_pkts.empty()) continue;
+        pacing.beginFrame(drain_produced_at_, std::chrono::steady_clock::now(), local_pkts.size());
         try {
-            auto t0 = std::chrono::steady_clock::now();
-            bool cancelled = false;
-            for (size_t i = 0; i < local_pkts.size(); ++i) {
-                auto deadline = t0 + spacing * static_cast<int64_t>(i);
-                std::unique_lock<std::mutex> lk(drain_mtx_);
-                for (;;) {
-                    if (shutdown_.load(std::memory_order_acquire)) return;
-                    if (local_epoch != simulation_epoch_) {
-                        cancelled = true;
-                        break;
-                    }
-                    if (paused_) {
-                        drain_cv_.wait(lk, [this, local_epoch] {
-                            return shutdown_.load(std::memory_order_acquire) ||
-                                   !paused_ ||
-                                   local_epoch != simulation_epoch_;
-                        });
-                        // Resume without a catch-up burst: put the current
-                        // packet one normal spacing after unpause and shift
-                        // all later absolute deadlines with it.
-                        const auto now = std::chrono::steady_clock::now();
-                        t0 = now - spacing * static_cast<int64_t>(i) + spacing;
-                        deadline = t0 + spacing * static_cast<int64_t>(i);
-                        continue;
-                    }
-                    // cppcheck-suppress knownConditionTrueFalse
-                    // paused_ and simulation_epoch_ are mutated across threads under drain_mtx_
-                    if (drain_cv_.wait_until(lk, deadline,
-                            [this, local_epoch] {
-                                return shutdown_.load(std::memory_order_acquire) ||
-                                       paused_ ||
-                                       local_epoch != simulation_epoch_;
-                            })) {
-                        continue;
-                    }
+            while (pacing.hasActiveFrame()) {
+                if (shutdown_.load()) return;
+                if (local_epoch != simulation_epoch_) {
+                    pacing.reset();
                     break;
                 }
+                if (paused_) {
+                    pacing.pause();
+                    drain_cv_.wait(lk, [this, local_epoch] {
+                        return shutdown_.load() || !paused_ || local_epoch != simulation_epoch_;
+                    });
+                    pacing.resume(std::chrono::steady_clock::now());
+                    local_generation = state_generation_;
+                    continue;
+                }
+                if (local_generation != state_generation_) {
+                    // Observe even a pause/resume that finished during publish.
+                    pacing.pause();
+                    pacing.resume(std::chrono::steady_clock::now());
+                    local_generation = state_generation_;
+                }
+                const auto deadline = pacing.nextDeadline().value();
+                if (drain_cv_.wait_until(lk, deadline, [this, local_epoch, local_generation] {
+                        return shutdown_.load() || paused_ || local_epoch != simulation_epoch_ ||
+                            local_generation != state_generation_;
+                    })) continue;
+
+                auto & packet = local_pkts[pacing.nextPacketIndex()];
+                message.buf.swap(packet.bytes);
                 lk.unlock();
-                if (cancelled) break;
-                ros_->publishLidarPacket(local_pkts[i]);
+                // The potentially blocking transport owns no simulation mutex.
+                sink_(message);
+                lk.lock();
+                message.buf.swap(packet.bytes);
+                pacing.markPacketPublished();
             }
         } catch (const std::exception & e) {
+            if (!lk.owns_lock()) lk.lock();
+            pacing.reset();
             RCLCPP_ERROR(kLogger, "drainThread publish failed: %s", e.what());
         }
     }

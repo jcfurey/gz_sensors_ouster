@@ -53,7 +53,7 @@ ARG CUDA_HOME_VERSION=12.6
 # commit for reproducibility (same SHA as the package's CI). turtlebot3 is pinned
 # for the genuine waffle *description* (geometry only).
 ARG OUSTER_ROS_REPO=https://github.com/jcfurey/ouster-ros.git
-ARG OUSTER_ROS_REF=6ab9402c1a8275f600945c3d8dfd5a73b40585c8
+ARG OUSTER_ROS_REF=338fa84a9d988eaae762c79bdd7bacbae497280a
 ARG TURTLEBOT3_REPO=https://github.com/ROBOTIS-GIT/turtlebot3.git
 ARG TURTLEBOT3_BRANCH=jazzy
 ARG TURTLEBOT3_REF=1f67e8d477df3e91729a03e43a9cd71cc67addfa
@@ -124,9 +124,9 @@ ENV PATH=/usr/local/cuda/bin:${PATH} \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64
 
 # ── ouster-ros (jcfurey fork, pinned commit, with ouster-sdk submodule) ───────
-# Clone the ros2 branch specifically (its layout nests ouster-ros/ouster-sdk);
+# Clone the cam-wip branch specifically (its layout nests ouster-ros/ouster-sdk);
 # a full clone keeps the pinned commit reachable, then resync submodules to it.
-RUN git clone --branch ros2 --recurse-submodules "${OUSTER_ROS_REPO}" src/ouster-ros \
+RUN git clone --branch cam-wip --recurse-submodules "${OUSTER_ROS_REPO}" src/ouster-ros \
  && git -C src/ouster-ros checkout "${OUSTER_ROS_REF}" \
  && git -C src/ouster-ros submodule sync --recursive \
  && git -C src/ouster-ros submodule update --init --recursive

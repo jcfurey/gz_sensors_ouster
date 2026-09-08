@@ -29,6 +29,7 @@
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 
 #include <cstdint>
+#include <ouster_sim_core/optical_value.hpp>
 
 #if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)
   #define GZ_OUSTER_HD __host__ __device__
@@ -283,14 +284,10 @@ GZ_OUSTER_HD inline float rangeFraction(float d, float max_range)
 }
 
 /// Retro value to use for the dropout / range-noise weighting: the measured
-/// retro when present and positive, else a neutral default.
+/// retro when present (including zero), else a neutral default.
 GZ_OUSTER_HD inline float retroForNoise(const float * retro, int idx)
 {
-    if (retro != nullptr) {
-        const float r = retro[idx];
-        if (gzm::isfinite_(r) && r > 0.0f) return r;
-    }
-    return kDefaultRetro;
+    return ouster_sim_core::opticalValueOrDefault(retro, idx, kDefaultRetro);
 }
 
 /// Power-law interpolation of the vendor's 10% and 80% Lambertian range

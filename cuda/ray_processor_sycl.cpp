@@ -409,7 +409,7 @@ private:
                     }
                     range_out[idx]  = 0u;
                     signal_out[idx] = 0u;
-                    refl_out[idx]   = static_cast<uint8_t>(base_refl);
+                    refl_out[idx]   = 0u;
                     nearir_out[idx] = 0u;
                     return;
                 }
@@ -417,7 +417,7 @@ private:
                 if (d < minr || d >= maxr) {
                     range_out[idx]  = 0u;
                     signal_out[idx] = 0u;
-                    refl_out[idx]   = static_cast<uint8_t>(base_refl);
+                    refl_out[idx]   = 0u;
                     nearir_out[idx] = 0u;
                     return;
                 }
@@ -428,7 +428,7 @@ private:
                     uniform01(counter, seed, idx) < rpmath::kEdgeSuppressProb) {
                     range_out[idx]  = 0u;
                     signal_out[idx] = 0u;
-                    refl_out[idx]   = static_cast<uint8_t>(base_refl);
+                    refl_out[idx]   = 0u;
                     nearir_out[idx] = 0u;
                     return;
                 }
@@ -444,7 +444,7 @@ private:
                     if (uniform01(counter, seed, idx) < p_drop) {
                         range_out[idx]  = 0u;
                         signal_out[idx] = 0u;
-                        refl_out[idx]   = static_cast<uint8_t>(base_refl);
+                        refl_out[idx]   = 0u;
                         nearir_out[idx] = 0u;
                         return;
                     }
@@ -462,18 +462,15 @@ private:
                 if (d < minr || d >= maxr) {
                     range_out[idx]  = 0u;
                     signal_out[idx] = 0u;
-                    refl_out[idx]   = static_cast<uint8_t>(base_refl);
+                    refl_out[idx]   = 0u;
                     nearir_out[idx] = 0u;
                     return;
                 }
                 range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
                 // Signal 1/r² + shot noise
-                float intensity = 1.0f;
-                if (retro) {
-                    float r = retro[idx];
-                    if (sycl::isfinite(r) && r > 0.f) intensity = r;
-                }
+                const float intensity = ouster_sim_core::opticalValueOrDefault(retro, idx, 1.0f);
+
                 float sig = rpmath::signalFromRange(d, intensity, base_signal);
                 if (sig_scale > 0.f) {
                     float sigma_sig = sycl::sqrt(sycl::fmax(sig, 0.f)) * sig_scale;
@@ -483,7 +480,7 @@ private:
 
                 // Reflectivity — shared rpmath::reflectivityToByte. Canonical
                 // derivation + upstream Ouster refs in ray_processor_cpu_impl.cpp.
-                if (retro && sycl::isfinite(retro[idx]) && retro[idx] > 0.f) {
+                if (ouster_sim_core::opticalValuePresent(retro, idx)) {
                     refl_out[idx] = rpmath::reflectivityToByte(retro[idx]);
                 } else {
                     refl_out[idx] = static_cast<uint8_t>(base_refl);
@@ -495,7 +492,7 @@ private:
                     nir = (sycl::isfinite(nir_in[idx]) && nir_in[idx] > 0.f)
                         ? nir_in[idx] * rpmath::kNearIrScale : 0.f;
                 } else {
-                    nir = (retro && sycl::isfinite(retro[idx]) && retro[idx] > 0.f)
+                    nir = (ouster_sim_core::opticalValuePresent(retro, idx))
                         ? retro[idx] * rpmath::kNearIrScale : 0.f;
                 }
                 if (nir_scale > 0.f && nir > 0.f) {

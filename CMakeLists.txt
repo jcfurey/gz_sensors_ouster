@@ -251,13 +251,22 @@ else()
   message(STATUS "${PROJECT_NAME}: OpenMP not found; beam resampling single-threaded")
 endif()
 
+# Canonical ROS-free contracts; ouster_ros supplies the SDK in this process.
+set(OUSTER_SIM_CORE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ouster_sim_core")
+if(NOT EXISTS "${OUSTER_SIM_CORE_SOURCE_DIR}/CMakeLists.txt")
+  message(FATAL_ERROR "Initialize ouster_sim_core: git submodule update --init --recursive")
+endif()
+add_library(${PROJECT_NAME}_ouster_sdk INTERFACE)
+target_include_directories(${PROJECT_NAME}_ouster_sdk INTERFACE ${ouster_ros_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME}_ouster_sdk INTERFACE ${ouster_ros_LIBRARIES} Eigen3::Eigen)
+set(OUSTER_SIM_CORE_OUSTER_SDK_TARGET ${PROJECT_NAME}_ouster_sdk)
+add_subdirectory("${OUSTER_SIM_CORE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ouster_sim_core")
+
 # ── CUDA static library ──────────────────────────────────────────────────────
 add_subdirectory(cuda)
 
-# Metadata validation, packet encoding/pacing, and ROS publication are
-# simulator-neutral. Export them separately so another ray producer (notably
-# agx_sensors_ouster) can retain the exact same Ouster-facing ROS contract
-# without copying the wire-format implementation.
+# Public ROS facade: engine-independent contracts live in ouster_sim_core;
+# this target owns ROS conversion, thread lifetime and complete-frame delivery.
 ament_auto_add_library(${PROJECT_NAME}_core SHARED
   src/ouster_lidar_profile.cpp
   src/ouster_metadata.cpp
@@ -268,7 +277,19 @@ target_include_directories(${PROJECT_NAME}_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}/core>
 )
-target_link_libraries(${PROJECT_NAME}_core Eigen3::Eigen)
+# Embed the complete API in the parent library, as the AGX facade does.
+# Build-only linkage keeps the static/provider targets out of ament exports.
+target_include_directories(${PROJECT_NAME}_core PUBLIC
+  $<BUILD_INTERFACE:${OUSTER_SIM_CORE_SOURCE_DIR}/include>)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_link_libraries(${PROJECT_NAME}_core Eigen3::Eigen
+    $<BUILD_INTERFACE:-Wl,--whole-archive>
+    $<BUILD_INTERFACE:ouster_sim_core>
+    $<BUILD_INTERFACE:-Wl,--no-whole-archive>)
+else()
+  target_link_libraries(${PROJECT_NAME}_core Eigen3::Eigen
+    $<BUILD_INTERFACE:ouster_sim_core>)
+endif()
 
 # ── Gazebo system plugin ─────────────────────────────────────────────────────
 # ament_auto_add_library auto-links the ament dependencies found above
@@ -310,6 +331,40 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
 
+  # The same fixture sources run against both simulator SDK providers.
+  foreach(contract revolution_assembler optical_channel_model packet_pacing
+                   product_profile metadata_product_profile packet_roundtrip)
+    ament_auto_add_gtest(test_shared_${contract}
+      "${OUSTER_SIM_CORE_SOURCE_DIR}/test/test_${contract}.cpp")
+    target_compile_definitions(test_shared_${contract} PRIVATE
+      OUSTER_SIM_CORE_TEST_DATA_DIR="${OUSTER_SIM_CORE_SOURCE_DIR}/test/data")
+    target_link_libraries(test_shared_${contract} ${PROJECT_NAME}_core)
+  endforeach()
+  ament_auto_add_gtest(test_core_conformance test/test_core_conformance.cpp TIMEOUT 30)
+  target_include_directories(test_core_conformance PRIVATE "${OUSTER_SIM_CORE_SOURCE_DIR}/test/support")
+  target_compile_definitions(test_core_conformance PRIVATE
+    GZ_TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata"
+    OUSTER_SIM_CORE_TEST_DATA_DIR="${OUSTER_SIM_CORE_SOURCE_DIR}/test/data")
+  target_link_libraries(test_core_conformance ${PROJECT_NAME}_core)
+  ament_add_gtest(test_optical_conformance test/test_optical_conformance.cpp)
+  target_include_directories(test_optical_conformance PRIVATE "${OUSTER_SIM_CORE_SOURCE_DIR}/test/support")
+  target_link_libraries(test_optical_conformance gz_gpu_ouster_lidar_cuda ${PROJECT_NAME}_core)
+
+  find_package(rmw_zenoh_cpp QUIET)
+  if(rmw_zenoh_cpp_FOUND)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    ament_add_gtest_executable(test_zenoh_packet_burst test/test_zenoh_packet_burst.cpp)
+    target_link_libraries(test_zenoh_packet_burst ${PROJECT_NAME}_core)
+    ament_add_test(test_zenoh_packet_burst
+      COMMAND "${Python3_EXECUTABLE}"
+        "${OUSTER_SIM_CORE_SOURCE_DIR}/test/support/run_zenoh_packet_burst.py"
+        "$<TARGET_FILE:test_zenoh_packet_burst>"
+        "--gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/test_results/${PROJECT_NAME}/test_zenoh_packet_burst.gtest.xml"
+      RESULT_FILE "${CMAKE_CURRENT_BINARY_DIR}/test_results/${PROJECT_NAME}/test_zenoh_packet_burst.gtest.xml"
+      TIMEOUT 40)
+    set_tests_properties(test_zenoh_packet_burst PROPERTIES LABELS "integration;zenoh")
+  endif()
+
   # Test: noise model (CPU fallback path)
   ament_add_gtest(test_noise_model test/test_noise_model.cpp)
   target_link_libraries(test_noise_model gz_gpu_ouster_lidar_cuda)
@@ -339,7 +394,8 @@ if(BUILD_TESTING)
 
   # Test: generation/revision/model physics profile catalog and inference.
   ament_add_gtest(test_ouster_lidar_profile
-    test/test_ouster_lidar_profile.cpp src/ouster_lidar_profile.cpp)
+    test/test_ouster_lidar_profile.cpp)
+  target_link_libraries(test_ouster_lidar_profile ${PROJECT_NAME}_core)
   target_include_directories(test_ouster_lidar_profile PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -385,6 +441,7 @@ if(BUILD_TESTING)
   target_include_directories(test_sim_time_scheduler PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
   ament_add_gtest(test_packet_pacing test/test_packet_pacing.cpp)
+  target_link_libraries(test_packet_pacing ${PROJECT_NAME}_core)
   target_include_directories(test_packet_pacing PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -429,6 +486,8 @@ install(FILES
   cuda/ray_processor_math.hpp
   DESTINATION include/gz_gpu_ouster_lidar
 )
+
+install(DIRECTORY "${OUSTER_SIM_CORE_SOURCE_DIR}/include/" DESTINATION include)
 
 install(FILES
   src/lidar_common.hpp

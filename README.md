@@ -16,16 +16,49 @@ hardware -- no driver changes needed.
   toolchain is compiled in or no device is found at runtime.
 - Native `PacketMsg` encoding via Ouster SDK `PacketWriter` (RANGE, SIGNAL,
   REFLECTIVITY, NEAR_IR channels)
-- Exported `gz_sensors_ouster_core` library for this standalone package's
-  metadata, packet encoding/pacing, and ROS publication. The dedicated AGX
-  package embeds `ouster_sim_core` independently; parity is maintained with
-  common conformance fixtures during the transition.
+- Exported `gz_sensors_ouster_core` ROS facade over the pinned, ROS-free
+  `ouster_sim_core` submodule shared with AGX. Metadata, product profiles,
+  packet bytes and pacing use the same implementation. Both providers run
+  the shared conformance fixtures.
 - Simulated IMU packets from Gazebo's IMU sensor (optional, auto-detect)
 - Noise parameters reconfigurable at runtime via `ros2 param set`
 - Latched metadata republishing for rmw_zenoh_cpp compatibility
 - Rolling-shutter packet timing via drain thread
 - Works on **any GPU** for ray casting (OGRE2 + OpenGL is vendor-agnostic);
   the GPU noise path is additionally accelerated on NVIDIA/AMD/Intel.
+
+## Shared core contract
+
+Clone with `--recurse-submodules`, or run `git submodule update --init --recursive`
+after checkout, including before building a Docker image from this directory.
+`third_party/ouster_sim_core` is embedded plain CMake; Gazebo supplies the SDK
+through `ouster_ros`, while AGX supplies its native SDK in a separate process.
+Only the parent facade library is installed. Public core headers are installed
+alongside the Gazebo facade headers.
+
+The production metadata loader rejects dual-return UDP profiles until the
+common frame contract supports their secondary channels. Supported primary
+profiles are LEGACY, RNG19_RFL8_SIG16_NIR16 and RNG15_RFL8_NIR8. Optional wire
+fields are written only when present; modern packets include identity and CRC.
+RNG15 ranges must be multiples of 8 mm and at most 262.136 m. Invalid ranges
+fail before a batch enters the delivery queue.
+
+CPU/CUDA/HIP/SYCL optical stages use the common dense-buffer presence contract:
+finite zero means an authored black surface, invalid or absent input uses a
+fallback, and true misses have four zero channels. Versioned noiseless fixtures
+compare production backend outputs with the scalar core. Stochastic draws
+remain backend-specific. Gazebo's depth API still supplies a single range;
+transferring richer effects must preserve the core's separate physical path
+length and reported range before claiming full noisy optical equivalence.
+
+`test_core_conformance` exercises the production loader/encoder and bounded
+frame delivery, including pause, rewind, restart and blocked sinks.
+`test_optical_conformance` runs every available backend (unavailable devices
+are reported as skipped). The shared contract suites run against Gazebo's SDK
+provider. `test_zenoh_packet_burst` uses an owned private router to verify 1,024
+large packets, late metadata delivery, and simulation-thread progress while
+packet transport is blocked. Rendering, hardware calibration and advanced
+material/IMU transfers remain engine-specific work.
 
 ## Published Topics
 
@@ -170,8 +203,8 @@ pins the exact commits used by CI:
 
 ```bash
 mkdir -p ~/ros2_ws/src && cd ~/ros2_ws
-vcs import src < /path/to/gz_sensors_ouster.repos   # or after cloning:
-# vcs import src < src/gz_sensors_ouster/gz_sensors_ouster.repos
+vcs import --recursive src < /path/to/gz_sensors_ouster.repos   # or after cloning:
+# vcs import --recursive src < src/gz_sensors_ouster/gz_sensors_ouster.repos
 
 # Install system dependencies (Gazebo vendor packages, Eigen, etc.)
 rosdep update && rosdep install --from-paths src --rosdistro=jazzy -y --ignore-src
@@ -735,11 +768,15 @@ All noise model parameters can be changed at runtime via
 
 ### QoS overrides
 
-`lidar_packets` always uses `SensorDataQoS` (BEST_EFFORT) because that's
-what `os_cloud` expects. Its writer history holds one complete scan rather
-than the five-message SensorDataQoS default, preventing a short transport or
-executor stall from turning one lost packet into a missing cloud. Image,
-camera_info, and IMU pubs are
+`lidar_packets` uses RELIABLE + KEEP_ALL + VOLATILE. On Zenoh this applies
+transport backpressure to the dedicated packet drain thread. The encoder
+retains one active frame and one newest pending frame; overload replaces a
+whole pending frame. Packet publication has its own mutex so backpressure
+does not hold simulation-thread metadata, image or IMU publication locks.
+Set `lidar_packet_reliable: true` on `os_cloud`, `os_image` and `os_pinhole`
+consumers; the supplied examples do this using the pinned Ouster ROS fork.
+The legacy `RosInterfaceConfig::lidar_packet_qos_depth` member remains source
+compatible but no longer sets packet history. Image, camera_info and IMU pubs are
 configurable for deployments that need a specific QoS to match their
 consumer — necessary on rmw_zenoh_cpp where pub and sub QoS must match
 exactly (neither BEST_EFFORT-pub-to-RELIABLE-sub nor the reverse work).

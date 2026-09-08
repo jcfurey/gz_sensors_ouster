@@ -5,9 +5,9 @@
 // publisher (packets, images, camera_info, metadata, IMU), QoS policy,
 // parameter declaration + the dynamic noise-parameter store, and the
 // metadata republish state machine. Components and the plugin publish
-// exclusively through this class; publish_mtx_ serialises all publish()
-// calls across threads (render, sim, drain) because rmw_zenoh_cpp is not
-// guaranteed thread-safe for concurrent publishes on the same node.
+// exclusively through this class. Packet publication has a dedicated lock:
+// transport backpressure on the drain thread never holds the lock used by
+// simulation-thread metadata, image or IMU publication.
 
 #pragma once
 
@@ -41,6 +41,8 @@ struct RosInterfaceConfig {
     std::string metadata_str;
     int H = 0;
     int W = 0;
+    // Retained for source compatibility. Packet delivery uses KEEP_ALL;
+    // PacketEncoder bounds backlog by complete frames instead of QoS depth.
     size_t lidar_packet_qos_depth = 5;
     const std::vector<double> * beam_alt_angles = nullptr;  ///< CameraInfo fy
     double lidar_hz = 10.0;
@@ -112,7 +114,8 @@ private:
     mutable std::mutex noise_mtx_;
     NoiseParams noise_;
 
-    // publish_mtx_ serialises all publish() calls across threads.
+    // Independent publishers may publish concurrently. Serialize each path.
+    std::mutex packet_publish_mtx_;
     std::mutex publish_mtx_;
     rclcpp::Node::SharedPtr node_;
     // Lazy-construct the executor inside init() *after* rclcpp::init().

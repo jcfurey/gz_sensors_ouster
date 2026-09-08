@@ -10,6 +10,9 @@
 #pragma once
 
 #include "lidar_common.hpp"
+#include <ouster_sim_core/packet_encoder.hpp>
+#include <ouster_sim_core/packet_pacing.hpp>
+#include <functional>
 
 #include <ouster_sensor_msgs/msg/packet_msg.hpp>
 
@@ -36,6 +39,15 @@ public:
     void start(const OusterMetadata * meta, RosInterface * ros,
                double lidar_hz);
 
+    using PacketSink = std::function<void(const ouster_sensor_msgs::msg::PacketMsg &)>;
+    /// Alternate sink for reusable ROS producers and transport conformance.
+    /// The sink runs only on the drain thread and must outlive stop().
+    void start(const OusterMetadata * meta, PacketSink sink, double lidar_hz,
+               ouster_sim_core::PacketDeliveryMode mode =
+                   ouster_sim_core::PacketDeliveryMode::kPaced);
+
+    uint64_t droppedBatches() const { return dropped_batches_.load(); }
+
     /// Stop and join the drain thread. Idempotent.
     void stop();
 
@@ -44,27 +56,29 @@ public:
     void setSimulationState(bool paused, uint64_t epoch);
 
     /// Sim thread: build the scan's packets from the channel buffers and
-    /// wake the drain thread. (Pointers are non-const to match the SDK
-    /// PacketWriter block API; the buffers are not modified.)
+    /// wake the drain thread. Input buffers are not modified.
     void encodeScan(int64_t stamp_ns, uint64_t epoch,
-                    uint32_t * range, uint16_t * signal,
-                    uint8_t * refl, uint16_t * nearir);
+                    const uint32_t * range, const uint16_t * signal,
+                    const uint8_t * refl, const uint16_t * nearir);
 
 private:
     void drainThreadFunc();
 
     const OusterMetadata * meta_ = nullptr;
-    RosInterface * ros_ = nullptr;
+    PacketSink sink_;
+    std::unique_ptr<ouster_sim_core::OusterPacketEncoder> encoder_;
+    ouster_sim_core::PacketDeliveryMode delivery_mode_ =
+        ouster_sim_core::PacketDeliveryMode::kPaced;
     double lidar_hz_ = 10.0;
 
-    std::vector<uint8_t> pkt_buf_;
-    uint32_t frame_id_ = 0;
+    std::vector<uint64_t> column_timestamps_;
+    uint64_t revolution_ = 0;
 
     // encode_pkts_ is the sim-thread staging vector; swapping with
     // drain_pkts_ circulates buffer capacity between the encode and drain
     // sides so steady state allocates nothing per scan.
-    std::vector<ouster_sensor_msgs::msg::PacketMsg> encode_pkts_;
-    std::vector<ouster_sensor_msgs::msg::PacketMsg> drain_pkts_;
+    std::vector<ouster_sim_core::EncodedLidarPacket> encode_pkts_;
+    std::vector<ouster_sim_core::EncodedLidarPacket> drain_pkts_;
     std::chrono::steady_clock::time_point drain_produced_at_{};
     uint64_t drain_epoch_ = 0;
     std::thread drain_thread_;

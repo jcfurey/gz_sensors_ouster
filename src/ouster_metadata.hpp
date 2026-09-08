@@ -9,6 +9,8 @@
 #pragma once
 
 #include "ouster_lidar_profile.hpp"
+#include <ouster_sim_core/metadata.hpp>
+#include <optional>
 
 #include <memory>
 #include <string>
@@ -35,6 +37,8 @@ public:
               const std::string & hardware_revision,
               bool max_range_explicit, double & max_range);
 
+    const ouster_sim_core::OusterMetadata & core() const { return core_.value(); }
+
     // ── Products (immutable after a successful load) ─────────────────────
     std::string metadata_str;               ///< JSON as published (fw-bumped)
     int H = 0;                              ///< pixels_per_column (beam count)
@@ -51,7 +55,11 @@ public:
     double max_alt = 0.0;
     double v_range = 0.0;
     size_t imu_packet_size = 0;
+    // SDK writer retained for the Gazebo IMU adapter only.
     std::unique_ptr<ouster::sdk::core::impl::PacketWriter> pw;
+
+private:
+    std::optional<ouster_sim_core::OusterMetadata> core_;
 };
 
 }  // namespace gz_gpu_ouster_lidar
