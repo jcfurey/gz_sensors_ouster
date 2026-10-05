@@ -53,7 +53,7 @@ ARG CUDA_HOME_VERSION=12.6
 # commit for reproducibility (same SHA as the package's CI). turtlebot3 is pinned
 # for the genuine waffle *description* (geometry only).
 ARG OUSTER_ROS_REPO=https://github.com/jcfurey/ouster-ros.git
-ARG OUSTER_ROS_REF=24893e4b028ede9e79cb62f577592508f2032ea1
+ARG OUSTER_ROS_REF=57be1cac6ad617d5a759160b7f98fd1c154e075d
 ARG TURTLEBOT3_REPO=https://github.com/ROBOTIS-GIT/turtlebot3.git
 ARG TURTLEBOT3_BRANCH=jazzy
 ARG TURTLEBOT3_REF=1f67e8d477df3e91729a03e43a9cd71cc67addfa

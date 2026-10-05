@@ -13,4 +13,4 @@ repositories:
   ouster-ros:
     type: git
     url: https://github.com/jcfurey/ouster-ros.git
-    version: 24893e4b028ede9e79cb62f577592508f2032ea1
+    version: 57be1cac6ad617d5a759160b7f98fd1c154e075d

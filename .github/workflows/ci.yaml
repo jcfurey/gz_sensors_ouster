@@ -64,7 +64,7 @@ jobs:
       # of silently building different source. To intentionally move forward,
       # bump this to the new tip SHA of jcfurey/ouster-ros@cam-wip.
       OUSTER_ROS_REPO: https://github.com/jcfurey/ouster-ros.git
-      OUSTER_ROS_REF: 24893e4b028ede9e79cb62f577592508f2032ea1
+      OUSTER_ROS_REF: 57be1cac6ad617d5a759160b7f98fd1c154e075d
     steps:
       - uses: actions/checkout@v4
         with:
