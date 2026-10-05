@@ -32,6 +32,9 @@ public:
 const auto * const kRosShutdown =
     ::testing::AddGlobalTestEnvironment(new RosShutdownEnvironment);
 
+// Size of the packets that prove the data path before a burst.
+constexpr size_t kWarmupBytes = 16;
+
 template <class Predicate> bool waitFor(Predicate predicate) {
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -59,12 +62,17 @@ TEST(ZenohPacketBurst, ProductionPublisherPreservesPacketsAndLatchedMetadata)
     std::mutex mutex;
     std::vector<unsigned> received;
     std::atomic<bool> metadata_received{false};
+    std::atomic<bool> path_ready{false};
     auto metadata_sub = reader->create_subscription<std_msgs::msg::String>(
         config.sensor_name + "/metadata", rclcpp::QoS(1).reliable().transient_local(),
         [&](const std_msgs::msg::String & value) { metadata_received = value.data == config.metadata_str; });
     auto subscription = reader->create_subscription<ouster_sensor_msgs::msg::PacketMsg>(
         config.sensor_name + "/lidar_packets", rclcpp::QoS(rclcpp::KeepAll()).reliable(),
         [&](const ouster_sensor_msgs::msg::PacketMsg & value) {
+            if (value.buf.size() == kWarmupBytes) {
+                path_ready = true;
+                return;
+            }
             std::lock_guard lock(mutex);
             received.push_back(value.buf.size() == 61440 ?
                 value.buf[0] * 256u + value.buf[1] : 999999u);
@@ -89,6 +97,17 @@ TEST(ZenohPacketBurst, ProductionPublisherPreservesPacketsAndLatchedMetadata)
     EXPECT_EQ(qos.history, RMW_QOS_POLICY_HISTORY_KEEP_ALL);
     EXPECT_EQ(qos.durability, RMW_QOS_POLICY_DURABILITY_VOLATILE);
     ASSERT_TRUE(waitFor([&] { return metadata_received.load(); }));
+    // Neither the graph nor the transient-local metadata proves the
+    // publisher's session has learned the packet subscription's interest;
+    // until it has, Zenoh drops publications locally and the burst loses its
+    // leading packets. Prove the routed data path first.
+    ouster_sensor_msgs::msg::PacketMsg warmup;
+    warmup.buf.assign(kWarmupBytes, 0);
+    ASSERT_TRUE(waitFor([&] {
+        publisher.publishLidarPacket(warmup);
+        std::this_thread::sleep_for(10ms);
+        return path_ready.load();
+    })) << "no lidar packet reached the reader";
 
     ouster_sensor_msgs::msg::PacketMsg packet;
     packet.buf.assign(61440, 0x41);
@@ -104,7 +123,8 @@ TEST(ZenohPacketBurst, ProductionPublisherPreservesPacketsAndLatchedMetadata)
     spinner.request_stop();
     spinner.join();
     publisher.shutdown();
-    ASSERT_EQ(received.size(), 1024u);
+    ASSERT_EQ(received.size(), 1024u)
+        << "first received index " << (received.empty() ? -1 : static_cast<int>(received.front()));
     for (unsigned i = 0; i < received.size(); ++i) EXPECT_EQ(received[i], i);
 }
 
@@ -139,7 +159,7 @@ TEST(ZenohPacketBurst, BlockedTransportDoesNotHoldSimulationPublicationLock)
     rclcpp::executors::SingleThreadedExecutor executor(options);
     executor.add_node(reader);
     ouster_sensor_msgs::msg::PacketMsg warmup;
-    warmup.buf.assign(16, 0);
+    warmup.buf.assign(kWarmupBytes, 0);
     ASSERT_TRUE(waitFor([&] {
         publisher.publishLidarPacket(warmup);
         executor.spin_some(10ms);
