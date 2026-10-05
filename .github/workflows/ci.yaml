@@ -3,7 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [main, develop]
+    branches: [main, develop, cam_wip, 'claude/**']
   pull_request:
 
 permissions:
@@ -117,7 +117,17 @@ jobs:
           # set it OFF, so without this the test job below silently runs zero
           # tests and "passes". Keep it here so the Test step has something to
           # execute.
-          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          #
+          # The recursive ouster-ros clone carries the Ouster SDK's physical-
+          # sensor pcaps; when present, also build the ouster_sim_core
+          # real-capture wire conformance test against them.
+          sdk_tests="$PWD/src/ouster-ros/ouster-ros/ouster-sdk/tests"
+          capture_args=()
+          if [ -d "$sdk_tests/pcaps" ]; then
+            capture_args=("-DOUSTER_SIM_CORE_SDK_TEST_DATA_DIR=$sdk_tests")
+          fi
+          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            "${capture_args[@]}"
 
       - name: Test
         shell: bash
