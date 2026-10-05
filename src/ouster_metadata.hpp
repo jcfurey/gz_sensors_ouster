@@ -3,9 +3,9 @@
 //
 // All Ouster-SDK interaction for the plugin: loading + validating the
 // calibration metadata JSON, deriving the sensor dimensions and beam
-// intrinsics, and the WINDOW-field firmware advertisement. Packet layouts
-// (lidar and IMU) are owned by the shared ouster_sim_core encoders built
-// from core().
+// intrinsics, the scan rate the metadata declares, and the WINDOW-field
+// firmware advertisement. Packet layouts (lidar and IMU) are owned by the
+// shared ouster_sim_core encoders built from core().
 
 #pragma once
 
@@ -17,6 +17,11 @@
 #include <vector>
 
 namespace gz_gpu_ouster_lidar {
+
+/// Frame rate (Hz) declared by Ouster metadata JSON: data_format.fps, else
+/// the lidar_mode suffix (e.g. 1024x10 -> 10). nullopt when neither is
+/// present. Throws if the JSON is not valid Ouster metadata.
+std::optional<double> metadataFrameRateHz(const std::string & json);
 
 class OusterMetadata {
 public:
@@ -50,6 +55,8 @@ public:
     double min_alt = 0.0;
     double max_alt = 0.0;
     double v_range = 0.0;
+    /// Scan rate declared by the metadata (see metadataFrameRateHz()).
+    std::optional<double> frame_rate_hz;
 
 private:
     std::optional<ouster_sim_core::OusterMetadata> core_;

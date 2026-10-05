@@ -759,7 +759,7 @@ All noise model parameters can be changed at runtime via
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| `lidar_hz` | 10.0 | > 0 | Scan rate in Hz. |
+| `lidar_hz` | *metadata* | > 0 | Scan rate in Hz. Defaults to the frame rate the metadata declares (`data_format.fps`, else the `lidar_mode` suffix, e.g. `1024x10` → 10 Hz; 10 Hz if neither is present). An explicit value is honoured, but one that disagrees with the metadata logs a warning at startup: column timestamps, range-mode scaling and the IMU packet cadence follow `lidar_hz` while the published metadata (and therefore `ouster_ros`) still advertises the metadata rate. Invalid values (non-finite or ≤ 0) fall back to the metadata rate. |
 | `max_range` | *profile* | >= 1 | Representable range in metres from the model/revision profile; explicit values override it. Also sets the GPU far clip plane. |
 | `min_range` | *profile* | >= 0 | Minimum reported range from the model/revision profile; explicit values override it. |
 | `detection_rolloff` | 0.15 | > 0 | Fraction beyond D90 used to place the smooth D50 point when a datasheet does not publish D50. Historical profiles use their published D50 anchors. |
@@ -996,9 +996,11 @@ kernel rows to 5-10 ms each.
 - **Reduce `<panel_oversample>`**: Panel resolution defaults to 2x the
   sensor's angular resolution. Dropping it toward 1.0 quarters the
   rendered pixels at the cost of more interpolation smoothing.
-- **Stagger scan rates**: With multiple sensors, use different
-  `lidar_hz` values (e.g. 10 Hz primary, 5 Hz secondary) to avoid
-  simultaneous rig renders.
+- **Stagger scan rates**: With multiple sensors, give them different
+  scan rates (e.g. 10 Hz primary, 5 Hz secondary) to avoid simultaneous
+  rig renders. Prefer metadata whose `lidar_mode` declares that rate; an
+  explicit `lidar_hz` that disagrees with the metadata works but is logged
+  as a mismatch (see [Lidar parameters](#lidar)).
 - **CPU fallback is viable** for low-density sensors (OS1-16, OS1-32).
   OpenMP parallelisation keeps resampling under 5 ms for <100K pixels.
 - **GPU VRAM**: Each sensor uses the panel-rig render targets (logged
@@ -1026,6 +1028,7 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
 | `test_imu_noise` | IMU white-noise variance vs. density²/dt, bias drift growth, RNG-draw gating, determinism under fixed seed |
 | `test_imu_packets` | The plugin's IMU path without Gazebo (deadlines, interpolation, noise, native packets) decoded by the Ouster SDK for `LEGACY` and `ACCEL32_GYRO32_NMEA`: SI inputs come back from `ImuPacket::accel()`/`gyro()` with matching timestamps/status/measurement IDs/CRC; legacy wire units are g and deg/s; noisy samples are packed unchanged; rewind, time-jump and non-finite input handling |
+| `test_lidar_rate` | `lidar_hz` resolution: metadata frame rate (`data_format.fps` / `lidar_mode`) as default, explicit SDF override flagged on mismatch, invalid values falling back to the metadata |
 | `test_shared_*` | `ouster_sim_core` contract suites (revolution assembler, optical channel model, packet pacing, product profiles, packet round trip incl. column windows, IMU packet pipeline) built against this package's SDK provider. Configure with `-DOUSTER_SIM_CORE_SDK_TEST_DATA_DIR=<ouster-sdk>/tests` to also build `test_shared_real_capture_conformance` (encoder vs. physical-sensor pcaps) |
 | `test_dispatch` | Backend selection: `GZ_OUSTER_BACKEND` override, auto fallback to CPU, `backendName()`/`usesCpuFallback()`, and `processRaw()` end-to-end through the `RayProcessor` wrapper |
 | `test_raycast` | Full raycast mode: sphere/box/cylinder/plane/mesh intersectors, BVH vs brute-force equivalence, beam-origin parallax, response-map UV/RGBA semantics, retro of nearest hit, near-clip behaviour, zero-error uniform shell, and fused-vs-two-stage backend equivalence |

@@ -9,10 +9,23 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <ouster/types.h>
 
 namespace gz_gpu_ouster_lidar {
 
 static const rclcpp::Logger kLogger = lidarLogger();
+
+std::optional<double> metadataFrameRateHz(const std::string & json)
+{
+    const ouster::sdk::core::SensorInfo info(json);
+    if (info.format.fps > 0) {
+        return static_cast<double>(info.format.fps);
+    }
+    if (info.config.lidar_mode && info.config.lidar_mode->fps > 0) {
+        return static_cast<double>(info.config.lidar_mode->fps);
+    }
+    return std::nullopt;
+}
 
 OusterMetadata::OusterMetadata() = default;
 OusterMetadata::~OusterMetadata() = default;
@@ -22,6 +35,7 @@ bool OusterMetadata::load(const std::string & path, bool imu_enabled,
                          bool max_range_explicit, double & max_range)
 {
     core_.reset();
+    frame_rate_hz.reset();
     try {
         auto metadata = ouster_sim_core::OusterMetadata::fromFile(path);
         // Fail during configuration, before starting the scan/drain threads.
@@ -59,6 +73,8 @@ bool OusterMetadata::load(const std::string & path, bool imu_enabled,
         v_range = max_alt - min_alt;
         beam_alt_f.assign(beam_alt_angles.begin(), beam_alt_angles.end());
         beam_az_f.assign(beam_az_offsets.begin(), beam_az_offsets.end());
+
+        frame_rate_hz = metadataFrameRateHz(metadata.sourceJson());
 
         // Lidar and IMU packets are both encoded by ouster_sim_core from
         // core(); the IMU layout is reported here for diagnostics only.

@@ -483,6 +483,14 @@ if(BUILD_TESTING)
   target_compile_definitions(test_imu_packets PRIVATE
     GZ_TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata")
 
+  # Test: lidar_hz resolution against the metadata frame rate
+  ament_auto_add_gtest(test_lidar_rate test/test_lidar_rate.cpp)
+  target_link_libraries(test_lidar_rate ${PROJECT_NAME}_core)
+  target_include_directories(test_lidar_rate PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(test_lidar_rate PRIVATE
+    GZ_TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata")
+
   # Test: beam azimuth formula and sign convention (header-only math)
   ament_add_gtest(test_beam_math test/test_beam_math.cpp)
   target_link_libraries(test_beam_math gz_gpu_ouster_lidar_cuda)

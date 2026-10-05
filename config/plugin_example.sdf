@@ -26,7 +26,9 @@
        Example topics: /sensor/lidar/lidar0/lidar_packets, .../metadata, .../imu -->
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
 
-  <!-- Lidar scan rate in Hz (common values: 10, 20). -->
+  <!-- Lidar scan rate in Hz. Optional: defaults to the metadata's frame rate
+       (data_format.fps / lidar_mode, e.g. 1024x10 -> 10). A value that
+       disagrees with the metadata is honoured but logged as a mismatch. -->
   <lidar_hz>10.0</lidar_hz>
 
   <!-- Gazebo rendering visibility mask for this sensor. PANELS MODE ONLY:

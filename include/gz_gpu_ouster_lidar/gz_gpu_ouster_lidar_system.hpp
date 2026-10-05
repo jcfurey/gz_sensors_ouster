@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,7 +46,7 @@ class RosInterface;
 /// This class is a thin orchestrator: SDF parsing/validation, the gz-sim
 /// callbacks, entity tracking and teardown ordering. The work lives in
 /// focused components (src/):
-///   OusterMetadata — metadata loading + validation (beams, ranges)
+///   OusterMetadata — metadata loading + validation (beams, ranges, scan rate)
 ///   OusterImuSampler — IMU deadlines, noise model, native IMU packets
 ///   PanelRig       — panel layout + depth cameras + frame assembly
 ///   RaycastMirror  — ECM scene mirror + cast worker thread
@@ -78,7 +79,10 @@ private:
     std::string metadata_path_;
     std::string sensor_name_;
     std::string world_name_;
+    // Resolved in Configure: an explicit SDF value, else the metadata's
+    // frame rate (data_format.fps / lidar_mode), else 10 Hz.
     double lidar_hz_ = 10.0;
+    std::optional<double> lidar_hz_sdf_;
     uint32_t visibility_mask_ = 0xFFFFFFFFu;
     std::string ray_mode_ = "raycast";        // "raycast" | "panels"
     // Rolling-shutter motion distortion (raycast mode only): cast each

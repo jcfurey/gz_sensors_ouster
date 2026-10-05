@@ -14,6 +14,7 @@
 #include "frame_exchange.hpp"
 #include "imu_sampler.hpp"
 #include "lidar_common.hpp"
+#include "lidar_rate.hpp"
 #include "ouster_metadata.hpp"
 #include "packet_encoder.hpp"
 #include "panel_rig.hpp"
@@ -177,7 +178,7 @@ void GzGpuOusterLidarSystem::Configure(
         sensor_name_ = sdf->Get<std::string>("sensor_name");
     }
     if (sdf->HasElement("lidar_hz")) {
-        lidar_hz_ = sdf->Get<double>("lidar_hz");
+        lidar_hz_sdf_ = sdf->Get<double>("lidar_hz");
     }
     if (sdf->HasElement("visibility_mask")) {
         visibility_mask_ = sdf->Get<uint32_t>("visibility_mask");
@@ -343,10 +344,7 @@ void GzGpuOusterLidarSystem::Configure(
     };
     validate_qos(image_qos_, "image_qos", "reliable");
     validate_qos(imu_qos_,   "imu_qos",   "sensor_data");
-    if (!std::isfinite(lidar_hz_) || lidar_hz_ <= 0.0) {
-        RCLCPP_WARN(kLogger, "lidar_hz must be > 0, got %f; defaulting to 10", lidar_hz_);
-        lidar_hz_ = 10.0;
-    }
+    // lidar_hz is resolved against the metadata frame rate once it loads.
     if (imu_enabled_ && (!std::isfinite(imu_hz_) || imu_hz_ <= 0.0)) {
         RCLCPP_WARN(kLogger, "imu_hz must be > 0, got %f; defaulting to 100", imu_hz_);
         imu_hz_ = 100.0;
@@ -405,6 +403,40 @@ void GzGpuOusterLidarSystem::Configure(
         meta_.reset();
         return;
     }
+
+    // ── Scan rate: SDF override, else the metadata's lidar_mode/fps ─────────
+    // A real Ouster runs at exactly its lidar_mode rate. Column timestamps,
+    // the IMU packet cadence and ouster_ros (which reads data_format.fps from
+    // the published metadata) all assume that rate, so a disagreeing SDF
+    // value is honoured but reported loudly.
+    {
+        const auto rate = resolveLidarRate(lidar_hz_sdf_, meta_->frame_rate_hz);
+        if (rate.sdf_invalid) {
+            RCLCPP_WARN(kLogger,
+                "lidar_hz must be finite and > 0, got %f; using %.3f Hz from %s",
+                *lidar_hz_sdf_, rate.hz, lidarRateSourceName(rate.source));
+        }
+        if (rate.mismatch) {
+            RCLCPP_WARN(kLogger,
+                "lidar_hz=%.3f Hz does not match the %.3f Hz frame rate declared "
+                "by %s (lidar_mode / data_format.fps). Packet column "
+                "timestamps, IMU packet cadence and range-mode scaling follow "
+                "lidar_hz, but the published metadata (and so ouster_ros) "
+                "still advertises %.3f Hz. Remove <lidar_hz> to follow the "
+                "metadata, or use metadata whose lidar_mode matches.",
+                rate.hz, *meta_->frame_rate_hz, metadata_path_.c_str(),
+                *meta_->frame_rate_hz);
+        }
+        if (rate.source == LidarRateResolution::Source::kFallback) {
+            RCLCPP_WARN(kLogger,
+                "metadata declares no frame rate (data_format.fps / lidar_mode) "
+                "and <lidar_hz> is unset; using %.1f Hz", rate.hz);
+        }
+        lidar_hz_ = rate.hz;
+        RCLCPP_INFO(kLogger, "Scan rate %.3f Hz (from %s)", lidar_hz_,
+                    lidarRateSourceName(rate.source));
+    }
+
     if (!min_range_explicit_) min_range_ = meta_->profile.minimum_range_m;
     detection_range_10_d90_ = meta_->profile.detection_range_10_d90_m;
     detection_range_80_d90_ = meta_->profile.detection_range_80_d90_m;
