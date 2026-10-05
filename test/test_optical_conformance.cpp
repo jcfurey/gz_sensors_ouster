@@ -18,8 +18,11 @@ TEST_P(OpticalConformance, ProductionBackendMatchesSharedNoiselessContract)
     const std::string previous = old ? old : "";
     setenv("GZ_OUSTER_BACKEND", GetParam(), 1);
     RayProcessor processor(42);
-    if (old) setenv("GZ_OUSTER_BACKEND", previous.c_str(), 1);
-    else unsetenv("GZ_OUSTER_BACKEND");
+    if (old) {
+        setenv("GZ_OUSTER_BACKEND", previous.c_str(), 1);
+    } else {
+        unsetenv("GZ_OUSTER_BACKEND");
+    }
     if (std::string(processor.backendName()) != GetParam()) {
         GTEST_SKIP() << GetParam() << " is unavailable on this build/device";
     }

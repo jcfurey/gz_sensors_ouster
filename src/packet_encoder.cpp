@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
+#include <utility>
 
 namespace gz_gpu_ouster_lidar {
 

@@ -19,7 +19,8 @@ namespace gz_gpu_ouster_lidar {
 namespace {
 namespace core = ouster_sim_core;
 namespace fixture = core::conformance_v1;
-using namespace std::chrono_literals;
+using std::chrono_literals::operator""ms;
+using std::chrono_literals::operator""s;
 
 class MetadataFile {
 public:

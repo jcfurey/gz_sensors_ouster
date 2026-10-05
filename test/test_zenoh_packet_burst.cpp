@@ -15,7 +15,10 @@
 
 namespace gz_gpu_ouster_lidar {
 namespace {
-using namespace std::chrono_literals;
+using std::chrono_literals::operator""ms;
+using std::chrono_literals::operator""ns;
+using std::chrono_literals::operator""s;
+using std::chrono_literals::operator""us;
 
 template <class Predicate> bool waitFor(Predicate predicate) {
     const auto deadline = std::chrono::steady_clock::now() + 5s;
