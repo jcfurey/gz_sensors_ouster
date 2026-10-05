@@ -191,6 +191,9 @@ void PacketEncoder::drainThreadFunc()
                 }
                 const auto deadline = pacing.nextDeadline().value();
                 if (drain_cv_.wait_until(lk, deadline, [this, local_epoch, local_generation] {
+                        // Re-evaluated after wakeups; other threads change
+                        // these, so the earlier checks above do not hold.
+                        // cppcheck-suppress knownConditionTrueFalse
                         return shutdown_.load() || paused_ || local_epoch != simulation_epoch_ ||
                             local_generation != state_generation_;
                     })) continue;

@@ -31,6 +31,8 @@ void processCpu(
 
     const bool has_noise = noiseEnabled(p);
 
+    // norm/uni are std distributions whose call operator is non-const.
+    // cppcheck-suppress constParameterReference
     auto processOne = [&](int idx, auto & rng, auto & norm, auto & uni) {
         float d = depth_host[idx];
         const bool valid = std::isfinite(d) && d > rpmath::kValidDepthMin;
