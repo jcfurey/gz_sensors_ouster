@@ -234,7 +234,16 @@ jobs:
     container:
       image: nvidia/cuda:12.4.1-devel-ubuntu22.04
     steps:
+      # Without git, actions/checkout falls back to a tarball that omits the
+      # ouster_sim_core submodule whose header-only optical_value.hpp the
+      # shared ray-processing math includes.
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git
+        env:
+          DEBIAN_FRONTEND: noninteractive
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Compile CUDA backend in isolation
         shell: bash
         run: |
@@ -245,6 +254,7 @@ jobs:
           # smoke check can't reject valid C++20 the real build accepts.
           nvcc -std=c++20 -c -Xcompiler -fPIC \
             -I"$GITHUB_WORKSPACE/include" -I"$GITHUB_WORKSPACE/cuda" \
+            -I"$GITHUB_WORKSPACE/third_party/ouster_sim_core/include" \
             "$GITHUB_WORKSPACE/cuda/ray_processor_cuda.cu" \
             -o ray_processor_cuda.o
           echo "CUDA backend compiled OK."
@@ -259,6 +269,8 @@ jobs:
       image: rocm/dev-ubuntu-22.04:6.1-complete
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Compile HIP backend in isolation
         shell: bash
         run: |
@@ -271,6 +283,7 @@ jobs:
           # symbols are expected and ignored.
           /opt/rocm/bin/hipcc -std=c++20 -fPIC -D__HIP_PLATFORM_AMD__=1 \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
+            -I$GITHUB_WORKSPACE/third_party/ouster_sim_core/include \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_hip.cpp \
             -o ray_processor_hip.o
           echo "HIP backend compiled OK."
@@ -284,6 +297,8 @@ jobs:
       image: intel/oneapi-basekit:2024.2.1-0-devel-ubuntu22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Compile SYCL backend in isolation
         shell: bash
         run: |
@@ -295,6 +310,7 @@ jobs:
           . /opt/intel/oneapi/setvars.sh --force
           icpx -fsycl -std=c++20 -fPIC \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
+            -I$GITHUB_WORKSPACE/third_party/ouster_sim_core/include \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_sycl.cpp \
             -o ray_processor_sycl.o
           echo "SYCL backend compiled OK."
