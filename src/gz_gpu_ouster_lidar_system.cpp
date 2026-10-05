@@ -509,8 +509,8 @@ void GzGpuOusterLidarSystem::Configure(
         cfg.metadata_str = meta_->metadata_str;
         cfg.H = meta_->H;
         cfg.W = meta_->W;
-        cfg.lidar_packet_qos_depth = static_cast<size_t>(
-            std::max(5, meta_->W / meta_->cpp));
+        cfg.lidar_packet_qos_depth = std::max<size_t>(
+            5, meta_->core().lidarPacketsPerFrame());
         cfg.beam_alt_angles = &meta_->beam_alt_angles;
         cfg.lidar_hz = lidar_hz_;
         cfg.lidar_profile = meta_->profile.id;

@@ -333,13 +333,34 @@ if(BUILD_TESTING)
 
   # The same fixture sources run against both simulator SDK providers.
   foreach(contract revolution_assembler optical_channel_model packet_pacing
-                   product_profile metadata_product_profile packet_roundtrip)
+                   product_profile metadata_product_profile packet_roundtrip
+                   imu_packet_pipeline)
     ament_auto_add_gtest(test_shared_${contract}
       "${OUSTER_SIM_CORE_SOURCE_DIR}/test/test_${contract}.cpp")
     target_compile_definitions(test_shared_${contract} PRIVATE
       OUSTER_SIM_CORE_TEST_DATA_DIR="${OUSTER_SIM_CORE_SOURCE_DIR}/test/data")
     target_link_libraries(test_shared_${contract} ${PROJECT_NAME}_core)
   endforeach()
+
+  # Optional wire conformance against physical-sensor captures. Point
+  # OUSTER_SIM_CORE_SDK_TEST_DATA_DIR at an Ouster SDK source tree's tests/
+  # directory (e.g. <ws>/src/ouster-ros/ouster-ros/ouster-sdk/tests).
+  set(OUSTER_SIM_CORE_SDK_TEST_DATA_DIR "" CACHE PATH
+    "Ouster SDK tests/ directory holding pcaps/ fixtures (optional)")
+  if(OUSTER_SIM_CORE_SDK_TEST_DATA_DIR)
+    if(NOT IS_DIRECTORY "${OUSTER_SIM_CORE_SDK_TEST_DATA_DIR}/pcaps")
+      message(FATAL_ERROR
+        "OUSTER_SIM_CORE_SDK_TEST_DATA_DIR='${OUSTER_SIM_CORE_SDK_TEST_DATA_DIR}' "
+        "has no pcaps/ directory")
+    endif()
+    ament_auto_add_gtest(test_shared_real_capture_conformance
+      "${OUSTER_SIM_CORE_SOURCE_DIR}/test/test_real_capture_conformance.cpp"
+      TIMEOUT 120)
+    target_compile_definitions(test_shared_real_capture_conformance PRIVATE
+      OUSTER_SIM_CORE_SDK_TEST_DATA_DIR="${OUSTER_SIM_CORE_SDK_TEST_DATA_DIR}")
+    target_link_libraries(test_shared_real_capture_conformance
+      ${PROJECT_NAME}_core)
+  endif()
   ament_auto_add_gtest(test_core_conformance test/test_core_conformance.cpp TIMEOUT 30)
   target_include_directories(test_core_conformance PRIVATE "${OUSTER_SIM_CORE_SOURCE_DIR}/test/support")
   target_compile_definitions(test_core_conformance PRIVATE
