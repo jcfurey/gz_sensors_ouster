@@ -297,6 +297,7 @@ endif()
 # include/ to the target's public include path.
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/gz_gpu_ouster_lidar_system.cpp
+  src/imu_sampler.cpp
   src/obscurants.cpp
   src/panel_rig.cpp
   src/raycast_mirror.cpp
@@ -469,6 +470,18 @@ if(BUILD_TESTING)
   # Test: IMU noise model (CPU-only, no Gazebo dep)
   ament_add_gtest(test_imu_noise test/test_imu_noise.cpp)
   target_link_libraries(test_imu_noise gz_gpu_ouster_lidar_cuda)
+
+  # Test: the plugin's IMU path (deadlines, noise, native packets) decoded by
+  # the Ouster SDK for the LEGACY and ACCEL32_GYRO32_NMEA profiles. Compiles
+  # src/imu_sampler.cpp directly so it stays private to the plugin .so.
+  ament_auto_add_gtest(test_imu_packets
+    test/test_imu_packets.cpp src/imu_sampler.cpp)
+  target_link_libraries(test_imu_packets
+    gz_gpu_ouster_lidar_cuda ${PROJECT_NAME}_core)
+  target_include_directories(test_imu_packets PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(test_imu_packets PRIVATE
+    GZ_TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata")
 
   # Test: beam azimuth formula and sign convention (header-only math)
   ament_add_gtest(test_beam_math test/test_beam_math.cpp)

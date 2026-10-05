@@ -57,8 +57,10 @@ frame delivery, including pause, rewind, restart and blocked sinks.
 are reported as skipped). The shared contract suites run against Gazebo's SDK
 provider. `test_zenoh_packet_burst` uses an owned private router to verify 1,024
 large packets, late metadata delivery, and simulation-thread progress while
-packet transport is blocked. Rendering, hardware calibration and advanced
-material/IMU transfers remain engine-specific work.
+packet transport is blocked. Native IMU packets (LEGACY and
+ACCEL32_GYRO32_NMEA) also come from the core's `OusterImuPacketPipeline`; the
+Gazebo adapter keeps only IMU sampling and its noise model. Rendering, hardware
+calibration and advanced material transfers remain engine-specific work.
 
 ## Published Topics
 
@@ -75,8 +77,8 @@ For example, with `<sensor_name>/sensor/lidar/lidar0</sensor_name>`:
 | `.../reflec_image` | `sensor_msgs/Image` | lidar_hz | Reflectivity (mono16). Native; off unless `publish_native_images` |
 | `.../nearir_image` | `sensor_msgs/Image` | lidar_hz | Near-IR (mono16). Native; off unless `publish_native_images` |
 | `.../camera_info` | `sensor_msgs/CameraInfo` | lidar_hz | Range-image camera metadata (H×W, frame_id). Native; off unless `publish_native_images`. `distortion_model` is the non-standard string `equirectangular`: u is linear in azimuth, v linear in elevation; fx/fy in K are pixels-per-radian. Standard pinhole/fisheye consumers must not reproject with it. |
-| `.../imu_packets` | `ouster_sensor_msgs/PacketMsg` | imu_hz | Native Ouster IMU packets (if IMU enabled) |
-| `.../imu` | `sensor_msgs/Imu` | imu_hz | Standard ROS IMU message (if IMU enabled) |
+| `.../imu_packets` | `ouster_sensor_msgs/PacketMsg` | IMU packet cadence | Native Ouster IMU packets (if IMU enabled), encoded per the metadata's `udp_profile_imu` — see [IMU packet profiles](#imu-packet-profiles) |
+| `.../imu` | `sensor_msgs/Imu` | IMU sample rate | Standard ROS IMU message (if IMU enabled): the same noisy samples the packets carry, in SI units |
 
 The native image + CameraInfo topics are **off by default** (`publish_native_images=false`):
 in sim the ouster_ros `os_image` node is the single image source, driven by the same
@@ -875,15 +877,38 @@ world plugin.
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | `imu_name` | *(disabled)* | -- | Gazebo IMU sensor entity name. Set to `"auto"` to use the first IMU found. Omit to disable. |
-| `imu_hz` | 100.0 | > 0 | IMU publish rate in Hz. |
+| `imu_hz` | 100.0 | > 0 | IMU sample rate in Hz **only when the metadata's IMU profile has no packet layout** (then only `/imu` is published). Otherwise the IMU packet profile fixes the rate (see below) and a different `imu_hz` is ignored with a warning. The effective rate is exposed as the read-only `imu_hz` ROS parameter. |
 | `publish_imu_msg` | true | bool | Also publish `sensor_msgs/Imu` alongside Ouster IMU packets. |
+
+#### IMU packet profiles
+
+IMU packets are encoded by the shared `ouster_sim_core::OusterImuPacketPipeline`
+from the metadata's `udp_profile_imu`, so they decode with the Ouster SDK
+(`ImuPacket::accel()`/`gyro()`, as used by `ouster_ros`) to the same SI values
+published on `/imu`:
+
+| `udp_profile_imu` | Sample rate | On the wire |
+|-------------------|-------------|-------------|
+| `LEGACY` (all shipped metadata) | 100 Hz, one sample per 48-byte packet | Acceleration in **g** and angular velocity in **deg/s** (the legacy sensor format; the SDK multiplies by 9.80665 and π/180). `sys_ts`, `accel_ts` and `gyro_ts` are the sample's sim time. |
+| `ACCEL32_GYRO32_NMEA` | fps × `imu_measurements_per_packet` × `imu_packets_per_frame` (e.g. 10 Hz × 8 × 8 = 640 Hz) | Packet header (type, frame ID, init ID, serial), `imu_measurements_per_packet` measurements each with its own timestamp, measurement ID and valid status, values in m/s² and rad/s, NMEA timestamp of the first sample, and CRC. Requires `imu_data_format` in the metadata; the frame period (1/`lidar_hz`) must divide evenly into the per-frame sample count. |
+
+Samples are taken on exact sim-time deadlines of that cadence (interpolated
+between physics steps), then the noise model below is applied and the noisy
+sample is both packed and published on `/imu`. A world reset (sim time moving
+backwards) starts a new IMU packet epoch, and a sim-time jump skips the
+missed deadlines rather than synthesising them. If the metadata has no usable
+IMU packet layout the plugin logs an error at startup and publishes only
+`/imu` at `imu_hz`. `imu_packets` and `imu` keep at least one lidar frame of
+output in their publisher history (`KEEP_LAST` depth ≥ packets / samples per
+frame).
 
 #### IMU noise model
 
 White Gaussian noise plus random-walk bias on each axis. Defaults match
 the Ouster Os1 IMU datasheet (ICM-20948 class). All values are
 **continuous-time densities** (per-√Hz) — at runtime they're scaled by
-1/√dt for white noise and √dt for bias drift, where dt = 1/imu_hz. Set
+1/√dt for white noise and √dt for bias drift, where dt is the IMU sample
+period (10 ms for `LEGACY`). Set
 any to 0 to disable that term. All four are dynamically reconfigurable
 via `ros2 param set`.
 
@@ -1000,6 +1025,8 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 | `test_metadata_parsing` | Loads each shipped `config/metadata/*.json` via the Ouster SDK |
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
 | `test_imu_noise` | IMU white-noise variance vs. density²/dt, bias drift growth, RNG-draw gating, determinism under fixed seed |
+| `test_imu_packets` | The plugin's IMU path without Gazebo (deadlines, interpolation, noise, native packets) decoded by the Ouster SDK for `LEGACY` and `ACCEL32_GYRO32_NMEA`: SI inputs come back from `ImuPacket::accel()`/`gyro()` with matching timestamps/status/measurement IDs/CRC; legacy wire units are g and deg/s; noisy samples are packed unchanged; rewind, time-jump and non-finite input handling |
+| `test_shared_*` | `ouster_sim_core` contract suites (revolution assembler, optical channel model, packet pacing, product profiles, packet round trip incl. column windows, IMU packet pipeline) built against this package's SDK provider. Configure with `-DOUSTER_SIM_CORE_SDK_TEST_DATA_DIR=<ouster-sdk>/tests` to also build `test_shared_real_capture_conformance` (encoder vs. physical-sensor pcaps) |
 | `test_dispatch` | Backend selection: `GZ_OUSTER_BACKEND` override, auto fallback to CPU, `backendName()`/`usesCpuFallback()`, and `processRaw()` end-to-end through the `RayProcessor` wrapper |
 | `test_raycast` | Full raycast mode: sphere/box/cylinder/plane/mesh intersectors, BVH vs brute-force equivalence, beam-origin parallax, response-map UV/RGBA semantics, retro of nearest hit, near-clip behaviour, zero-error uniform shell, and fused-vs-two-stage backend equivalence |
 | `test_frame_exchange` | Lock-bounded newest-frame handoff, typed channel integrity, acquisition metadata, drop accounting, and cross-thread stress |

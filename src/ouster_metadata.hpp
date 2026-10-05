@@ -3,8 +3,9 @@
 //
 // All Ouster-SDK interaction for the plugin: loading + validating the
 // calibration metadata JSON, deriving the sensor dimensions and beam
-// intrinsics, the WINDOW-field firmware advertisement, and ownership of
-// the PacketWriter the encoder and IMU paths write through.
+// intrinsics, and the WINDOW-field firmware advertisement. Packet layouts
+// (lidar and IMU) are owned by the shared ouster_sim_core encoders built
+// from core().
 
 #pragma once
 
@@ -12,13 +13,8 @@
 #include <ouster_sim_core/metadata.hpp>
 #include <optional>
 
-#include <memory>
 #include <string>
 #include <vector>
-
-namespace ouster::sdk::core::impl {
-class PacketWriter;
-}
 
 namespace gz_gpu_ouster_lidar {
 
@@ -54,9 +50,6 @@ public:
     double min_alt = 0.0;
     double max_alt = 0.0;
     double v_range = 0.0;
-    size_t imu_packet_size = 0;
-    // SDK writer retained for the Gazebo IMU adapter only.
-    std::unique_ptr<ouster::sdk::core::impl::PacketWriter> pw;
 
 private:
     std::optional<ouster_sim_core::OusterMetadata> core_;

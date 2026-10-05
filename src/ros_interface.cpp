@@ -80,7 +80,10 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
     // rmw_zenoh_cpp (where pub and sub QoS must match exactly — neither
     // BEST_EFFORT-pub-to-RELIABLE-sub nor the reverse work).
     auto qos_from_string = [](const std::string & kind, size_t depth) -> rclcpp::QoS {
-        if (kind == "sensor_data") return rclcpp::SensorDataQoS();
+        if (kind == "sensor_data") {
+            return rclcpp::SensorDataQoS(rclcpp::KeepLast(
+                std::max(depth, rmw_qos_profile_sensor_data.depth)));
+        }
         rclcpp::QoS q{depth};
         if (kind == "best_effort") q.best_effort();
         else                        q.reliable();   // "reliable" or unknown
@@ -167,12 +170,16 @@ void RosInterface::init(const RosInterfaceConfig & cfg,
     // ouster_ros driver convention so a sim/hardware topic swap doesn't
     // require changing subscriber QoS.
     if (cfg_.imu_enabled) {
-        const auto imu_qos = qos_from_string(cfg_.imu_qos, 10);
+        constexpr size_t kImuDefaultDepth = 10;
         imu_pkt_pub_ = node_->create_publisher<ouster_sensor_msgs::msg::PacketMsg>(
-            abs_prefix + "/imu_packets", imu_qos);
+            abs_prefix + "/imu_packets",
+            qos_from_string(cfg_.imu_qos,
+                std::max(kImuDefaultDepth, cfg_.imu_packet_qos_depth)));
         if (cfg_.publish_imu_msg) {
             imu_msg_pub_ = node_->create_publisher<sensor_msgs::msg::Imu>(
-                abs_prefix + "/imu", imu_qos);
+                abs_prefix + "/imu",
+                qos_from_string(cfg_.imu_qos,
+                    std::max(kImuDefaultDepth, cfg_.imu_msg_qos_depth)));
         }
     }
 

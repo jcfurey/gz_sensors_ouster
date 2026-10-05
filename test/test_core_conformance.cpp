@@ -105,7 +105,7 @@ TEST(CoreConformance, ProductionLoaderAcceptsEveryShippedCalibration)
         ASSERT_TRUE(metadata.load(file.path(), true, "auto", false, maximum));
         EXPECT_GT(metadata.H, 0);
         EXPECT_GT(metadata.W, 0);
-        EXPECT_GT(metadata.imu_packet_size, 0u);
+        EXPECT_GT(metadata.core().imuPacketSize(), 0u);
         EXPECT_EQ(metadata.beam_alt_f.size(), static_cast<size_t>(metadata.H));
         EXPECT_EQ(metadata.beam_az_f.size(), static_cast<size_t>(metadata.H));
         ++count;

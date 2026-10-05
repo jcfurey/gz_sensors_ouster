@@ -11,8 +11,8 @@
 
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "backend.hpp"        // noiseEnabled() — pulled in via cuda/ includes
-#include "imu_noise.hpp"      // applyImuNoise()
 #include "frame_exchange.hpp"
+#include "imu_sampler.hpp"
 #include "lidar_common.hpp"
 #include "ouster_metadata.hpp"
 #include "packet_encoder.hpp"
@@ -23,7 +23,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -42,9 +41,6 @@
 #include <gz/sim/components/AngularVelocity.hh>
 #include <gz/sim/components/LinearAcceleration.hh>
 #include <gz/sim/rendering/Events.hh>
-
-#include <ouster/impl/packet_writer.h>
-#include <ouster/types.h>
 
 namespace gz_gpu_ouster_lidar {
 
@@ -266,6 +262,7 @@ void GzGpuOusterLidarSystem::Configure(
     }
     if (sdf->HasElement("imu_hz")) {
         imu_hz_ = sdf->Get<double>("imu_hz");
+        imu_hz_explicit_ = true;
     }
     if (sdf->HasElement("publish_imu_msg")) {
         publish_imu_msg_ = sdf->Get<bool>("publish_imu_msg");
@@ -462,8 +459,42 @@ void GzGpuOusterLidarSystem::Configure(
     nearir_buf_.resize(static_cast<size_t>(n), 0);
     exchange_ = std::make_unique<FrameExchange>();
     processed_exchange_ = std::make_unique<ProcessedFrameExchange>();
-    if (imu_enabled_ && meta_->imu_packet_size > 0) {
-        imu_pkt_buf_.resize(meta_->imu_packet_size, 0);
+
+    // ── IMU sampler + native Ouster IMU packet encoder ──────────────────────
+    // The packet contract fixes the sample cadence (LEGACY: 100 Hz in g and
+    // deg/s on the wire; ACCEL32_GYRO32_NMEA: fps x measurements per frame,
+    // SI units, per-measurement timestamps/status and CRC). If the metadata
+    // has no usable IMU packet layout, /imu still publishes at imu_hz.
+    if (imu_enabled_) {
+        try {
+            imu_sampler_ = std::make_unique<OusterImuSampler>(
+                meta_->core(), periodFromHz(lidar_hz_),
+                static_cast<uint64_t>(std::hash<std::string>{}(sensor_name_)));
+            const double contract_hz = imu_sampler_->sampleRateHz();
+            if (imu_hz_explicit_ &&
+                std::abs(imu_hz_ - contract_hz) > 1.0e-6 * contract_hz) {
+                RCLCPP_WARN(kLogger,
+                    "imu_hz=%.3f ignored: the %s IMU packet profile samples at "
+                    "%.3f Hz (%u measurement(s) x %u packet(s) per %.3f Hz frame)",
+                    imu_hz_, meta_->core().activeImuUdpProfile().c_str(),
+                    contract_hz,
+                    static_cast<unsigned>(
+                        imu_sampler_->contract().measurements_per_packet),
+                    static_cast<unsigned>(
+                        imu_sampler_->contract().packets_per_frame),
+                    lidar_hz_);
+            }
+            imu_hz_ = contract_hz;
+        } catch (const std::exception & e) {
+            RCLCPP_ERROR(kLogger,
+                "IMU packet encoder unavailable for udp_profile_imu=%s: %s. "
+                "imu_packets will not be published; /imu continues at "
+                "imu_hz=%.3f Hz.",
+                meta_->core().activeImuUdpProfile().c_str(), e.what(), imu_hz_);
+            imu_sampler_ = std::make_unique<OusterImuSampler>(
+                periodFromHz(imu_hz_));
+        }
+        imu_step_ = std::make_unique<ImuStepResult>();
     }
 
     // ── Build the panel rig from the beam geometry (panels mode only) ───────
@@ -527,6 +558,12 @@ void GzGpuOusterLidarSystem::Configure(
         cfg.max_returns = meta_->core().activeReturnCount();
         cfg.imu_hz = imu_hz_;
         cfg.imu_enabled = imu_enabled_;
+        if (imu_sampler_ && imu_sampler_->packetsEnabled()) {
+            // Retain at least one lidar frame's worth of IMU output.
+            cfg.imu_packet_qos_depth =
+                imu_sampler_->contract().packets_per_frame;
+            cfg.imu_msg_qos_depth = imu_sampler_->samplesPerFrame();
+        }
         cfg.publish_imu_msg = publish_imu_msg_;
 
         NoiseParams noise;
@@ -582,8 +619,12 @@ void GzGpuOusterLidarSystem::Configure(
         dropout_rate_close_, dropout_rate_far_, edge_discon_threshold_,
         min_range_, max_range_, mode_range_scale_, mode_precision_scale_);
     if (imu_enabled_) {
-        RCLCPP_INFO(kLogger, "  IMU: sensor=%s hz=%.1f publish_imu_msg=%s",
-            imu_name_.c_str(), imu_hz_, publish_imu_msg_ ? "true" : "false");
+        RCLCPP_INFO(kLogger,
+            "  IMU: sensor=%s hz=%.3f packets=%s publish_imu_msg=%s",
+            imu_name_.c_str(), imu_hz_,
+            imu_sampler_->packetsEnabled()
+                ? meta_->core().activeImuUdpProfile().c_str() : "off",
+            publish_imu_msg_ ? "true" : "false");
     }
 
     if (ray_mode_ == "raycast") {
@@ -1074,7 +1115,7 @@ void GzGpuOusterLidarSystem::publishImu(
     const ::gz::sim::UpdateInfo & info,
     const ::gz::sim::EntityComponentManager & ecm)
 {
-    if (!meta_ || !meta_->pw || !ros_) return;
+    if (!imu_sampler_ || !imu_step_ || !ros_) return;
 
     // ── Read IMU data from ECM ───────────────────────────────────────────
     auto * angVelComp = ecm.Component<::gz::sim::components::AngularVelocity>(imu_entity_);
@@ -1111,158 +1152,87 @@ void GzGpuOusterLidarSystem::publishImu(
 
     const auto sim_now =
         std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
-    const auto imu_period = periodFromHz(imu_hz_);
-    const auto batch = imu_scheduler_.advance(sim_now, imu_period);
+    const NoiseParams noise = ros_->noiseSnapshot();
+    ImuNoiseDensities densities;
+    densities.gyro_noise_std = noise.gyro_noise_std;
+    densities.accel_noise_std = noise.accel_noise_std;
+    densities.gyro_bias_walk = noise.gyro_bias_walk;
+    densities.accel_bias_walk = noise.accel_bias_walk;
 
-    const Vec3 current_av{av.X(), av.Y(), av.Z()};
-    const Vec3 current_la{la_proper.X(), la_proper.Y(), la_proper.Z()};
-
-    if (batch.reset) {
-        // A world reset starts a new stochastic sensor epoch. Carrying a bias
-        // random walk backwards through time makes bag concatenation and
-        // repeatable reset tests physically inconsistent.
-        gyro_bias_ = {0.0, 0.0, 0.0};
-        accel_bias_ = {0.0, 0.0, 0.0};
-        imu_state_valid_ = false;
-    }
-    if (batch.skipped > 0) {
+    // Samples land on exact sim-time deadlines of the IMU packet cadence,
+    // interpolated between physics states, with the noise/bias model applied
+    // (cuda/imu_noise.{hpp,cpp}). The same noisy samples feed both the
+    // native packets and sensor_msgs/Imu.
+    imu_sampler_->step(sim_now,
+                       Vec3{av.X(), av.Y(), av.Z()},
+                       Vec3{la_proper.X(), la_proper.Y(), la_proper.Z()},
+                       densities, *imu_step_);
+    const ImuStepResult & step = *imu_step_;
+    if (step.skipped > 0) {
         RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 5000,
             "%s: IMU sim time jumped; skipped %lu oldest catch-up samples",
             sensor_name_.c_str(),
-            static_cast<unsigned long>(batch.skipped));
+            static_cast<unsigned long>(step.skipped));
+    }
+    if (!step.packet_error.empty()) {
+        RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 5000,
+            "%s: IMU packet encoder rejected a sample (%s); IMU packet "
+            "stream restarted in epoch %lu",
+            sensor_name_.c_str(), step.packet_error.c_str(),
+            static_cast<unsigned long>(imu_sampler_->epoch()));
     }
 
-    const Vec3 previous_av = imu_state_valid_ ? imu_prev_av_ : current_av;
-    const Vec3 previous_la = imu_state_valid_ ? imu_prev_la_ : current_la;
-    const auto previous_time = imu_state_valid_ ? imu_prev_state_time_ : sim_now;
-    const int64_t span_ns = (sim_now - previous_time).count();
-    const double sample_dt =
-        static_cast<double>(imu_period.count()) / 1.0e9;
-
-    auto interpolate = [](const Vec3 & a, const Vec3 & b, double t) {
-        return Vec3{
-            a.x + (b.x - a.x) * t,
-            a.y + (b.y - a.y) * t,
-            a.z + (b.z - a.z) * t};
-    };
-    for (size_t i = 0; i < batch.size; ++i) {
-        const double alpha = (span_ns > 0)
-            ? std::clamp(
-                static_cast<double>((batch.deadlines[i] - previous_time).count()) /
-                    static_cast<double>(span_ns),
-                0.0, 1.0)
-            : 1.0;
-        publishImuSample(
-            batch.deadlines[i].count(),
-            interpolate(previous_av, current_av, alpha),
-            interpolate(previous_la, current_la, alpha),
-            sample_dt);
+    // ── Native Ouster IMU packets ────────────────────────────────────────
+    if (!step.packets.empty() && ros_->imuPacketWanted()) {
+        for (const auto & packet : step.packets) {
+            ros_->publishImuPacket(packet.bytes);
+        }
     }
 
-    imu_prev_state_time_ = sim_now;
-    imu_prev_av_ = current_av;
-    imu_prev_la_ = current_la;
-    imu_state_valid_ = true;
+    // ── sensor_msgs/Imu for convenience ──────────────────────────────────
+    if (publish_imu_msg_ && ros_->imuMsgWanted()) {
+        for (const auto & sample : step.samples) {
+            publishImuMsg(sample);
+        }
+    }
 }
 
-void GzGpuOusterLidarSystem::publishImuSample(
-    int64_t stamp_ns,
-    const Vec3 & nominal_av,
-    const Vec3 & nominal_la,
-    double sample_dt)
+void GzGpuOusterLidarSystem::publishImuMsg(const ImuSample & sample)
 {
-    if (!meta_ || !meta_->pw || !ros_) return;
+    const int64_t stamp_ns = sample.stamp_ns;
+    sensor_msgs::msg::Imu msg;
+    msg.header.stamp.sec  = static_cast<int32_t>(stamp_ns / 1000000000LL);
+    msg.header.stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000LL);
+    msg.header.frame_id = imu_frame_id_;
 
-    // ── IMU noise + bias model ───────────────────────────────────────────
-    // Math lives in cuda/imu_noise.{hpp,cpp} so it's testable without
-    // spinning Gazebo. Defaults match Ouster Os1 datasheet; downstream
-    // filters that subscribe to /imu now see a non-pristine signal.
-    if (!imu_rng_seeded_) {
-        imu_rng_.seed(deriveNonDeterministicSeed(this));
-        imu_rng_seeded_ = true;
-    }
-    const NoiseParams noise = ros_->noiseSnapshot();
-    const ImuNoiseSample noisy = applyImuNoise(
-        nominal_av, nominal_la,
-        gyro_bias_, accel_bias_,
-        noise.gyro_noise_std, noise.accel_noise_std,
-        noise.gyro_bias_walk, noise.accel_bias_walk,
-        sample_dt,
-        imu_rng_);
-    const Vec3 & av_meas = noisy.av;
-    const Vec3 & la = noisy.la;
-    const double gyro_white  = noisy.gyro_white_std;   // for covariance below
-    const double accel_white = noisy.accel_white_std;
+    msg.angular_velocity.x = sample.angular_velocity.x;
+    msg.angular_velocity.y = sample.angular_velocity.y;
+    msg.angular_velocity.z = sample.angular_velocity.z;
 
-    // ── Encode Ouster IMU PacketMsg ──────────────────────────────────────
-    if (ros_->imuPacketWanted() && !imu_pkt_buf_.empty()) {
-        std::memset(imu_pkt_buf_.data(), 0, imu_pkt_buf_.size());
-        uint8_t * buf = imu_pkt_buf_.data();
-        const uint64_t ts = static_cast<uint64_t>(stamp_ns);
+    msg.linear_acceleration.x = sample.linear_acceleration.x;
+    msg.linear_acceleration.y = sample.linear_acceleration.y;
+    msg.linear_acceleration.z = sample.linear_acceleration.z;
 
-        // Dispatch on packet size — PacketWriter doesn't expose the profile.
-        //   LEGACY (48 bytes):      write sys_ts/accel_ts/gyro_ts directly;
-        //                           the SDK has no setter for these fields.
-        //                           os_cloud reads gyro_ts (offset 16) for
-        //                           the ROS timestamp.
-        //   ACCEL32_GYRO32_NMEA:    use set_imu_nmea_ts.
-        // Using exclusive branches prevents the NMEA setter from stomping on
-        // the LEGACY offsets (and vice versa) when the other profile is in
-        // use.
-        constexpr size_t kLegacyImuSize = 48;
-        if (imu_pkt_buf_.size() == kLegacyImuSize) {
-            std::memcpy(buf + 0,  &ts, sizeof(uint64_t));  // sys_ts
-            std::memcpy(buf + 8,  &ts, sizeof(uint64_t));  // accel_ts
-            std::memcpy(buf + 16, &ts, sizeof(uint64_t));  // gyro_ts
-        } else {
-            meta_->pw->set_imu_nmea_ts(buf, ts);
-        }
+    // Covariance derived from the actual noise model: diagonal = σ²
+    // where σ is the per-sample white-noise standard deviation. Falls
+    // back to ouster_ros defaults if the user disabled noise (so REP-145
+    // consumers don't see literal zero variances).
+    const double gyro_white = sample.gyro_white_std;
+    const double accel_white = sample.accel_white_std;
+    const double gyro_var  = (gyro_white > 0.0)  ? gyro_white  * gyro_white  : 6e-4;
+    const double accel_var = (accel_white > 0.0) ? accel_white * accel_white : 0.01;
+    msg.angular_velocity_covariance[0] = gyro_var;
+    msg.angular_velocity_covariance[4] = gyro_var;
+    msg.angular_velocity_covariance[8] = gyro_var;
 
-        // Accel/gyro values — PacketWriter writes at profile-correct offsets.
-        meta_->pw->set_imu_la_x(buf, static_cast<float>(la.x));
-        meta_->pw->set_imu_la_y(buf, static_cast<float>(la.y));
-        meta_->pw->set_imu_la_z(buf, static_cast<float>(la.z));
-        meta_->pw->set_imu_av_x(buf, static_cast<float>(av_meas.x));
-        meta_->pw->set_imu_av_y(buf, static_cast<float>(av_meas.y));
-        meta_->pw->set_imu_av_z(buf, static_cast<float>(av_meas.z));
+    msg.linear_acceleration_covariance[0] = accel_var;
+    msg.linear_acceleration_covariance[4] = accel_var;
+    msg.linear_acceleration_covariance[8] = accel_var;
 
-        ros_->publishImuPacket(imu_pkt_buf_);
-    }
+    // Orientation unknown (per REP-145: first element = -1)
+    msg.orientation_covariance[0] = -1.0;
 
-    // ── Publish sensor_msgs/Imu for convenience ─────────────────────────
-    if (publish_imu_msg_ && ros_->imuMsgWanted()) {
-        sensor_msgs::msg::Imu msg;
-        msg.header.stamp.sec  = static_cast<int32_t>(stamp_ns / 1000000000LL);
-        msg.header.stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000LL);
-        msg.header.frame_id = imu_frame_id_;
-
-        msg.angular_velocity.x = av_meas.x;
-        msg.angular_velocity.y = av_meas.y;
-        msg.angular_velocity.z = av_meas.z;
-
-        msg.linear_acceleration.x = la.x;
-        msg.linear_acceleration.y = la.y;
-        msg.linear_acceleration.z = la.z;
-
-        // Covariance derived from the actual noise model: diagonal = σ²
-        // where σ is the per-sample white-noise standard deviation. Falls
-        // back to ouster_ros defaults if the user disabled noise (so REP-145
-        // consumers don't see literal zero variances).
-        const double gyro_var  = (gyro_white > 0.0)  ? gyro_white  * gyro_white  : 6e-4;
-        const double accel_var = (accel_white > 0.0) ? accel_white * accel_white : 0.01;
-        msg.angular_velocity_covariance[0] = gyro_var;
-        msg.angular_velocity_covariance[4] = gyro_var;
-        msg.angular_velocity_covariance[8] = gyro_var;
-
-        msg.linear_acceleration_covariance[0] = accel_var;
-        msg.linear_acceleration_covariance[4] = accel_var;
-        msg.linear_acceleration_covariance[8] = accel_var;
-
-        // Orientation unknown (per REP-145: first element = -1)
-        msg.orientation_covariance[0] = -1.0;
-
-        ros_->publishImuMsg(std::move(msg));
-    }
+    ros_->publishImuMsg(std::move(msg));
 }
 
 }  // namespace gz_gpu_ouster_lidar

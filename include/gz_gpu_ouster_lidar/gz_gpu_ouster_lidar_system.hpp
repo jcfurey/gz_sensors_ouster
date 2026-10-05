@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "imu_noise.hpp"  // Vec3 (used for IMU bias state members)
 #include "gz_gpu_ouster_lidar/sim_time_scheduler.hpp"
 
 #include <gz/sim/System.hh>
@@ -15,7 +14,6 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -26,7 +24,10 @@ namespace gz_gpu_ouster_lidar {
 // header needs only forward declarations.
 class FrameExchange;
 class ProcessedFrameExchange;
+struct ImuSample;
+struct ImuStepResult;
 struct ObscurantConfig;
+class OusterImuSampler;
 class OusterMetadata;
 class PacketEncoder;
 class PanelRig;
@@ -44,7 +45,8 @@ class RosInterface;
 /// This class is a thin orchestrator: SDF parsing/validation, the gz-sim
 /// callbacks, entity tracking and teardown ordering. The work lives in
 /// focused components (src/):
-///   OusterMetadata — metadata loading + PacketWriter ownership
+///   OusterMetadata — metadata loading + validation (beams, ranges)
+///   OusterImuSampler — IMU deadlines, noise model, native IMU packets
 ///   PanelRig       — panel layout + depth cameras + frame assembly
 ///   RaycastMirror  — ECM scene mirror + cast worker thread
 ///   PacketEncoder  — packet building + paced drain thread
@@ -124,7 +126,12 @@ private:
 
     // ── IMU configuration (SDF-optional) ─────────────────────────────────────
     std::string imu_name_;
+    // Effective IMU sample rate. With IMU packets enabled it is fixed by the
+    // metadata's IMU packet profile (LEGACY: 100 Hz; ACCEL32_GYRO32_NMEA:
+    // fps x measurements per frame); an SDF <imu_hz> only applies when the
+    // profile has no packet layout.
     double imu_hz_ = 100.0;
+    bool imu_hz_explicit_ = false;
     bool imu_enabled_ = false;
     bool publish_imu_msg_ = true;
     double gyro_noise_std_ = 1.75e-4;   // rad/s/√Hz
@@ -132,19 +139,10 @@ private:
     double gyro_bias_walk_ = 1.0e-6;    // rad/s²/√Hz
     double accel_bias_walk_ = 1.0e-5;   // m/s³/√Hz
 
-    // IMU bias state (random walk integrand). Persists across frames.
-    Vec3 gyro_bias_{0.0, 0.0, 0.0};
-    Vec3 accel_bias_{0.0, 0.0, 0.0};
-    // Per-instance RNG for IMU noise; lazy-seeded so multiple sensors get
-    // independent streams.
-    std::mt19937_64 imu_rng_;
-    bool imu_rng_seeded_ = false;
-    std::vector<uint8_t> imu_pkt_buf_;
-    PeriodicDeadlineScheduler imu_scheduler_;
-    bool imu_state_valid_ = false;
-    std::chrono::nanoseconds imu_prev_state_time_{0};
-    Vec3 imu_prev_av_{0.0, 0.0, 0.0};
-    Vec3 imu_prev_la_{0.0, 0.0, 0.0};
+    // IMU sampling, noise/bias state and native packet encoding (sim thread
+    // only), plus its reusable per-step output.
+    std::unique_ptr<OusterImuSampler> imu_sampler_;
+    std::unique_ptr<ImuStepResult> imu_step_;
     // World gravity vector (world frame), read once in Configure from the
     // world's Gravity component. Used to turn kinematic acceleration into the
     // proper acceleration a real accelerometer reports. Defaults to standard
@@ -253,10 +251,7 @@ private:
     void publishChannels(int64_t stamp_ns);
     void publishImu(const ::gz::sim::UpdateInfo & info,
                     const ::gz::sim::EntityComponentManager & ecm);
-    void publishImuSample(int64_t stamp_ns,
-                          const Vec3 & nominal_av,
-                          const Vec3 & nominal_la,
-                          double sample_dt);
+    void publishImuMsg(const ImuSample & sample);
 };
 
 }  // namespace gz_gpu_ouster_lidar
