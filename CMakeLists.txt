@@ -548,6 +548,11 @@ install(DIRECTORY examples
   PATTERN "*.pyc" EXCLUDE
 )
 
+# Make the plugin discoverable by any gz sim launched from a sourced
+# workspace, not only from the example launch files.
+ament_environment_hooks(
+  "${CMAKE_CURRENT_SOURCE_DIR}/env-hooks/${PROJECT_NAME}.dsv.in")
+
 # Installs the plugin library + include/ headers, exports the ament package,
 # and installs the runtime config (metadata JSONs + example SDF) to
 # share/${PROJECT_NAME}/config.

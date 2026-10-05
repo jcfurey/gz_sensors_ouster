@@ -215,6 +215,12 @@ source /opt/ros/jazzy/setup.bash
 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 ```
 
+Sourcing the workspace (`source install/setup.bash`) also prepends the
+package's `lib/` directory to `GZ_SIM_SYSTEM_PLUGIN_PATH` (an ament
+environment hook), so `gz sim` started from any shell or launch file finds
+`libgz_sensors_ouster.so` — the example launches no longer need to be the
+ones that set it.
+
 > **Note:** `ouster-ros` is pinned to an exact commit SHA in
 > `gz_sensors_ouster.repos`.  To advance the dependency, update the SHA there
 > and in the three other places that mirror it: `ci.yaml`,
