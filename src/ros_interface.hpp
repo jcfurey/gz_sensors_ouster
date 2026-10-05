@@ -56,6 +56,11 @@ struct RosInterfaceConfig {
     double beam_divergence_fwhm_deg = 0.0;
     int max_returns = 1;
     double imu_hz = 100.0;
+    /// Minimum KEEP_LAST depth of imu_packets / imu: one lidar frame's worth
+    /// of IMU packets / samples, so a subscriber that drains once per scan
+    /// loses nothing. The effective depth is never below the QoS default.
+    size_t imu_packet_qos_depth = 0;
+    size_t imu_msg_qos_depth = 0;
     bool imu_enabled = false;
     bool publish_imu_msg = true;
     /// Publish the range/signal/reflec/nearir images + camera_info directly

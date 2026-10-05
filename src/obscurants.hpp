@@ -73,7 +73,7 @@ constexpr double kGzDefaultScatterRatio = 0.65;
 /// to 2%, so σ_ext = ln(1/0.02) / V.
 constexpr double kKoschmieder = 3.912;
 
-/// One authored <obscurant> volume, in world coordinates.
+/// One authored `<obscurant>` volume, in world coordinates.
 struct ObscurantVolume {
     rc::ObscurantType type = rc::ObscurantType::kEllipsoid;
     ::gz::math::Pose3d pose;                  ///< world frame
@@ -86,7 +86,7 @@ struct ObscurantVolume {
 
 /// Everything the mirror needs to turn a world into a list of obscurants.
 struct ObscurantConfig {
-    bool mirror_particles = false;     ///< opt-in <particle_emitter> mirroring
+    bool mirror_particles = false;     ///< opt-in `<particle_emitter>` mirroring
     double particle_extinction = kParticleExtinction;
     double particle_growth = kParticleGrowth;
     double lidar_ratio = kObscurantLidarRatio;  ///< default S for emitters

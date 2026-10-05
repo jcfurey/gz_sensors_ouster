@@ -297,6 +297,7 @@ endif()
 # include/ to the target's public include path.
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/gz_gpu_ouster_lidar_system.cpp
+  src/imu_sampler.cpp
   src/obscurants.cpp
   src/panel_rig.cpp
   src/raycast_mirror.cpp
@@ -333,13 +334,34 @@ if(BUILD_TESTING)
 
   # The same fixture sources run against both simulator SDK providers.
   foreach(contract revolution_assembler optical_channel_model packet_pacing
-                   product_profile metadata_product_profile packet_roundtrip)
+                   product_profile metadata_product_profile packet_roundtrip
+                   imu_packet_pipeline)
     ament_auto_add_gtest(test_shared_${contract}
       "${OUSTER_SIM_CORE_SOURCE_DIR}/test/test_${contract}.cpp")
     target_compile_definitions(test_shared_${contract} PRIVATE
       OUSTER_SIM_CORE_TEST_DATA_DIR="${OUSTER_SIM_CORE_SOURCE_DIR}/test/data")
     target_link_libraries(test_shared_${contract} ${PROJECT_NAME}_core)
   endforeach()
+
+  # Optional wire conformance against physical-sensor captures. Point
+  # OUSTER_SIM_CORE_SDK_TEST_DATA_DIR at an Ouster SDK source tree's tests/
+  # directory (e.g. <ws>/src/ouster-ros/ouster-ros/ouster-sdk/tests).
+  set(OUSTER_SIM_CORE_SDK_TEST_DATA_DIR "" CACHE PATH
+    "Ouster SDK tests/ directory holding pcaps/ fixtures (optional)")
+  if(OUSTER_SIM_CORE_SDK_TEST_DATA_DIR)
+    if(NOT IS_DIRECTORY "${OUSTER_SIM_CORE_SDK_TEST_DATA_DIR}/pcaps")
+      message(FATAL_ERROR
+        "OUSTER_SIM_CORE_SDK_TEST_DATA_DIR='${OUSTER_SIM_CORE_SDK_TEST_DATA_DIR}' "
+        "has no pcaps/ directory")
+    endif()
+    ament_auto_add_gtest(test_shared_real_capture_conformance
+      "${OUSTER_SIM_CORE_SOURCE_DIR}/test/test_real_capture_conformance.cpp"
+      TIMEOUT 120)
+    target_compile_definitions(test_shared_real_capture_conformance PRIVATE
+      OUSTER_SIM_CORE_SDK_TEST_DATA_DIR="${OUSTER_SIM_CORE_SDK_TEST_DATA_DIR}")
+    target_link_libraries(test_shared_real_capture_conformance
+      ${PROJECT_NAME}_core)
+  endif()
   ament_auto_add_gtest(test_core_conformance test/test_core_conformance.cpp TIMEOUT 30)
   target_include_directories(test_core_conformance PRIVATE "${OUSTER_SIM_CORE_SOURCE_DIR}/test/support")
   target_compile_definitions(test_core_conformance PRIVATE
@@ -449,6 +471,26 @@ if(BUILD_TESTING)
   ament_add_gtest(test_imu_noise test/test_imu_noise.cpp)
   target_link_libraries(test_imu_noise gz_gpu_ouster_lidar_cuda)
 
+  # Test: the plugin's IMU path (deadlines, noise, native packets) decoded by
+  # the Ouster SDK for the LEGACY and ACCEL32_GYRO32_NMEA profiles. Compiles
+  # src/imu_sampler.cpp directly so it stays private to the plugin .so.
+  ament_auto_add_gtest(test_imu_packets
+    test/test_imu_packets.cpp src/imu_sampler.cpp)
+  target_link_libraries(test_imu_packets
+    gz_gpu_ouster_lidar_cuda ${PROJECT_NAME}_core)
+  target_include_directories(test_imu_packets PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(test_imu_packets PRIVATE
+    GZ_TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata")
+
+  # Test: lidar_hz resolution against the metadata frame rate
+  ament_auto_add_gtest(test_lidar_rate test/test_lidar_rate.cpp)
+  target_link_libraries(test_lidar_rate ${PROJECT_NAME}_core)
+  target_include_directories(test_lidar_rate PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_compile_definitions(test_lidar_rate PRIVATE
+    GZ_TEST_METADATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config/metadata")
+
   # Test: beam azimuth formula and sign convention (header-only math)
   ament_add_gtest(test_beam_math test/test_beam_math.cpp)
   target_link_libraries(test_beam_math gz_gpu_ouster_lidar_cuda)
@@ -505,6 +547,11 @@ install(DIRECTORY examples
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE
 )
+
+# Make the plugin discoverable by any gz sim launched from a sourced
+# workspace, not only from the example launch files.
+ament_environment_hooks(
+  "${CMAKE_CURRENT_SOURCE_DIR}/env-hooks/${PROJECT_NAME}.dsv.in")
 
 # Installs the plugin library + include/ headers, exports the ament package,
 # and installs the runtime config (metadata JSONs + example SDF) to

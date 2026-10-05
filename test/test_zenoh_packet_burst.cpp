@@ -15,7 +15,22 @@
 
 namespace gz_gpu_ouster_lidar {
 namespace {
-using namespace std::chrono_literals;
+using std::chrono_literals::operator""ms;
+using std::chrono_literals::operator""ns;
+using std::chrono_literals::operator""s;
+using std::chrono_literals::operator""us;
+
+// RosInterface initialises the default context. Zenoh must not be called
+// from static destruction, so shut ROS down while the process still runs.
+class RosShutdownEnvironment : public ::testing::Environment {
+public:
+    void TearDown() override
+    {
+        if (rclcpp::ok()) rclcpp::shutdown();
+    }
+};
+const auto * const kRosShutdown =
+    ::testing::AddGlobalTestEnvironment(new RosShutdownEnvironment);
 
 template <class Predicate> bool waitFor(Predicate predicate) {
     const auto deadline = std::chrono::steady_clock::now() + 5s;
@@ -109,12 +124,27 @@ TEST(ZenohPacketBurst, BlockedTransportDoesNotHoldSimulationPublicationLock)
     context->init(0, nullptr);
     auto reader = std::make_shared<rclcpp::Node>(
         "ouster_blocked_reader", rclcpp::NodeOptions().context(context));
+    std::atomic<unsigned> delivered{0};
     auto subscription = reader->create_subscription<ouster_sensor_msgs::msg::PacketMsg>(
         config.sensor_name + "/lidar_packets", rclcpp::QoS(rclcpp::KeepAll()).reliable(),
-        [](const ouster_sensor_msgs::msg::PacketMsg &) {});
+        [&](const ouster_sensor_msgs::msg::PacketMsg &) { ++delivered; });
     ASSERT_TRUE(waitFor([&] {
         return reader->count_publishers(config.sensor_name + "/lidar_packets") == 1;
     }));
+    // The reader seeing the publisher does not mean the publisher's session has
+    // learned the subscriber's interest; until it has, Zenoh drops publications
+    // locally and nothing can back up. Prove the routed data path first.
+    rclcpp::ExecutorOptions options;
+    options.context = context;
+    rclcpp::executors::SingleThreadedExecutor executor(options);
+    executor.add_node(reader);
+    ouster_sensor_msgs::msg::PacketMsg warmup;
+    warmup.buf.assign(16, 0);
+    ASSERT_TRUE(waitFor([&] {
+        publisher.publishLidarPacket(warmup);
+        executor.spin_some(10ms);
+        return delivered.load() > 0;
+    })) << "no lidar packet reached the reader before the router was paused";
 
     struct RouterPause {
         pid_t pid;

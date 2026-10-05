@@ -3,7 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [main, develop]
+    branches: [main, develop, cam_wip, 'claude/**']
   pull_request:
 
 permissions:
@@ -64,7 +64,7 @@ jobs:
       # of silently building different source. To intentionally move forward,
       # bump this to the new tip SHA of jcfurey/ouster-ros@cam-wip.
       OUSTER_ROS_REPO: https://github.com/jcfurey/ouster-ros.git
-      OUSTER_ROS_REF: 338fa84a9d988eaae762c79bdd7bacbae497280a
+      OUSTER_ROS_REF: 24893e4b028ede9e79cb62f577592508f2032ea1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,7 +117,17 @@ jobs:
           # set it OFF, so without this the test job below silently runs zero
           # tests and "passes". Keep it here so the Test step has something to
           # execute.
-          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          #
+          # The recursive ouster-ros clone carries the Ouster SDK's physical-
+          # sensor pcaps; when present, also build the ouster_sim_core
+          # real-capture wire conformance test against them.
+          sdk_tests="$PWD/src/ouster-ros/ouster-ros/ouster-sdk/tests"
+          capture_args=()
+          if [ -d "$sdk_tests/pcaps" ]; then
+            capture_args=("-DOUSTER_SIM_CORE_SDK_TEST_DATA_DIR=$sdk_tests")
+          fi
+          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            "${capture_args[@]}"
 
       - name: Test
         shell: bash
@@ -224,7 +234,16 @@ jobs:
     container:
       image: nvidia/cuda:12.4.1-devel-ubuntu22.04
     steps:
+      # Without git, actions/checkout falls back to a tarball that omits the
+      # ouster_sim_core submodule whose header-only optical_value.hpp the
+      # shared ray-processing math includes.
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git
+        env:
+          DEBIAN_FRONTEND: noninteractive
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Compile CUDA backend in isolation
         shell: bash
         run: |
@@ -235,6 +254,7 @@ jobs:
           # smoke check can't reject valid C++20 the real build accepts.
           nvcc -std=c++20 -c -Xcompiler -fPIC \
             -I"$GITHUB_WORKSPACE/include" -I"$GITHUB_WORKSPACE/cuda" \
+            -I"$GITHUB_WORKSPACE/third_party/ouster_sim_core/include" \
             "$GITHUB_WORKSPACE/cuda/ray_processor_cuda.cu" \
             -o ray_processor_cuda.o
           echo "CUDA backend compiled OK."
@@ -248,7 +268,15 @@ jobs:
     container:
       image: rocm/dev-ubuntu-22.04:6.1-complete
     steps:
+      # As in cuda-smoke: without git, actions/checkout cannot fetch the
+      # ouster_sim_core submodule.
+      - name: Install git
+        run: apt-get update -qq && apt-get install -y -qq git
+        env:
+          DEBIAN_FRONTEND: noninteractive
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Compile HIP backend in isolation
         shell: bash
         run: |
@@ -261,6 +289,7 @@ jobs:
           # symbols are expected and ignored.
           /opt/rocm/bin/hipcc -std=c++20 -fPIC -D__HIP_PLATFORM_AMD__=1 \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
+            -I$GITHUB_WORKSPACE/third_party/ouster_sim_core/include \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_hip.cpp \
             -o ray_processor_hip.o
           echo "HIP backend compiled OK."
@@ -274,6 +303,8 @@ jobs:
       image: intel/oneapi-basekit:2024.2.1-0-devel-ubuntu22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Compile SYCL backend in isolation
         shell: bash
         run: |
@@ -285,6 +316,7 @@ jobs:
           . /opt/intel/oneapi/setvars.sh --force
           icpx -fsycl -std=c++20 -fPIC \
             -I$GITHUB_WORKSPACE/include -I$GITHUB_WORKSPACE/cuda \
+            -I$GITHUB_WORKSPACE/third_party/ouster_sim_core/include \
             -c $GITHUB_WORKSPACE/cuda/ray_processor_sycl.cpp \
             -o ray_processor_sycl.o
           echo "SYCL backend compiled OK."

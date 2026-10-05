@@ -7,12 +7,25 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
-#include <ouster/impl/packet_writer.h>
+#include <string>
+#include <utility>
 #include <ouster/types.h>
 
 namespace gz_gpu_ouster_lidar {
 
 static const rclcpp::Logger kLogger = lidarLogger();
+
+std::optional<double> metadataFrameRateHz(const std::string & json)
+{
+    const ouster::sdk::core::SensorInfo info(json);
+    if (info.format.fps > 0) {
+        return static_cast<double>(info.format.fps);
+    }
+    if (info.config.lidar_mode && info.config.lidar_mode->fps > 0) {
+        return static_cast<double>(info.config.lidar_mode->fps);
+    }
+    return std::nullopt;
+}
 
 OusterMetadata::OusterMetadata() = default;
 OusterMetadata::~OusterMetadata() = default;
@@ -22,7 +35,7 @@ bool OusterMetadata::load(const std::string & path, bool imu_enabled,
                          bool max_range_explicit, double & max_range)
 {
     core_.reset();
-    pw.reset();
+    frame_rate_hz.reset();
     try {
         auto metadata = ouster_sim_core::OusterMetadata::fromFile(path);
         // Fail during configuration, before starting the scan/drain threads.
@@ -61,15 +74,21 @@ bool OusterMetadata::load(const std::string & path, bool imu_enabled,
         beam_alt_f.assign(beam_alt_angles.begin(), beam_alt_angles.end());
         beam_az_f.assign(beam_az_offsets.begin(), beam_az_offsets.end());
 
-        // IMU packet construction remains in the ROS/Gazebo adapter. All
-        // lidar metadata, profile capabilities and publication JSON above
-        // come from ouster_sim_core using the same SDK provider.
-        ouster::sdk::core::PacketFormat format(
-            ouster::sdk::core::SensorInfo(metadata.sourceJson()));
-        pw = std::make_unique<ouster::sdk::core::impl::PacketWriter>(format);
-        imu_packet_size = format.imu_packet_size;
-        if (imu_enabled && imu_packet_size == 0) {
-            RCLCPP_WARN(kLogger, "IMU packet profile unavailable; imu_packets is inactive.");
+        frame_rate_hz = metadataFrameRateHz(metadata.sourceJson());
+
+        // Lidar and IMU packets are both encoded by ouster_sim_core from
+        // core(); the IMU layout is reported here for diagnostics only.
+        if (imu_enabled) {
+            if (metadata.imuPacketSize() == 0) {
+                RCLCPP_WARN(kLogger,
+                    "IMU packet profile '%s' has no packet layout; "
+                    "imu_packets is inactive.",
+                    metadata.activeImuUdpProfile().c_str());
+            } else {
+                RCLCPP_INFO(kLogger, "IMU packet profile: %s (%zu-byte packets)",
+                    metadata.activeImuUdpProfile().c_str(),
+                    metadata.imuPacketSize());
+            }
         }
         RCLCPP_INFO(kLogger,
             "Ouster profile: %s UDP=%s returns=%u range=%.3fm resolution=%.1fmm",

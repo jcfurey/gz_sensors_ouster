@@ -5,6 +5,8 @@
 
 #include <ouster_sim_core/product_profile.hpp>
 
+#include <string>
+
 namespace gz_gpu_ouster_lidar {
 
 // Source-compatible ROS facade over the canonical simulator-neutral catalog.

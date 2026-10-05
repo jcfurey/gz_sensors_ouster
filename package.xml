@@ -25,12 +25,21 @@
   <depend>gz_rendering_vendor</depend>
   <depend>gz_sensors_vendor</depend>
   <depend>gz_plugin_vendor</depend>
+  <!-- Included directly: gz/math (Pose3, Vector3, Quaternion, Matrix3),
+       sdf/ (Element, geometry types) and gz/msgs (particle_emitter.pb.h). -->
+  <depend>gz_math_vendor</depend>
+  <depend>sdformat_vendor</depend>
+  <depend>gz_msgs_vendor</depend>
 
   <!-- ROS 2: linked publishers / message definitions used at build and run -->
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>ouster_sensor_msgs</depend>
+  <!-- Included directly: parameter descriptors / set-parameters results and
+       builtin_interfaces/msg/time.hpp. -->
+  <depend>rcl_interfaces</depend>
+  <depend>builtin_interfaces</depend>
   <!-- ouster_ros provides the ouster_client library that defines
        SensorInfo / PacketFormat / PacketWriter symbols used by the plugin.
        PacketWriter setters are inline templates, but the SensorInfo(json)
@@ -47,6 +56,7 @@
        bringup). Not needed to build the plugin itself. turtlebot3_description
        is intentionally not declared here: it is an optional dependency used
        only by turtlebot3_ouster.launch.py, which diagnoses its absence. -->
+  <exec_depend>launch</exec_depend>
   <exec_depend>ros_gz_sim</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
   <exec_depend>xacro</exec_depend>
@@ -54,6 +64,10 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>rviz2</exec_depend>
+  <!-- static_transform_publisher in ouster_standalone / sensor_stack -->
+  <exec_depend>tf2_ros</exec_depend>
+  <!-- depthcam_derisk.launch.py opens the depth image viewer -->
+  <exec_depend>rqt_image_view</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>

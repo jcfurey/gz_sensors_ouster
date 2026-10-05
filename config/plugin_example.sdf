@@ -26,7 +26,9 @@
        Example topics: /sensor/lidar/lidar0/lidar_packets, .../metadata, .../imu -->
   <sensor_name>/sensor/lidar/lidar0</sensor_name>
 
-  <!-- Lidar scan rate in Hz (common values: 10, 20). -->
+  <!-- Lidar scan rate in Hz. Optional: defaults to the metadata's frame rate
+       (data_format.fps / lidar_mode, e.g. 1024x10 -> 10). A value that
+       disagrees with the metadata is honoured but logged as a mismatch. -->
   <lidar_hz>10.0</lidar_hz>
 
   <!-- Gazebo rendering visibility mask for this sensor. PANELS MODE ONLY:
@@ -207,11 +209,14 @@
        Set to "auto" to use the first IMU sensor found on the model,
        or specify an exact entity name (e.g. "imu0"). Omit to disable. -->
   <!-- <imu_name>auto</imu_name> -->
+  <!-- imu_hz only applies when the metadata's udp_profile_imu has no packet
+       layout; otherwise the profile fixes the rate (LEGACY: 100 Hz). -->
   <!-- <imu_hz>100.0</imu_hz> -->
   <!-- <publish_imu_msg>true</publish_imu_msg> -->
 
   <!-- IMU noise + bias model. Continuous-time densities (per-√Hz),
-       internally scaled by sqrt(dt) where dt = 1/imu_hz. Defaults match
+       internally scaled by sqrt(dt) where dt is the IMU sample period
+       (10 ms for LEGACY). Defaults match
        Ouster Os1 IMU datasheet (ICM-20948 class). Set any to 0 to
        disable that term; all four are dynamically reconfigurable via
        `ros2 param set`. The published Imu covariance diagonal is

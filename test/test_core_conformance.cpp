@@ -19,7 +19,8 @@ namespace gz_gpu_ouster_lidar {
 namespace {
 namespace core = ouster_sim_core;
 namespace fixture = core::conformance_v1;
-using namespace std::chrono_literals;
+using std::chrono_literals::operator""ms;
+using std::chrono_literals::operator""s;
 
 class MetadataFile {
 public:
@@ -105,7 +106,9 @@ TEST(CoreConformance, ProductionLoaderAcceptsEveryShippedCalibration)
         ASSERT_TRUE(metadata.load(file.path(), true, "auto", false, maximum));
         EXPECT_GT(metadata.H, 0);
         EXPECT_GT(metadata.W, 0);
-        EXPECT_GT(metadata.imu_packet_size, 0u);
+        EXPECT_GT(metadata.core().imuPacketSize(), 0u);
+        ASSERT_TRUE(metadata.frame_rate_hz.has_value());
+        EXPECT_DOUBLE_EQ(*metadata.frame_rate_hz, 10.0);
         EXPECT_EQ(metadata.beam_alt_f.size(), static_cast<size_t>(metadata.H));
         EXPECT_EQ(metadata.beam_az_f.size(), static_cast<size_t>(metadata.H));
         ++count;
