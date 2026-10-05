@@ -32,7 +32,7 @@ REPO_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 # Same pin as ci.yaml / Dockerfile — bump all three together.
 OUSTER_ROS_REPO=https://github.com/jcfurey/ouster-ros.git
-OUSTER_ROS_REF=338fa84a9d988eaae762c79bdd7bacbae497280a
+OUSTER_ROS_REF=24893e4b028ede9e79cb62f577592508f2032ea1
 
 export DEBIAN_FRONTEND=noninteractive
 
