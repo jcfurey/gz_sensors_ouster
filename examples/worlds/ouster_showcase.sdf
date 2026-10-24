@@ -732,10 +732,10 @@
     <!-- ══ ZONE I — MOVING BEACON (az 330°, ~7 m) ═════════════════════════
          A continuously rotating arm carrying a retroreflective paddle. Two
          things to exercise:
-           1. motion_distortion (raycast mode): with it enabled, each column
-              is cast from the sensor pose at ITS acquisition time. The model
-              is ego-motion only, so a MOVING TARGET is not itself deskewed —
-              this beacon is the honest illustration of that boundary.
+           1. The sweep of a moving target (raycast mode): each group of
+              columns sees the paddle where it was when that group was
+              acquired (object_motion_samples), and motion_distortion adds
+              the sensor's own motion per column.
            2. Dynamic transforms: the arm's world pose changes every scan, so
               the per-scan transform refresh and the top-level BVH rebuild are
               continuously exercised (a static-only world would never test

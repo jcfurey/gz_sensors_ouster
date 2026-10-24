@@ -108,6 +108,42 @@ public:
                      pp, nir_scratch);
     }
 
+    /// castScanProcessed with `xform_sets` consecutive transform sets of
+    /// scene.n_instances each, captured as the sensor swept successive
+    /// column groups; column m uses set rc::columnSet(m, W, xform_sets).
+    /// The default casts every column with the middle set, for backends
+    /// whose kernels take one set per scan; the CPU backend casts each
+    /// group with its own.
+    virtual void castScanProcessedGrouped(
+        const rc::SceneView & scene,
+        uint64_t scene_version,
+        const rc::InstanceXform * xforms,
+        int xform_sets,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        uint32_t * range_out,
+        uint16_t * signal_out,
+        uint8_t * reflectivity_out,
+        uint16_t * nearir_out,
+        const RayProcessParams & pp,
+        float * depth_scratch,
+        float * retro_scratch,
+        float * nir_scratch,
+        const float * col_r,
+        const float * col_t)
+    {
+        const auto middle = static_cast<size_t>(xform_sets / 2) *
+                            static_cast<size_t>(scene.n_instances);
+        castScanProcessed(scene, scene_version, xforms + middle,
+                          beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+                          range_out, signal_out, reflectivity_out, nearir_out,
+                          pp, depth_scratch, retro_scratch, nir_scratch,
+                          col_r, col_t);
+    }
+
     /// Short identifier: "cuda", "hip", "sycl", or "cpu".
     virtual const char * name() const = 0;
 };

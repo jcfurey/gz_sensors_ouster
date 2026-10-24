@@ -88,6 +88,9 @@ private:
     // Rolling-shutter motion distortion (raycast mode only): cast each
     // column from the sensor pose at its acquisition time.
     bool motion_distortion_ = false;
+    // Captures of moving objects per scan (raycast mode only), one per
+    // column group at its acquisition time.
+    int object_motion_samples_ = 16;
     double panel_oversample_ = 2.0;          // clamped 1..4
     std::string panel_sampling_ = "bilinear";  // "bilinear" | "nearest"
     std::string image_qos_ = "reliable";

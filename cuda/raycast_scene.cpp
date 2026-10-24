@@ -361,6 +361,52 @@ void Scene::computeXform(int instance_idx,
     }
 }
 
+namespace {
+
+// Instance transforms and top-level BVH that one ray is cast against.
+struct RaySet {
+    const InstanceXform * xforms;
+    const MeshBvhNode * tlas_nodes;
+    const int * tlas_order;
+    int n_tlas_nodes;
+};
+
+// The per-ray loop of castScan and castScanGrouped; set_of(column) picks the
+// transforms each ray sees.
+template <typename SetOfColumn>
+void castRays(const SceneView & scene,
+              const float * beam_alt_deg, const float * beam_az_deg,
+              const float sensor_r[9], const float sensor_t[3],
+              const ScanParams & sp,
+              float * range_out, float * retro_out,
+              const float * col_r, const float * col_t, float * nir_out,
+              const SetOfColumn & set_of)
+{
+    const int n = sp.H * sp.W;
+
+    // Ray cost varies with what each beam row sees (sky, floor, mesh-dense
+    // robot), so static halves leave threads idle. Row-sized dynamic chunks
+    // balance it: 25-35% faster at 4 threads on a 1024x64 workcell scan.
+    #pragma omp parallel for schedule(dynamic, 1024) if(n > 4096)  // NOLINT(whitespace/parens)
+    for (int idx = 0; idx < n; ++idx) {
+        const RaySet set = set_of(idx % sp.W);
+        float range, retro;
+        rcCastOneRay(scene.instances, scene.n_instances,
+                     scene.verts, scene.texcoords,
+                     scene.tris, scene.order, scene.nodes,
+                     scene.response_texels,
+                     set.xforms, beam_alt_deg, beam_az_deg,
+                     sensor_r, sensor_t, sp, idx, kInf, range, retro,
+                     col_r, col_t,
+                     nir_out ? &nir_out[idx] : nullptr,
+                     set.tlas_nodes, set.tlas_order, set.n_tlas_nodes);
+        range_out[idx] = range;
+        if (retro_out) retro_out[idx] = retro;
+    }
+}
+
+}  // namespace
+
 void castScan(const SceneView & scene,
               const InstanceXform * xforms,
               const float * beam_alt_deg,
@@ -374,26 +420,37 @@ void castScan(const SceneView & scene,
               const int * tlas_order,
               int n_tlas_nodes)
 {
-    const int n = sp.H * sp.W;
+    const RaySet set{xforms, tlas_nodes, tlas_order, n_tlas_nodes};
+    castRays(scene, beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+             range_out, retro_out, col_r, col_t, nir_out,
+             [&set](int) { return set; });
+}
 
-    // Ray cost varies with what each beam row sees (sky, floor, mesh-dense
-    // robot), so static halves leave threads idle. Row-sized dynamic chunks
-    // balance it: 25-35% faster at 4 threads on a 1024x64 workcell scan.
-    #pragma omp parallel for schedule(dynamic, 1024) if(n > 4096)  // NOLINT(whitespace/parens)
-    for (int idx = 0; idx < n; ++idx) {
-        float range, retro;
-        rcCastOneRay(scene.instances, scene.n_instances,
-                     scene.verts, scene.texcoords,
-                     scene.tris, scene.order, scene.nodes,
-                     scene.response_texels,
-                     xforms, beam_alt_deg, beam_az_deg,
-                     sensor_r, sensor_t, sp, idx, kInf, range, retro,
-                     col_r, col_t,
-                     nir_out ? &nir_out[idx] : nullptr,
-                     tlas_nodes, tlas_order, n_tlas_nodes);
-        range_out[idx] = range;
-        if (retro_out) retro_out[idx] = retro;
+void castScanGrouped(const SceneView & scene,
+                     const InstanceXform * xforms, int sets, const Tlas * tlas,
+                     const float * beam_alt_deg,
+                     const float * beam_az_deg,
+                     const float sensor_r[9], const float sensor_t[3],
+                     const ScanParams & sp,
+                     float * range_out, float * retro_out,
+                     const float * col_r, const float * col_t,
+                     float * nir_out)
+{
+    sets = std::max(1, sets);
+    std::vector<RaySet> by_set(static_cast<size_t>(sets));
+    for (int s = 0; s < sets; ++s) {
+        const Tlas & t = tlas[s];
+        by_set[static_cast<size_t>(s)] = RaySet{
+            xforms + static_cast<size_t>(s) * static_cast<size_t>(scene.n_instances),
+            t.nodes.empty() ? nullptr : t.nodes.data(),
+            t.order.empty() ? nullptr : t.order.data(),
+            static_cast<int>(t.nodes.size())};
     }
+    castRays(scene, beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+             range_out, retro_out, col_r, col_t, nir_out,
+             [&by_set, W = sp.W, sets](int m) {
+                 return by_set[static_cast<size_t>(columnSet(m, W, sets))];
+             });
 }
 
 }  // namespace rc

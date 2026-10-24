@@ -74,4 +74,19 @@ TEST(SimTimeScheduler, LargeJumpBoundsCatchupAndSkipsOldest)
     EXPECT_EQ(batch.deadlines[batch.size - 1], 100ms);
 }
 
+TEST(SimTimeScheduler, LidarGateExposesTheFrameBeingSwept)
+{
+    SimTimeGate gate;
+    EXPECT_FALSE(gate.initialized());
+    EXPECT_TRUE(gate.advance(1000ms, 100ms).due);
+    EXPECT_TRUE(gate.initialized());
+    EXPECT_EQ(gate.nextDeadline(), 1100ms);
+    EXPECT_FALSE(gate.advance(1050ms, 100ms).due);
+    EXPECT_EQ(gate.nextDeadline(), 1100ms);
+    EXPECT_TRUE(gate.advance(1100ms, 100ms).due);
+    EXPECT_EQ(gate.nextDeadline(), 1200ms);
+    gate.reset();
+    EXPECT_FALSE(gate.initialized());
+}
+
 }  // namespace gz_gpu_ouster_lidar

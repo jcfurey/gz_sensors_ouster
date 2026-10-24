@@ -435,7 +435,7 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
 | 215° | Glass | Panes at τ=0.60 and τ=0.92 with walls behind: the pane wins on the first, the wall behind wins on the second — "lidar sees through the window" |
 | 270° | Curvature | Spheres and cylinders of several radii: apparent reflectance ρ·cos(α) falls off toward each silhouette |
 | 305° | Sun / NEAR_IR | Four identical panels at different tilts. NEAR_IR is reflected *ambient*, so orientation alone separates them while range and reflectivity do not |
-| 330° | Moving beacon | A rotating arm with a retroreflective paddle — exercises dynamic transforms, and honestly shows that `motion_distortion` corrects **ego** motion only, not moving targets |
+| 330° | Moving beacon | A rotating arm with a retroreflective paddle — exercises dynamic transforms and the sweep of a moving target: each column group sees the paddle where it was when that group was acquired (`object_motion_samples`), while `motion_distortion` covers **ego** motion |
 | — | Perimeter + ground | Walls at 60 m for long-range structure; a straight wall spanning many columns makes any azimuth/encoder-convention error obvious (it would break into arcs) |
 
 #### Channel coverage
@@ -822,7 +822,8 @@ targets produce weaker returns.
 | `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
 | `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at the representable range, combined with the product-calibrated smooth detection probability. |
 | `false_alarm_rate` | 0.0 | 0-1 | probability | Solar-background false alarms: each no-return pixel becomes a spurious point (uniform range, noise-floor signal) with this probability per frame. 0 = off. Try 0.0005-0.002 for bright daylight. |
-| `motion_distortion` | false | bool | -- | Raycast mode only. Rolling-shutter sweep: each column casts from the sensor pose at its acquisition time (interpolated per sim tick), skewing the cloud by the platform's motion over one scan — as a real spinning lidar does (see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9). Ego motion only; default off preserves the instantaneous snapshot. |
+| `motion_distortion` | false | bool | -- | Raycast mode only. Rolling-shutter sweep: each column casts from the sensor pose at its acquisition time (interpolated per sim tick), skewing the cloud by the platform's motion over one scan — as a real spinning lidar does (see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9). Ego motion only (moving objects follow `object_motion_samples`); default off casts every column from the sensor pose at the scan trigger. |
+| `object_motion_samples` | 16 | int | ≥ 1 | Raycast mode only. Moving objects (visuals of non-static models) are captured this many times per scan, once per group of columns at the middle of its acquisition times, so each column sees them as they were within T/(2N) of its timestamp, plus the physics step a capture waits for (3 ms + 1 ms at 10 Hz and a 1 kHz step), instead of at the scan trigger, up to a period after the scan's first column. 1 captures them once, mid-scan. Without `motion_distortion` the model carrying the sensor stays at the scan trigger, like the pose the sensor casts from. The CPU backend casts each group with its own capture; GPU backends use the middle capture for every column. Panels mode renders one snapshot. |
 | `edge_discon_threshold` | 0.15 | >= 0 | m | Depth-discontinuity suppression threshold (1ns echo delay convention). 0 = off. |
 
 ### Smoke, dust and fog obscuration (raycast mode)
@@ -1203,16 +1204,18 @@ noise params to 0 falls back to the ouster_ros default literals
    factor in both directions and uses 80% of the interval, leaving an idle
    tail for consumers to finish the completed scan. It stops while simulation
    is paused and cancels pre-reset batches. Packet/column **timestamps are sim
-   time** and describe an idealised rotation across the scan period;
-   the underlying data is a single instantaneous snapshot per scan by
-   default; in raycast mode, `<motion_distortion>true</motion_distortion>`
-   casts each column from its acquisition-time sensor pose instead
-   (rolling-shutter sweep — [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md)
-   §9). Wall-clock spacing exists only to avoid bursting consumers.
+   time** and describe a rotation across the scan period. In raycast mode
+   moving objects are captured as each group of columns is swept
+   (`object_motion_samples`), and `<motion_distortion>true</motion_distortion>`
+   also casts each column from its acquisition-time sensor pose (rolling-shutter
+   sweep — [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9); otherwise,
+   and always in panels mode, a scan is one snapshot at its trigger.
+   Wall-clock spacing exists only to avoid bursting consumers.
 
 With `<ray_mode>raycast</ray_mode>` steps 2-3 are replaced by an ECM scene
 mirror (visual geometries extracted on geometry/material changes, world poses
-refreshed per scan) and a worker thread that casts every beam exactly against
+refreshed per scan, and those of moving objects per column group as the scan
+sweeps them) and a worker thread that casts every beam exactly against
 it (`cuda/raycast_scene.{hpp,cpp}`: analytic primitives + per-mesh triangle
 BVH). CUDA keeps the depth, reflectance, and near-IR intermediates on one
 device stream, runs channel/noise synthesis immediately after the cast, and

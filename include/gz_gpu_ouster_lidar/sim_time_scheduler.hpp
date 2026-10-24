@@ -64,6 +64,13 @@ public:
 
     void reset() { initialized_ = false; }
 
+    /// Whether advance() has set a deadline yet (and none was reset since).
+    bool initialized() const { return initialized_; }
+
+    /// The deadline the next due tick will meet, once initialized(): the end
+    /// of the frame now being swept.
+    std::chrono::nanoseconds nextDeadline() const { return next_deadline_; }
+
 private:
     bool initialized_ = false;
     std::chrono::nanoseconds last_observed_{0};

@@ -185,6 +185,10 @@ public:
     /// depth/retro/NIR planes device-resident between kernels, then transfer
     /// only the final channel arrays. The scratch planes are used by fallback
     /// backends whose raycaster and processor communicate through host memory.
+    /// `xform_sets` > 1: `xforms` holds that many consecutive sets of
+    /// scene.n_instances transforms, captured as the sensor swept successive
+    /// column groups; the CPU backend casts each group with its own set and
+    /// the GPU backends cast every column with the middle one.
     void castScanProcessed(
         const rc::SceneView & scene,
         uint64_t scene_version,
@@ -203,7 +207,8 @@ public:
         float * retro_scratch,
         float * nir_scratch,
         const float * col_r = nullptr,
-        const float * col_t = nullptr);
+        const float * col_t = nullptr,
+        int xform_sets = 1);
 
     /// Returns true when the active backend is the CPU fallback (no GPU
     /// path is compiled in, or all GPU probes failed at construction).

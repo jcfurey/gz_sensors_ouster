@@ -8,7 +8,9 @@
 #include "backend.hpp"
 #include "ray_processor_cpu_impl.hpp"
 
+#include <algorithm>
 #include <memory>
+#include <vector>
 
 namespace gz_gpu_ouster_lidar {
 
@@ -79,6 +81,44 @@ public:
                      static_cast<int>(tlas_.nodes.size()));
     }
 
+    void castScanProcessedGrouped(
+        const rc::SceneView & scene,
+        uint64_t /*scene_version*/,
+        const rc::InstanceXform * xforms,
+        int xform_sets,
+        const float * beam_alt_deg,
+        const float * beam_az_deg,
+        const float sensor_r[9],
+        const float sensor_t[3],
+        const rc::ScanParams & sp,
+        uint32_t * range_out,
+        uint16_t * signal_out,
+        uint8_t * reflectivity_out,
+        uint16_t * nearir_out,
+        const RayProcessParams & pp,
+        float * depth_scratch,
+        float * retro_scratch,
+        float * nir_scratch,
+        const float * col_r,
+        const float * col_t) override
+    {
+        // One top-level BVH per set, as castScan builds one per scan.
+        xform_sets = std::max(1, xform_sets);
+        tlas_sets_.resize(static_cast<size_t>(xform_sets));
+        for (int s = 0; s < xform_sets; ++s) {
+            rc::buildTlas(xforms + static_cast<size_t>(s) *
+                                       static_cast<size_t>(scene.n_instances),
+                          scene.n_instances, tlas_sets_[static_cast<size_t>(s)]);
+        }
+        rc::castScanGrouped(scene, xforms, xform_sets, tlas_sets_.data(),
+                            beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+                            depth_scratch, retro_scratch, col_r, col_t,
+                            nir_scratch);
+        processDepth(depth_scratch, retro_scratch,
+                     range_out, signal_out, reflectivity_out, nearir_out,
+                     pp, nir_scratch);
+    }
+
     const char * name() const override { return "cpu"; }
 
 private:
@@ -96,6 +136,7 @@ private:
     uint64_t seed_;
     uint64_t frame_counter_ = 0;
     rc::Tlas tlas_;   // per-scan top-level BVH; capacity reused
+    std::vector<rc::Tlas> tlas_sets_;   // one per transform set (grouped casts)
 };
 
 }  // namespace

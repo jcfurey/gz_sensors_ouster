@@ -277,15 +277,20 @@ mapping accuracy by up to ~3 m at speed):
   playback of known poses needs only the interpolation, not the spline
   estimation machinery.
 
-Conventions and caveats: relative intra-scan timing matches the packet
-encoder exactly (its per-column timestamps are spaced `T/W` apart), so
-IMU-based de-skew pipelines see consistent data. The encoder stamps the
-scan window starting at the trigger, while the simulated acquisition times
-end at it — absolute timestamps lead the geometry by one period, which only
-matters for TF-lookup-based de-skew against sim ground truth. Ego motion
-only: other agents' poses stay at the scan-trigger snapshot (the dominant
-term; per-agent sweep interpolation is LiDARsim-style future work). Panels
-mode renders one snapshot and cannot apply this.
+Conventions and caveats: the packet encoder stamps column m at exactly t_m,
+the time its pose is interpolated at, so relative (T/W apart) and absolute
+timestamps both match the geometry, for IMU- and TF-based de-skew alike.
+Moving objects (other agents, a robot's own links) are swept as well: the
+scene mirror captures the visuals of non-static models at the middle of each
+of N column groups (`<object_motion_samples>`, default 16) and the CPU
+backend casts each group against its own capture, so every column sees a
+moving object as it was within T/(2N) of the column's timestamp, plus the
+physics step a capture waits for (3 ms + 1 ms at 10 Hz and a 1 kHz step).
+Without `<motion_distortion>` the model carrying the sensor stays at the
+scan trigger with the sensor pose, so it never moves relative to the sensor.
+Motion within a group is not interpolated, and GPU backends cast every
+column against the middle capture. Panels mode renders one snapshot and
+cannot apply either.
 
 ### 10. Beam geometry — XYZ-LUT conventions
 

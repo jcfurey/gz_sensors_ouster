@@ -165,8 +165,17 @@ void RayProcessor::castScanProcessed(
     float * retro_scratch,
     float * nir_scratch,
     const float * col_r,
-    const float * col_t)
+    const float * col_t,
+    int xform_sets)
 {
+    if (xform_sets > 1) {
+        backend_->castScanProcessedGrouped(
+            scene, scene_version, xforms, xform_sets,
+            beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,
+            range_out, signal_out, reflectivity_out, nearir_out, pp,
+            depth_scratch, retro_scratch, nir_scratch, col_r, col_t);
+        return;
+    }
     backend_->castScanProcessed(
         scene, scene_version, xforms,
         beam_alt_deg, beam_az_deg, sensor_r, sensor_t, sp,

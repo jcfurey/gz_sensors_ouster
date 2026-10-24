@@ -450,6 +450,16 @@ if(BUILD_TESTING)
   target_include_directories(test_obscurant_config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+  # Test: raycast scene mirror against a hand-stepped ECM (moving objects
+  # captured per column group, the sensor's own model, rewinds). Compiles the
+  # mirror sources directly, as test_obscurant_config does.
+  ament_auto_add_gtest(test_raycast_mirror
+    test/test_raycast_mirror.cpp src/raycast_mirror.cpp src/obscurants.cpp)
+  target_link_libraries(test_raycast_mirror
+    gz_gpu_ouster_lidar_cuda gz-sim::gz-sim gz-common::graphics)
+  target_include_directories(test_raycast_mirror PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
   # Test: scan-frame triple buffer (header-only, no deps beyond the STL)
   ament_add_gtest(test_frame_exchange test/test_frame_exchange.cpp)
   target_include_directories(test_frame_exchange PRIVATE

@@ -53,6 +53,16 @@ public:
         /// sensor pose at its acquisition time (interpolated from the
         /// per-tick pose history) instead of one snapshot pose.
         bool motion_distortion = false;
+        /// Moving objects are captured this many times per scan, once per
+        /// group of columns at the middle of its acquisition times, so each
+        /// column sees them as they were within T/(2N) of its timestamp,
+        /// plus the physics step a capture waits for.
+        /// 1 captures them once, mid-scan.
+        int object_motion_samples = 16;
+        /// Top-level model carrying the sensor. Without motion_distortion
+        /// its visuals, which move with the sensor, are captured with the
+        /// sensor's pose at the scan trigger instead of being swept.
+        ::gz::sim::Entity sensor_model = ::gz::sim::kNullEntity;
         const std::vector<float> * beam_alt_f = nullptr;
         const std::vector<float> * beam_az_f = nullptr;
         /// Smoke / dust / fog volumes to integrate along every beam.
@@ -95,6 +105,9 @@ private:
         ::gz::sim::Entity entity{::gz::sim::kNullEntity};
         // Extra local rotation folded into the entity pose (plane normal).
         ::gz::math::Quaterniond offset{1, 0, 0, 0};
+        // Captured per column group: false for static models, and for the
+        // sensor's own model when it is cast from one pose.
+        bool sweep = true;
     };
     std::vector<Ref> refs_;          // parallel to scene_->instances
     size_t visual_count_ = 0;        // rebuild trigger
@@ -114,6 +127,23 @@ private:
                           std::vector<float> & col_r,
                           std::vector<float> & col_t) const;
 
+    /// refs_[i]'s world→local transform now.
+    void refXform(size_t i, const ::gz::sim::EntityComponentManager & ecm,
+                  rc::InstanceXform & out) const;
+    /// Capture the moving visuals into set `group` of the sweep, and copy
+    /// it into the following `repeats` sets.
+    void captureSweep(const ::gz::sim::EntityComponentManager & ecm,
+                      int group, int repeats);
+    int sweepGroups() const;
+
+    // Moving visuals of the frame being swept, one set of refs_.size()
+    // transforms per column group (see columnGroupMidTimestampNs), taken
+    // against scene version sweep_version_; sweep_captured_[g] marks a set.
+    std::vector<rc::InstanceXform> sweep_xforms_;
+    std::vector<char> sweep_captured_;
+    int sweep_next_ = 0;
+    uint64_t sweep_version_ = 0;
+
     // Worker thread + job slot.
     std::thread thread_;
     std::mutex mtx_;
@@ -124,6 +154,7 @@ private:
     std::shared_ptr<const rc::Scene> job_scene_;
     uint64_t job_scene_version_ = 0;
     std::vector<rc::InstanceXform> job_xforms_;
+    int job_xform_sets_ = 1;   // consecutive sets in job_xforms_
     // Participating media for this scan, re-gathered every scan because
     // emitters move with their link and can be toggled at runtime.
     std::vector<rc::RcObscurant> job_obscurants_;

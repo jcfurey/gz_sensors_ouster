@@ -134,9 +134,15 @@
   <!-- Rolling-shutter motion distortion (raycast mode only): cast each
        column from the sensor pose at its acquisition time, skewing the
        cloud by the platform's motion over one scan period like a real
-       spinning lidar (docs/MODEL_REFERENCES.md §9). Default false =
-       instantaneous snapshot. -->
+       spinning lidar (docs/MODEL_REFERENCES.md §9). Default false = every
+       column from the sensor pose at the scan trigger. -->
   <!-- <motion_distortion>true</motion_distortion> -->
+  <!-- Raycast mode only: moving objects are captured this many times per
+       scan, once per group of columns as the sweep reaches it, so each
+       column sees them within T/(2N) of its timestamp, plus a physics
+       step (default 16; 1 = once, mid-scan). Without motion_distortion the model carrying the
+       sensor stays at the scan trigger with the sensor pose. -->
+  <!-- <object_motion_samples>16</object_motion_samples> -->
 
   <!-- ─── Smoke / dust / fog obscuration (raycast mode only) ──────── -->
   <!-- Beams are integrated through participating media: targets behind

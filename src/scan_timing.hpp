@@ -36,4 +36,27 @@ inline int64_t columnTimestampNs(int64_t scan_end_ns,
     return scan_start_ns + offset_ns;
 }
 
+// Moving objects are captured once per group of columns: rc::castScanGrouped
+// casts column m with group m * groups / columns. Returns the midpoint of
+// group `group`'s first and last column timestamps, when the group is swept.
+inline int64_t columnGroupMidTimestampNs(int64_t scan_end_ns,
+                                         int64_t scan_period_ns,
+                                         int group,
+                                         int groups,
+                                         int columns)
+{
+    if (groups <= 0 || groups > columns || group < 0 || group >= groups) {
+        return 0;
+    }
+    const auto first_column = [columns, groups](int g) {
+        return static_cast<int>(
+            (static_cast<int64_t>(g) * columns + groups - 1) / groups);
+    };
+    const int first = first_column(group);
+    const int last = first_column(group + 1) - 1;
+    const int64_t a = columnTimestampNs(scan_end_ns, scan_period_ns, first, columns);
+    const int64_t b = columnTimestampNs(scan_end_ns, scan_period_ns, last, columns);
+    return a + (b - a) / 2;
+}
+
 }  // namespace gz_gpu_ouster_lidar

@@ -232,6 +232,14 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("motion_distortion")) {
         motion_distortion_ = sdf->Get<bool>("motion_distortion");
     }
+    if (sdf->HasElement("object_motion_samples")) {
+        const int samples = sdf->Get<int>("object_motion_samples");
+        if (samples < 1) {
+            RCLCPP_WARN(kLogger,
+                "object_motion_samples must be >= 1, got %d; using 1", samples);
+        }
+        object_motion_samples_ = std::max(1, samples);
+    }
     if (sdf->HasElement("edge_discon_threshold")) {
         edge_discon_threshold_ = sdf->Get<double>("edge_discon_threshold");
     }
@@ -673,6 +681,8 @@ void GzGpuOusterLidarSystem::Configure(
         mp.lidar_hz = lidar_hz_;
         mp.beam_origin_mm = meta_->beam_origin_mm;
         mp.motion_distortion = motion_distortion_;
+        mp.object_motion_samples = object_motion_samples_;
+        mp.sensor_model = ::gz::sim::topLevelModel(sensor_entity_, ecm);
         mp.beam_alt_f = &meta_->beam_alt_f;
         mp.beam_az_f = &meta_->beam_az_f;
         mp.obscurants = obscurants_.get();
