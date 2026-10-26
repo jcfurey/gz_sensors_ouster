@@ -304,8 +304,8 @@ __global__ void rayProcessKernel(
 
     // ── Reflectivity from retro (Ouster calibrated scale) ──────────────────
     // 0-100 = Lambertian (linear), 101-255 = retroreflective (log).
-    // See ray_processor_cpu_impl.cpp for the full derivation; the mapping
-    // itself is rpmath::reflectivityToByte (shared by all backends).
+    // The mapping is rpmath::reflectivityToByte (shared by all backends);
+    // derivation and Ouster references in docs/MODEL_REFERENCES.md §5.
     if (ouster_sim_core::opticalValuePresent(retro, idx)) {
         refl_out[idx] = rpmath::reflectivityToByte(retro[idx]);
     } else {

@@ -261,7 +261,7 @@ __global__ void rayProcessKernelHip(
     signal_out[idx] = rpmath::clampU16(sig);
 
     // Ouster reflectivity scale (shared rpmath::reflectivityToByte); canonical
-    // derivation + upstream refs live in ray_processor_cpu_impl.cpp.
+    // derivation + upstream refs live in docs/MODEL_REFERENCES.md §5.
     if (ouster_sim_core::opticalValuePresent(retro, idx)) {
         refl_out[idx] = rpmath::reflectivityToByte(retro[idx]);
     } else {

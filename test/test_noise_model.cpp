@@ -288,15 +288,20 @@ TEST(NoiseModel, ReflectivityRetroScale)
     processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
-    // 100 + log2(2) * 22 = 100 + 22 = 122
-    EXPECT_EQ(refl[0], 122u);
-    // 100 + log2(4) * 22 = 100 + 44 = 144
-    EXPECT_EQ(refl[1], 144u);
+    // 15.89 bytes per doubling, (255 - 100) / log2(864):
+    // 100 + log2(2) * 15.89 = 115.9
+    EXPECT_EQ(refl[0], 115u);
+    // 100 + log2(4) * 15.89 = 131.8
+    EXPECT_EQ(refl[1], 131u);
 }
 
 TEST(NoiseModel, ReflectivityByteInverseCoversBothBands)
 {
-    for (float b : {0.0f, 50.0f, 100.0f, 122.0f, 144.0f, 254.0f}) {
+    std::vector<float> bytes = {0.0f, 50.0f, 100.0f};
+    // Every retroreflective byte: float exp/log2 rounding must not land
+    // the round trip on the byte below.
+    for (int b = 101; b <= 255; ++b) bytes.push_back(static_cast<float>(b));
+    for (float b : bytes) {
         const float retro = rpmath::reflectivityByteToRetro(b);
         EXPECT_EQ(rpmath::reflectivityToByte(retro), static_cast<uint8_t>(b))
             << "byte=" << b << " retro=" << retro;
@@ -553,7 +558,7 @@ TEST(NoiseModel, EdgeDiscontinuityCausesDropouts)
 
 TEST(NoiseModel, ReflectivitySaturatesAt255)
 {
-    // rv=1024: 100 + log2(1024)*22 = 100 + 10*22 = 320 → clamped to 255.
+    // rv=1024: 100 + log2(1024)*15.89 = 258.9 → clamped to 255 (864 and up).
     constexpr int H = 1, W = 1;
     std::vector<float> depth(1, 10.0f);
     std::vector<float> retro(1, 1024.0f);

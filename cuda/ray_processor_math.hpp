@@ -64,7 +64,7 @@ constexpr float kFullySaturatedRatio = 1.0e20f; ///< x/sat beyond which c = sat 
 // Reflectivity model (Ouster calibrated scale).
 constexpr float kLambertianMax   = 100.0f;    ///< 0..100 diffuse band
 constexpr float kReflByteMax     = 255.0f;
-constexpr float kRetroLogSlope   = 22.0f;     ///< (255-100)/7 → 7 doublings of retro headroom
+constexpr float kRetroLogSlope   = 15.889471f; ///< (255-100)/log2(864): 255 is 864× a 100% diffuse target
 
 // Reflectivity weighting of dropout / range noise on dark targets.
 constexpr float kDropoutRetroFloor = 0.33f;   ///< retro floor → up to 3× dropout
@@ -455,13 +455,18 @@ GZ_OUSTER_HD inline float reflectivityByteToRetro(float value)
     if (b <= kLambertianMax) {
         return b / kLambertianMax;
     }
+    // A thousandth of a byte inside the bin, so float rounding in exp_ and
+    // log2_ cannot re-encode the result as the byte below.
+    constexpr float kInsideBin = 1.0e-3f;
     constexpr float kLn2 = 0.6931471805599453f;
-    return gzm::exp_((b - kLambertianMax) * kLn2 / kRetroLogSlope);
+    return gzm::exp_((b - kLambertianMax + kInsideBin) * kLn2 / kRetroLogSlope);
 }
 
 /// Map a Gazebo retro value to the Ouster reflectivity byte:
 ///   rv ∈ [0,1]  → linear  [0,100]      (Lambertian diffuse)
-///   rv > 1      → log map  [101,255]    (retroreflective)
+///   rv > 1      → log map  [101,255]    (retroreflective; 255 at rv = 864)
+/// This is Ouster's calibrated scale (docs/MODEL_REFERENCES.md §5), matching
+/// ouster_sim_core::quantizeOusterReflectivity().
 /// Missing laser_retro values are resolved to physical reflectance by the ray
 /// caster before incidence, obscurant attenuation and return arbitration.
 GZ_OUSTER_HD inline uint8_t reflectivityToByte(float rv)

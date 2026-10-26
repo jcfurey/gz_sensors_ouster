@@ -481,7 +481,7 @@ private:
                 signal_out[idx] = rpmath::clampU16(sig);
 
                 // Reflectivity — shared rpmath::reflectivityToByte. Canonical
-                // derivation + upstream Ouster refs in ray_processor_cpu_impl.cpp.
+                // derivation + upstream Ouster refs in docs/MODEL_REFERENCES.md §5.
                 if (ouster_sim_core::opticalValuePresent(retro, idx)) {
                     refl_out[idx] = rpmath::reflectivityToByte(retro[idx]);
                 } else {

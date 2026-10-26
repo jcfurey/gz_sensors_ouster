@@ -429,7 +429,7 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
 |---------|------|------------------|
 | 0° | Range ladder | Six identical 80%-reflectance targets at 6–105 m: range-noise σ ramps with distance, signal follows the product's range response (1/r² beyond about 20 m for a Rev7 OS1), the far pair thins out from `dropout_rate_far` |
 | 45° | Reflectance ladder | Seven panels at one range, `laser_retro` 0.02→1.0: an even staircase across the 0–100 reflectivity band; dark panels are noisier and drop out more |
-| 58–72° | Retroreflector ladder | Nine posts, `laser_retro` 1.3→300 → the calibrated log band walked end to end (bytes 108, 130, 151, 173, 195, 220, 242, 255, 255), like signs and retro tape |
+| 58–72° | Retroreflector ladder | Nine posts, `laser_retro` 1.3→1000 → the calibrated log band walked end to end (bytes 106, 121, 136, 152, 168, 187, 203, 230, 255; Ouster's scale ends at 864× a white target), like signs and retro tape |
 | 82–129° | **Signal / intensity ladder** | Nine retroreflective posts at *fixed* reflectivity walking in from 19.2 m to 1.2 m. Under the inverse-square model SIGNAL is `base_signal·ρ/r²`, so range alone sweeps it and the closest post saturates the 16-bit channel; a measured Rev7 response holds every post at the detector's saturation near 5,700, as retroreflectors read on the real sensor |
 | 135° | Detection rolloff | Rev7 OS1 dark targets at 90 m and 115 m sit at the published 90%-detection point and in its smooth tail; a bright target at 115 m remains highly detectable. Returns thin statistically instead of disappearing at an artificial hard boundary. |
 | 180° | Specular / gloss | Matte (kₛ 0.10), glossy (0.45) and mirror (0.95) faces: the specular lobe, and above the mirror threshold a **ghost return** behind the mirror (the orange post's reflection) |
@@ -449,9 +449,9 @@ of values can look correct in sim and fall over on real data. Measured from the
 | Channel | min | max | Coverage |
 |---------|-----|-----|----------|
 | `intensity` (SIGNAL) | 0 | **5844** | 3.8 decades, ~5700 distinct values: the measured Rev7 response saturates near 5,700 at 1024x10, as the real sensor does |
-| `reflectivity` | 0 | **255** | ~206 distinct values across 0–255 |
+| `reflectivity` | 0 | **255** | ~200 distinct values across 0–255; the 1000× post reads 255, past the 864× top of Ouster's scale |
 | `ambient` (NEAR_IR) | 0 | **65535** | saturates on the sun-facing retro panel |
-| `range` | 0 | **~110000 mm** | out to the 110 m perimeter (inside the Rev7 OS1's 233 m representable window) |
+| `range` | 0 | **~133000 mm** | out to the ends of the 110 m perimeter walls, 133 m away (inside the Rev7 OS1's 233 m representable window) |
 
 Two design points make the hard channels reachable:
 

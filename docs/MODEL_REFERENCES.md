@@ -209,12 +209,25 @@ Poisson at low counts and quieter near saturation (§1).
 ### 5. Calibrated reflectivity byte
 
 **Model:** ρ_app ∈ [0,1] → linear [0,100]; ρ_app > 1 → log₂ map into
-[101,255], implemented in `rpmath::reflectivityToByte` (derivation comment in
-`cuda/ray_processor_cpu_impl.cpp`).
+[101,255], `byte = 100 + log₂(ρ_app) · 155 / log₂(864)`, about 15.9 bytes per
+doubling, truncated and saturating at 255 from ρ_app = 864. Implemented in
+`rpmath::reflectivityToByte` (`cuda/ray_processor_math.hpp`) and in the shared
+core's `quantizeOusterReflectivity`; the shared conformance fixtures hold them
+to the same byte.
 
-Matches Ouster's documented two-band calibrated-reflectivity encoding (linear
-percent for diffuse targets, compressed band for retroreflectors):
+This is Ouster's documented calibrated-reflectivity encoding for firmware 3.2
+and later: 1–100 linear in percent Lambertian reflectivity, and 101–255 a log₂
+mapping for retroreflective targets, where 255 is "a retroreflector 864×
+stronger than a 100% Lambertian target". Ouster publishes its exact table only
+as a figure; the model uses the continuous log₂ curve between the same end
+points. Ouster's public Rev7 recordings agree: run through the measured SIGNAL
+response (§1), their retroreflective bins imply roughly 9–11× a white target
+near byte 154 and 77× near byte 199, where this scale gives 10.5× and 75×. (An
+earlier scale of 22 bytes per doubling, which saturated at 132×, gave 5.5× and
+23×.)
 
+- Ouster Sensor Docs, *Calibrated Reflectivity*.
+  <https://docs.ouster.com/sensor-docs/calibrated-reflectivity>
 - Ouster Sensor Docs, *Sensor Data* (REFLECTIVITY field).
   <https://static.ouster.dev/sensor-docs/image_route1/image_route2/sensor_data/sensor-data.html>
 - `ouster_client/include/ouster/chanfield.h` (REFLECTIVITY is "calibrated by
