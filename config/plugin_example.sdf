@@ -96,11 +96,19 @@
   <!-- <range_noise_min_std>0.003</range_noise_min_std> -->
   <!-- <range_noise_max_std>0.015</range_noise_max_std> -->
 
-  <!-- Signal intensity model: photon budget for the 1/r^2 model.
-       Higher = brighter returns. OS0: ~400, OS1: ~800, OS2: ~1200. -->
+  <!-- SIGNAL model: auto uses the product's response measured on real
+       sensors where recordings calibrate it (Rev7 OS0 and OS1) and the
+       inverse-square model otherwise; measured | inverse_square choose. -->
+  <!-- <signal_model>auto</signal_model> -->
+
+  <!-- Sensor sensitivity. A measured response reproduces its recordings at
+       800 and scales by base_signal / 800. The inverse-square model reports
+       base_signal * reflectance / r^2: higher = brighter returns
+       (OS0: ~400, OS1: ~800, OS2: ~1200). -->
   <!-- <base_signal>800.0</base_signal> -->
 
-  <!-- Poisson shot noise on signal channel. 0 = off, 1.0 = physical. -->
+  <!-- Shot noise on the signal channel: the measured response's noise, or
+       Poisson for the inverse-square model. 0 = off, 1.0 = physical. -->
   <!-- <signal_noise_scale>1.0</signal_noise_scale> -->
 
   <!-- Poisson noise on near-IR channel (both lidar packets and image topic).
