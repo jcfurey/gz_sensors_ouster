@@ -10,17 +10,73 @@ range, α the angle between the beam and the surface normal at the hit.
 
 ## Modeled effects
 
-### 1. Received signal — extended-Lambertian lidar equation
+### 1. Received signal — measured product response
 
-**Model:** `signal = base_signal · ρ_app / R²` with
-`ρ_app = ρ · cos(α)` (raycast mode), implemented in
-`rpmath::signalFromRange` (`cuda/ray_processor_math.hpp`) and
-`rc::rcCosIncidence` / `rcCastOneRay` (`cuda/raycast_math.hpp`).
+**Model:** the apparent reflectance `ρ_app = ρ · cos(α)` (raycast mode;
+`rc::rcCosIncidence` / `rcCastOneRay`, `cuda/raycast_math.hpp`) sets SIGNAL
+through the product's measured response, `rpmath::signalSample`
+(`cuda/ray_processor_math.hpp`), which `ouster_sim_core::evaluateSignalResponse`
+mirrors in double precision:
 
-For a target larger than the beam footprint with Lambertian reflectance, the
-lidar range equation reduces to `P_r ∝ ρ · cos(α) / R²`. This is the standard
-form used both for radiometric calibration of real scanners and by physically
-based simulators:
+```
+x     = (base_signal / 800) · ρ_app · g(R) / R²     linear signal
+c     = x / (1 + (x / 5680)^(4/3))^(3/4)             detector saturation
+σ     = √(1.337² · x · (dc/dx)² + (0.0077 · c)²)     shot noise, relative floor
+SIGNAL = m · c,  σ · √m,  m = 10240 / (columns · fps)
+```
+
+`g(R)` is the SIGNAL·m² a 100% diffuse target returns at the recordings'
+1024x10, a knot table interpolated linearly in range. Beyond its last knot it
+holds, so the far field falls as 1/R²; below its first knot (OS1 2.3 m, OS0
+1.0 m) `x` holds. `m` counts shots per measurement against the recordings.
+Products without recordings (Gen1 and Gen2, Rev7 OS2 and OSDome, Rev8) keep the
+inverse-square `base_signal · ρ_app / R²` with Poisson σ = √SIGNAL, as does
+`signal_model` `inverse_square`.
+
+**Calibration.** Fitted to Ouster's public sample recordings on Ouster Studio
+(© Ouster, CC BY-NC-SA 4.0; only the fitted parameters are included here):
+an OS1-128 Rev7 on firmware 3.0.1 at 1024x10 and at 2048x10, a second OS1-128
+Rev7 on 3.2.0 at 2048x10 (the first four minutes of its loop), and an OS0-128
+Rev7 on 3.0.1 at 1024x10. Calibrated REFLECTIVITY is the firmware's estimate of
+diffuse reflectance from SIGNAL and range, so the median SIGNAL of returns
+binned by range and reflectivity traces the response. Each range bin's `g` is
+fitted with one saturation shared by every bin, over reflectivity 15-100
+(below that the byte's 1% steps are coarse, and firmware 3.2 departs from
+proportionality; see the limits below); the residuals are 3.4% RMS.
+
+- **Far field.** 1/R² from about 20 m, with `g` ≈ 2.65 M for the OS1 and
+  0.30 M for the OS0, easing to 1.97 M by 108 m on the OS1.
+- **Near field.** The transmitted beam and the receiver's view overlap only
+  partly at short range. The OS1 reaches full overlap near 20 m and keeps 3-4%
+  of it below 4 m, so a fixed target returns the least signal near 4 m and
+  peaks near 9 m. The OS0 reaches full overlap by 7 m, and from 3.5 m down to
+  its closest data at 1 m a target returns about the same signal at any range;
+  holding `x` below the first knot follows that shape.
+- **Saturation.** Both models saturate alike: the largest SIGNAL in each
+  recording, retroreflectors included, is 5,737 (OS1) and 5,749 (OS0). Fitted
+  free, the knee exponent comes out at 1.33.
+- **Mode.** The same unit at 2048x10 reads 0.49-0.50 of its 1024x10 SIGNAL at
+  every range and reflectivity, saturated returns included: the mode scales
+  the output by the shots per measurement, not the linear signal.
+- **Noise.** Per-pixel noise over stationary stretches (85 k to 740 k steady
+  pixels per recording) falls on one curve at the reference rate for both
+  units, both firmware versions and both modes: σ/√SIGNAL is 1.34 at low
+  counts and 0.55 near saturation. The model fits it to 5% RMS; without the
+  relative floor it misses by 25%.
+
+**Limits.** The two OS1 units' overlap transitions differ by up to 40%
+between 5 and 8 m (the table is their geometric mean) and by under 10% beyond
+17 m. On firmware 3.2's reflectivity calibration, dark distant returns read
+less SIGNAL for the same reflectivity than on 3.0.1 (at 30 m and 3%, 5 counts
+against 40 at 2048x10); the model keeps 3.0.1's proportionality there. The
+OS1 table serves the 32- and 64-channel OS1, which share its optics and
+datasheet ranges. Reflectivity remains the noise-free calibrated byte.
+
+In the far field this is the extended-Lambertian lidar equation: for a target
+larger than the beam footprint with Lambertian reflectance, the lidar range
+equation reduces to `P_r ∝ ρ · cos(α) / R²`. This is the standard form used
+both for radiometric calibration of real scanners and by physically based
+simulators:
 
 - Kashani, Olsen, Parrish, Wilson — *A Review of LIDAR Radiometric Processing:
   From Ad Hoc Intensity Correction to Rigorous Radiometric Calibration*,
@@ -139,13 +195,16 @@ radiance (sun position, bright surfaces) rather than being uniform.
 
 ### 4. Signal / near-IR shot noise
 
-**Model:** `σ_channel = √(channel) · noise_scale` (Poisson shot-noise
-analogue, Gaussian approximation), applied to `signal` and `near_ir` in each
-backend's noise stage.
+**Model:** Gaussian noise of σ · `noise_scale` on `signal` and `near_ir` in
+each backend's noise stage. For a measured SIGNAL response σ is §1's measured
+noise: shot noise with a 1.34 excess factor, carried through the detector's
+saturation, plus a 0.77% floor. Otherwise σ = √(channel), the Poisson
+shot-noise analogue.
 
 Photon-counting statistics are Poisson; for the photon counts these channels
 represent, `Var = N` (σ = √N) and the Gaussian approximation is standard.
-Same photon-budget references as §2.
+Same photon-budget references as §2. A real Rev7's SIGNAL is noisier than
+Poisson at low counts and quieter near saturation (§1).
 
 ### 5. Calibrated reflectivity byte
 
@@ -499,8 +558,8 @@ noise) sits among published alternatives.
   with Standardized Interfaces*, Sensors 22(19), 2022 (PMC9572647). Models the
   full receive chain (optics, APD, amplifier, sun noise) and reports
   validation metrics (signal MAPE 1.7%, point count 8.5%, mean intensity
-  9.3%) — a useful benchmark for "how good is good" if this model is ever
-  validated against a real OS1.
+  9.3%) — a useful benchmark for "how good is good". §1's SIGNAL response fits
+  real Rev7 OS1 recordings to 3.4% RMS and their noise to 5%.
 - CARLA (<https://carla.org>) — raycast lidar with linear-in-distance
   intensity attenuation and stochastic raydrop; the de-facto AV research
   baseline, less physical than this plugin's model.

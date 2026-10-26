@@ -365,6 +365,7 @@ private:
             splitmix64(effective_seed_ + (frame_counter_++));
         const int H = p.H, W = p.W;
         const float base_signal = p.base_signal;
+        const SignalResponseParams signal_response = p.signal_response;
         const float base_refl = p.base_reflectivity;
         const float rmin = p.range_noise_min_std;
         const float rmax = p.range_noise_max_std;
@@ -468,12 +469,13 @@ private:
                 }
                 range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
-                // Signal 1/r² + shot noise
+                // Signal: measured response or 1/r², with shot noise
                 const float intensity = ouster_sim_core::opticalValueOrDefault(retro, idx, 1.0f);
-
-                float sig = rpmath::signalFromRange(d, intensity, base_signal);
+                const rpmath::SignalSample sample = rpmath::signalSample(
+                    d, intensity, base_signal, signal_response);
+                float sig = sample.mean;
                 if (sig_scale > 0.f) {
-                    float sigma_sig = sycl::sqrt(sycl::fmax(sig, 0.f)) * sig_scale;
+                    float sigma_sig = sample.sigma * sig_scale;
                     sig = sycl::fmax(sig + normal01(counter, seed, idx) * sigma_sig, 0.f);
                 }
                 signal_out[idx] = rpmath::clampU16(sig);

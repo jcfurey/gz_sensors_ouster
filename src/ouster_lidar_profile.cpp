@@ -18,4 +18,25 @@ OusterLidarProfile resolveOusterLidarProfile(const OusterProfileRequest & reques
     return ouster_sim_core::resolveOusterProductProfile(core);
 }
 
+SignalResponseParams signalResponseParams(
+    const ouster_sim_core::OusterSignalResponse & response,
+    int columns_per_frame, double lidar_hz)
+{
+    static_assert(kMaxSignalKnots ==
+                  ouster_sim_core::OusterSignalResponse::kMaxKnots);
+    SignalResponseParams params{};
+    if (!response.measured()) return params;
+    params.knots = response.knot_count;
+    for (int i = 0; i < response.knot_count; ++i) {
+        params.range_m[i] = static_cast<float>(response.range_m[i]);
+        params.signal_m2[i] = static_cast<float>(response.signal_m2[i]);
+    }
+    params.saturation = static_cast<float>(response.saturation_signal);
+    params.shot_noise = static_cast<float>(response.shot_noise_factor);
+    params.relative_noise = static_cast<float>(response.relative_noise);
+    params.mode_gain = static_cast<float>(ouster_sim_core::signalModeGain(
+        response, columns_per_frame, lidar_hz));
+    return params;
+}
+
 }  // namespace gz_gpu_ouster_lidar

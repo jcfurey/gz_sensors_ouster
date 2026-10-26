@@ -50,14 +50,36 @@ struct ResampleParams {
     ResamplePanel panels[kMaxResamplePanels];
 };
 
+/// Largest knot table of a measured SIGNAL response
+/// (ouster_sim_core::OusterSignalResponse::kMaxKnots).
+constexpr int kMaxSignalKnots = 24;
+
+/// A product's measured SIGNAL response, as the kernels evaluate it: a float
+/// copy of ouster_sim_core::OusterSignalResponse plus the active mode's
+/// shots-per-measurement gain. knots == 0 selects the inverse-square model
+/// base_signal·ρ/r² with Poisson noise.
+struct SignalResponseParams {
+    int knots;                          ///< Valid table entries (0 = none)
+    float range_m[kMaxSignalKnots];     ///< Knot ranges, ascending (m)
+    float signal_m2[kMaxSignalKnots];   ///< 100% diffuse linear SIGNAL·r²
+    float saturation;                   ///< SIGNAL the detector saturates at
+    float shot_noise;                   ///< σ/√x before saturation
+    float relative_noise;               ///< σ floor as a fraction of SIGNAL
+    float mode_gain;                    ///< Shots per measurement vs recording
+};
+
 /// Parameters for CUDA ray post-processing kernel
 struct RayProcessParams {
     int H;                     ///< Beam count (pixels per column)
     int W;                     ///< Columns per frame
 
     // ── Signal model ─────────────────────────────────────────────────────────
-    float base_signal;         ///< Baseline signal for 1/r² model (photons·m²)
+    /// Sensor sensitivity. The inverse-square model reports
+    /// base_signal·ρ/r² (photons·m²); a measured response scales its linear
+    /// signal by base_signal / 800, so 800 reproduces its recordings.
+    float base_signal;
     float base_reflectivity;   ///< Default reflectivity value [0–255]
+    SignalResponseParams signal_response;  ///< Measured response, if any
 
     // ── Range noise ──────────────────────────────────────────────────────────
     float range_noise_min_std; ///< Min range noise σ at 0 m (metres), e.g. 0.005

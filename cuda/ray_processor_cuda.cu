@@ -150,11 +150,12 @@ __global__ void castScanKernel(
 ///
 /// Each thread handles one pixel (beam × column).
 /// Input layout: depth_buf[beam * W + col] = depth in metres (inf = miss).
-/// Output: range in mm, signal via 1/r² model, reflectivity from retro.
+/// Output: range in mm, signal from the product's measured response (or the
+/// 1/r² model), reflectivity from retro.
 ///
 /// Noise model:
 ///   Range:        Gaussian, σ linearly interpolated from min_std..max_std over [0, max_range]
-///   Signal:       Poisson-approximated shot noise: σ = sqrt(signal) * scale
+///   Signal:       Gaussian shot noise, σ from rpmath::signalSample × scale
 ///   Near-IR:      Same Poisson model on retro channel
 ///   Dropouts:     Uniform random < linearly-interpolated dropout probability → zero return
 ///   Edge suppression: if any cardinal neighbor depth differs by > threshold → suppress
@@ -167,6 +168,10 @@ __global__ void rayProcessKernel(
     uint16_t * __restrict__      nearir_out,
     int H, int W,
     float base_signal,
+    // cppcheck-suppress passedByValueCallback ; GPU kernel arguments must be
+    // passed by value — the device cannot dereference a host reference.
+    // (~220 B, well inside the 4 KB kernel-parameter limit.)
+    SignalResponseParams signal_response,
     float base_reflectivity,
     float range_noise_min_std,
     float range_noise_max_std,
@@ -286,14 +291,13 @@ __global__ void rayProcessKernel(
     // Range in millimetres
     range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
-    // ── Signal: 1/r² model with Poisson shot noise ──────────────────────────
+    // ── Signal: measured response or 1/r² model, with shot noise ────────────
     const float intensity = ouster_sim_core::opticalValueOrDefault(retro, idx, 1.0f);
-
-    float sig = rpmath::signalFromRange(d, intensity, base_signal);
-
-    // Shot noise: σ = √(signal) × scale
+    const rpmath::SignalSample sample =
+        rpmath::signalSample(d, intensity, base_signal, signal_response);
+    float sig = sample.mean;
     if (rs != nullptr && signal_noise_scale > 0.f) {
-        float sigma_sig = sqrtf(fmaxf(sig, 0.f)) * signal_noise_scale;
+        float sigma_sig = sample.sigma * signal_noise_scale;
         sig = fmaxf(sig + curand_normal(rs) * sigma_sig, 0.f);
     }
     signal_out[idx] = rpmath::clampU16(sig);
@@ -344,7 +348,7 @@ void launchRayProcessKernel(
     rayProcessKernel<<<grid, kBlock, 0, static_cast<cudaStream_t>(stream)>>>(
         d_depth, d_retro, d_range, d_signal, d_refl, d_nearir,
         p.H, p.W,
-        p.base_signal, p.base_reflectivity,
+        p.base_signal, p.signal_response, p.base_reflectivity,
         p.range_noise_min_std, p.range_noise_max_std,
         p.range_noise_reference_range, p.max_range,
         p.min_range, p.detection_range_10, p.detection_range_80,

@@ -57,6 +57,10 @@ constexpr float kU16Max          = 65535.0f;
 constexpr float kEdgeSuppressProb = 0.5f;     ///< P(suppress) at a detected depth edge
 constexpr float kNearIrScale     = 256.0f;    ///< retro → near-IR photon-count analogue
 
+// Measured SIGNAL response (ouster_sim_core/signal_response.hpp).
+constexpr float kReferenceBaseSignal = 800.0f;  ///< base_signal of the recordings
+constexpr float kFullySaturatedRatio = 1.0e20f; ///< x/sat beyond which c = sat in float
+
 // Reflectivity model (Ouster calibrated scale).
 constexpr float kLambertianMax   = 100.0f;    ///< 0..100 diffuse band
 constexpr float kReflByteMax     = 255.0f;
@@ -78,6 +82,7 @@ GZ_OUSTER_HD inline float fmax_(float a, float b) { return a > b ? a : b; }
 
 #if defined(SYCL_LANGUAGE_VERSION)
 GZ_OUSTER_HD inline float sqrt_(float x)     { return sycl::sqrt(x); }
+GZ_OUSTER_HD inline float cbrt_(float x)     { return sycl::cbrt(x); }
 GZ_OUSTER_HD inline float log2_(float x)     { return sycl::log2(x); }
 GZ_OUSTER_HD inline float log_(float x)      { return sycl::log(x); }
 GZ_OUSTER_HD inline float exp_(float x)      { return sycl::exp(x); }
@@ -90,6 +95,7 @@ GZ_OUSTER_HD inline float fabs_(float x)     { return sycl::fabs(x); }
 GZ_OUSTER_HD inline bool  isfinite_(float x) { return sycl::isfinite(x); }
 #else
 GZ_OUSTER_HD inline float sqrt_(float x)     { return std::sqrt(x); }
+GZ_OUSTER_HD inline float cbrt_(float x)     { return std::cbrt(x); }
 GZ_OUSTER_HD inline float log2_(float x)     { return std::log2(x); }
 GZ_OUSTER_HD inline float log_(float x)      { return std::log(x); }
 GZ_OUSTER_HD inline float exp_(float x)      { return std::exp(x); }
@@ -379,6 +385,65 @@ GZ_OUSTER_HD inline float signalFromRange(float d, float intensity, float base_s
 {
     const float r_sq = gzm::fmax_(d * d, kMinDenom);
     return base_signal * intensity / r_sq;
+}
+
+/// Mean SIGNAL of one return and the standard deviation of its noise, before
+/// signal_noise_scale.
+struct SignalSample {
+    float mean;
+    float sigma;
+};
+
+/// Received SIGNAL for apparent reflectance `rho` at range `d`.
+///
+/// Without a measured response: the inverse-square base_signal·ρ/r² with
+/// Poisson σ = √mean. With one, ouster_sim_core::evaluateSignalResponse in
+/// float: the linear signal x = (base_signal / 800)·ρ·signal_m2(d)/d², with
+/// signal_m2 linear in range between knots, x held below the first knot and
+/// falling as 1/r² beyond the last, saturates to
+/// c = x / (1 + (x / saturation)^(4/3))^(3/4). σ adds the shot noise
+/// shot_noise·√x·dc/dx and relative_noise·c in quadrature, and the mode gain
+/// m reports m·c with σ·√m.
+GZ_OUSTER_HD inline SignalSample signalSample(
+    float d, float rho, float base_signal, const SignalResponseParams & r)
+{
+    if (r.knots <= 0) {
+        const float mean = signalFromRange(d, rho, base_signal);
+        return {mean, gzm::sqrt_(gzm::fmax_(mean, 0.0f))};
+    }
+    const float gain = base_signal / kReferenceBaseSignal;
+    if (!(rho > 0.0f) || !(d > 0.0f) || !(gain > 0.0f)) {
+        return {0.0f, 0.0f};
+    }
+    const int last = r.knots - 1;
+    float full;  // linear signal of a 100% diffuse target
+    if (d <= r.range_m[0]) {
+        full = r.signal_m2[0] / (r.range_m[0] * r.range_m[0]);
+    } else if (d >= r.range_m[last]) {
+        full = r.signal_m2[last] / (d * d);
+    } else {
+        int upper = 1;
+        while (r.range_m[upper] < d) ++upper;
+        const float t = (d - r.range_m[upper - 1]) /
+                        (r.range_m[upper] - r.range_m[upper - 1]);
+        full = (r.signal_m2[upper - 1] +
+                t * (r.signal_m2[upper] - r.signal_m2[upper - 1])) / (d * d);
+    }
+    const float linear = gain * rho * full;
+    const float ratio = linear / r.saturation;
+    float saturated = r.saturation;
+    float shot = 0.0f;  // the saturated slope dc/dx is zero
+    if (ratio < kFullySaturatedRatio) {
+        const float root = gzm::cbrt_(ratio);
+        const float t = 1.0f + root * root * root * root;  // 1 + ratio^(4/3)
+        const float sqrt_t = gzm::sqrt_(t);
+        const float fraction = 1.0f / (sqrt_t * gzm::sqrt_(sqrt_t));  // t^(-3/4)
+        saturated = linear * fraction;
+        shot = r.shot_noise * (fraction / t) * gzm::sqrt_(linear);  // dc/dx = t^(-7/4)
+    }
+    const float floor_sigma = r.relative_noise * saturated;
+    return {r.mode_gain * saturated,
+            gzm::sqrt_(r.mode_gain * (shot * shot + floor_sigma * floor_sigma))};
 }
 
 /// Convert an Ouster calibrated reflectivity byte back to the physical

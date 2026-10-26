@@ -130,6 +130,11 @@ private:
     double edge_discon_threshold_ = 0.15;
     double base_signal_ = 800.0;
     double base_reflectivity_ = 50.0;
+    // SIGNAL model: "auto" uses the product's measured response when its
+    // profile has one, "measured" asks for it (warning when there is none)
+    // and "inverse_square" keeps base_signal·ρ/r². Resolved in Configure.
+    std::string signal_model_ = "auto";
+    bool measured_signal_ = false;
 
     // ── IMU configuration (SDF-optional) ─────────────────────────────────────
     std::string imu_name_;

@@ -134,6 +134,122 @@ TEST(NoiseModel, SignalFollowsInverseSquareLaw)
     EXPECT_EQ(signal[2], 100u);
 }
 
+// A 100% target carries x = 1e4 at the 2 m knot (and, held, anywhere closer)
+// and 2e4 at 10 m; the detector saturates at 5000.
+static SignalResponseParams handCheckedResponse()
+{
+    SignalResponseParams r{};
+    r.knots = 2;
+    r.range_m[0] = 2.0f;
+    r.range_m[1] = 10.0f;
+    r.signal_m2[0] = 4.0e4f;
+    r.signal_m2[1] = 2.0e6f;
+    r.saturation = 5000.0f;
+    r.shot_noise = 1.25f;
+    r.relative_noise = 0.01f;
+    r.mode_gain = 1.0f;
+    return r;
+}
+
+// The documented saturation c = x / (1 + (x / 5000)^(4/3))^(3/4), and its
+// slope, evaluated independently in double with pow.
+static double saturated(double x)
+{
+    return x / std::pow(1.0 + std::pow(x / 5000.0, 4.0 / 3.0), 0.75);
+}
+
+static double saturationSlope(double x)
+{
+    return std::pow(1.0 + std::pow(x / 5000.0, 4.0 / 3.0), -1.75);
+}
+
+TEST(NoiseModel, MeasuredResponseSaturatesInsteadOfFollowingInverseSquare)
+{
+    constexpr int H = 1, W = 6;
+    const int n = H * W;
+    std::vector<float> depth = {0.7f, 2.0f, 6.0f, 20.0f, 3.0f, 3.0f};
+    std::vector<float> retro = {0.5f, 0.5f, 0.3f, 0.25f, 1.0e6f, 0.0f};
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.signal_response = handCheckedResponse();
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+
+    // x = .5 * 1e4 = 5000, the same closer than the first knot. Float
+    // against double may land a count apart.
+    EXPECT_NEAR(signal[1], saturated(5000.0), 1.0);
+    EXPECT_EQ(signal[0], signal[1]);
+    // Midway signal_m2 is linear in range: x = .3 * 1.02e6 / 36 = 8500.
+    EXPECT_NEAR(signal[2], saturated(8500.0), 1.0);
+    // Beyond the last knot, 1/r^2: x = .25 * 2e6 / 400 = 1250.
+    EXPECT_NEAR(signal[3], saturated(1250.0), 1.0);
+    // A retroreflector saturates; a present black surface returns nothing.
+    EXPECT_GE(signal[4], 4999u);
+    EXPECT_LE(signal[4], 5000u);
+    EXPECT_EQ(signal[5], 0u);
+    // Reflectivity stays the calibrated byte.
+    EXPECT_EQ(refl[0], 50u);
+}
+
+TEST(NoiseModel, MeasuredResponseScalesWithBaseSignalAndShots)
+{
+    constexpr int H = 1, W = 1;
+    std::vector<float> depth(1, 2.0f);
+    std::vector<float> retro(1, 0.25f);
+    std::vector<uint32_t> range(1);
+    std::vector<uint16_t> signal(1);
+    std::vector<uint8_t>  refl(1);
+    std::vector<uint16_t> nearir(1);
+
+    auto p = noNoiseParams(H, W);
+    p.signal_response = handCheckedResponse();
+    // Twice the reference sensitivity doubles x to 5000; half the shots per
+    // measurement (2048x10 against a 1024x10 recording) halve the output.
+    p.base_signal = 1600.0f;
+    p.signal_response.mode_gain = 0.5f;
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+    EXPECT_NEAR(signal[0], 0.5 * saturated(5000.0), 1.0);
+}
+
+TEST(NoiseModel, MeasuredResponseNoiseHasTheModelledSpread)
+{
+    constexpr int H = 1, W = 40000;
+    const int n = H * W;
+    std::vector<float> depth(n, 2.0f);
+    std::vector<float> retro(n, 0.5f);
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.signal_response = handCheckedResponse();
+    p.signal_noise_scale = 1.0f;
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p, 7u);
+
+    double sum = 0.0, sum_sq = 0.0;
+    for (int i = 0; i < n; ++i) {
+        sum += signal[i];
+        sum_sq += static_cast<double>(signal[i]) * signal[i];
+    }
+    const double mean = sum / n;
+    const double stddev = std::sqrt(sum_sq / n - mean * mean);
+    // At x = 5000: shot 1.25 * dc/dx * sqrt(5000) and floor .01 * c in
+    // quadrature, 40 counts or 1.3% of the signal (the inverse-square model's
+    // Poisson sigma would be sqrt(c) = 55).
+    const double sigma = std::hypot(
+        1.25 * saturationSlope(5000.0) * std::sqrt(5000.0),
+        0.01 * saturated(5000.0));
+    EXPECT_NEAR(mean, saturated(5000.0) - 0.5, 1.0);  // truncation to counts
+    EXPECT_NEAR(stddev, sigma, 0.03 * sigma);
+}
+
 TEST(NoiseModel, ReflectivityLambertianScale)
 {
     // retro <= 1.0 maps to 0-100 linearly

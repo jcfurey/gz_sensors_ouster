@@ -54,7 +54,8 @@ length and reported range before claiming full noisy optical equivalence.
 `test_core_conformance` exercises the production loader/encoder and bounded
 frame delivery, including pause, rewind, restart and blocked sinks.
 `test_optical_conformance` runs every available backend (unavailable devices
-are reported as skipped). The shared contract suites run against Gazebo's SDK
+are reported as skipped) against the core's noiseless contract and, within a
+count of float rounding, its measured Rev7 SIGNAL response. The shared contract suites run against Gazebo's SDK
 provider. `test_zenoh_packet_burst` uses an owned private router to verify 1,024
 large packets, late metadata delivery, and simulation-thread progress while
 packet transport is blocked. Native IMU packets (LEGACY and
@@ -426,10 +427,10 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
 
 | Azimuth | Zone | What to look for |
 |---------|------|------------------|
-| 0° | Range ladder | Six identical 80%-reflectance targets at 6–105 m: range-noise σ ramps with distance, signal falls as 1/r², the far pair thins out from `dropout_rate_far` |
+| 0° | Range ladder | Six identical 80%-reflectance targets at 6–105 m: range-noise σ ramps with distance, signal follows the product's range response (1/r² beyond about 20 m for a Rev7 OS1), the far pair thins out from `dropout_rate_far` |
 | 45° | Reflectance ladder | Seven panels at one range, `laser_retro` 0.02→1.0: an even staircase across the 0–100 reflectivity band; dark panels are noisier and drop out more |
 | 58–72° | Retroreflector ladder | Nine posts, `laser_retro` 1.3→300 → the calibrated log band walked end to end (bytes 108, 130, 151, 173, 195, 220, 242, 255, 255), like signs and retro tape |
-| 82–129° | **Signal / intensity ladder** | Nine posts at *fixed* reflectivity walking in from 19.2 m to 1.2 m. SIGNAL is `base_signal·ρ/r²`, so the 1/r² term — not reflectivity — is what sweeps it; the closest post saturates the channel outright |
+| 82–129° | **Signal / intensity ladder** | Nine retroreflective posts at *fixed* reflectivity walking in from 19.2 m to 1.2 m. Under the inverse-square model SIGNAL is `base_signal·ρ/r²`, so range alone sweeps it and the closest post saturates the 16-bit channel; a measured Rev7 response holds every post at the detector's saturation near 5,700, as retroreflectors read on the real sensor |
 | 135° | Detection rolloff | Rev7 OS1 dark targets at 90 m and 115 m sit at the published 90%-detection point and in its smooth tail; a bright target at 115 m remains highly detectable. Returns thin statistically instead of disappearing at an artificial hard boundary. |
 | 180° | Specular / gloss | Matte (kₛ 0.10), glossy (0.45) and mirror (0.95) faces: the specular lobe, and above the mirror threshold a **ghost return** behind the mirror (the orange post's reflection) |
 | 215° | Glass | Panes at τ=0.60 and τ=0.92 with walls behind: the pane wins on the first, the wall behind wins on the second — "lidar sees through the window" |
@@ -447,18 +448,20 @@ of values can look correct in sim and fall over on real data. Measured from the
 
 | Channel | min | max | Coverage |
 |---------|-----|-----|----------|
-| `intensity` (SIGNAL) | 0 | **65535** | 4.8 decades, ~7800 distinct values |
+| `intensity` (SIGNAL) | 0 | **5844** | 3.8 decades, ~5700 distinct values: the measured Rev7 response saturates near 5,700 at 1024x10, as the real sensor does |
 | `reflectivity` | 0 | **255** | ~206 distinct values across 0–255 |
 | `ambient` (NEAR_IR) | 0 | **65535** | saturates on the sun-facing retro panel |
 | `range` | 0 | **~110000 mm** | out to the 110 m perimeter (inside the Rev7 OS1's 233 m representable window) |
 
 Two design points make the hard channels reachable:
 
-- **SIGNAL is the one a naive scene starves.** It goes as `ρ/r²`, so with
-  nothing closer than 6 m it never leaves single digits — before the intensity
-  ladder existed this world peaked at **195** of a possible 65535 (0.3% of the
-  channel), with a third of objects returning literally 0. The ladder walks in
-  to 1.2 m at *constant* `laser_retro`, so range alone sweeps it.
+- **SIGNAL needs range spread under the inverse-square model.** It goes as
+  `ρ/r²`, so with nothing closer than 6 m it never leaves single digits —
+  before the intensity ladder existed this world peaked at **195** of a
+  possible 65535 (0.3% of the channel), with a third of objects returning
+  literally 0. The ladder walks in to 1.2 m at *constant* `laser_retro`, so
+  range alone sweeps it. A measured response reads hundreds to thousands
+  across the diffuse zones, as a real Rev7 does, and saturates the ladder.
 - **Occlusion and calibrated detection are load-bearing.** The perimeter sits
   at 110 m rather than 60 m, because at 60 m it silently blocked the 70 m and
   105 m range targets (max observed range was 69 m). Its `laser_retro` is 0.75,
@@ -815,9 +818,10 @@ targets produce weaker returns.
 |-----------|---------|-------|-------|-------------|
 | `range_noise_min_std` | *profile* | >= 0 | m | Near-range precision sigma. Defaults to the selected hardware/mode precision envelope and scales with reflectivity. |
 | `range_noise_max_std` | *profile* | >= 0 | m | Far precision sigma, reached at the profile's 10%-reflectivity D90 reference range. |
-| `signal_noise_scale` | 1.0 | >= 0 | -- | Poisson shot noise on signal channel. 0 = off, 1 = physical. |
+| `signal_noise_scale` | 1.0 | >= 0 | -- | Shot noise on the signal channel: the measured noise of the product's response, or Poisson for the inverse-square model. 0 = off, 1 = physical. |
 | `nearir_noise_scale` | 1.0 | >= 0 | -- | Poisson noise on near-IR channel (both packet and image). |
-| `base_signal` | 800.0 | >= 0 | photon m^2 | Baseline for the 1/r² signal model and photon-limited aerosol detection. OS0: ~400, OS1: ~800. |
+| `signal_model` | `auto` | `auto` \| `measured` \| `inverse_square` | -- | SIGNAL response. `auto` uses the product's measured response where recordings calibrate it (Rev7 OS0 and OS1; see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §1) and the inverse-square model otherwise; `measured` warns when there is none. |
+| `base_signal` | 800.0 | >= 0 | photon m^2 | Sensor sensitivity. The inverse-square model reports `base_signal·ρ/r²`; a measured response scales its linear signal by `base_signal/800`, so 800 reproduces its recordings. Also the photon budget of aerosol detection. |
 | `base_reflectivity` | 50.0 | 0-255 | -- | Default calibrated reflectivity byte when no retro channel is available. In raycast mode, an omitted `laser_retro` is converted to physical reflectance before incidence, smoke attenuation and return arbitration. |
 | `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
 | `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at the representable range, combined with the product-calibrated smooth detection probability. |
@@ -936,9 +940,11 @@ consumers don't get literal-zero variances.
 ## Sensor Tuning Guide
 
 Start by selecting the real `<hardware_revision>` and matching model metadata;
-the profile supplies the optical limits and precision. Tune environmental
-terms (`base_signal`, shot noise, random dropout, solar false alarms and
-obscurants) only for the simulated conditions. `max_range`, `min_range` and
+the profile supplies the optical limits, precision and, for Rev7 OS0 and OS1,
+the measured SIGNAL response. Tune environmental terms (`base_signal`, shot
+noise, random dropout, solar false alarms and obscurants) only for the
+simulated conditions; with a measured response, `base_signal` other than 800
+models a unit more or less sensitive than the recorded ones. `max_range`, `min_range` and
 range-noise parameters are escape hatches for measured unit-specific behavior,
 not required per-model boilerplate.
 
@@ -1029,7 +1035,7 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 
 | Binary | Coverage |
 |--------|---------|
-| `test_noise_model` | Range/signal/refl/nearir math + statistical bounds on dropouts and range noise |
+| `test_noise_model` | Range/signal/refl/nearir math + statistical bounds on dropouts and range noise; the measured SIGNAL response's knots, saturation, gains and noise spread |
 | `test_resample` | Panel-rig layout (coverage, packing) + beam resample math (uniform range through cylindrical and hemispherical rigs, all-inf, far clip, beam-origin subtraction, azimuth offset, nearest-mode edge non-blending and quantisation bound) |
 | `test_metadata_parsing` | Loads each shipped `config/metadata/*.json` via the Ouster SDK |
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |

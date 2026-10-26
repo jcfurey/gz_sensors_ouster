@@ -12,7 +12,13 @@
 #include <random>
 #include <vector>
 
+#include <ouster_sim_core/signal_response.hpp>
+
 namespace gz_gpu_ouster_lidar {
+
+static_assert(rpmath::kReferenceBaseSignal ==
+                  ouster_sim_core::kReferenceBaseSignal,
+              "the kernels must scale measured responses like the core");
 
 void processCpu(
     const float * depth_host,
@@ -128,13 +134,13 @@ void processCpu(
         }
         range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
-        // Signal with Poisson shot noise
+        // Signal: the product's measured response, or 1/r², with shot noise
         const float intensity = ouster_sim_core::opticalValueOrDefault(retro_host, idx, 1.0f);
-
-
-        float sig = rpmath::signalFromRange(d, intensity, p.base_signal);
+        const rpmath::SignalSample sample = rpmath::signalSample(
+            d, intensity, p.base_signal, p.signal_response);
+        float sig = sample.mean;
         if (has_noise && p.signal_noise_scale > 0.f) {
-            float sigma_sig = std::sqrt(std::max(sig, 0.0f)) * p.signal_noise_scale;
+            float sigma_sig = sample.sigma * p.signal_noise_scale;
             sig = std::max(sig + norm(rng) * sigma_sig, 0.0f);
         }
         signal_out[idx] = rpmath::clampU16(sig);

@@ -15,6 +15,7 @@
 #include "imu_sampler.hpp"
 #include "lidar_common.hpp"
 #include "lidar_rate.hpp"
+#include "ouster_lidar_profile.hpp"
 #include "ouster_metadata.hpp"
 #include "packet_encoder.hpp"
 #include "panel_rig.hpp"
@@ -246,6 +247,9 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("base_signal")) {
         base_signal_ = sdf->Get<double>("base_signal");
     }
+    if (sdf->HasElement("signal_model")) {
+        signal_model_ = sdf->Get<std::string>("signal_model");
+    }
     if (sdf->HasElement("base_reflectivity")) {
         base_reflectivity_ = sdf->Get<double>("base_reflectivity");
     }
@@ -340,6 +344,13 @@ void GzGpuOusterLidarSystem::Configure(
             "Unknown panel_sampling='%s'; expected bilinear|nearest. "
             "Defaulting to bilinear.", panel_sampling_.c_str());
         panel_sampling_ = "bilinear";
+    }
+    if (signal_model_ != "auto" && signal_model_ != "measured" &&
+        signal_model_ != "inverse_square") {
+        RCLCPP_WARN(kLogger,
+            "Unknown signal_model='%s'; expected auto|measured|inverse_square. "
+            "Defaulting to auto.", signal_model_.c_str());
+        signal_model_ = "auto";
     }
 
     auto validate_qos = [](std::string & val, const char * field, const char * fallback) {
@@ -470,6 +481,27 @@ void GzGpuOusterLidarSystem::Configure(
             "be below max_range; plugin disabled", min_range_, max_range_);
         meta_.reset();
         return;
+    }
+
+    // SIGNAL: the product's measured response where recordings calibrate it.
+    const bool has_response = meta_->profile.signal_response.measured();
+    measured_signal_ = has_response && signal_model_ != "inverse_square";
+    if (signal_model_ == "measured" && !has_response) {
+        RCLCPP_WARN(kLogger,
+            "signal_model=measured, but no recordings calibrate %s; using "
+            "the inverse-square model", meta_->profile.id.c_str());
+    }
+    if (measured_signal_) {
+        RCLCPP_INFO(kLogger,
+            "SIGNAL: measured %s response at %.2fx its recordings' shots per "
+            "measurement, base_signal %.0f (%.0f reproduces the recordings)",
+            meta_->profile.id.c_str(),
+            ouster_sim_core::signalModeGain(
+                meta_->profile.signal_response, meta_->W, lidar_hz_),
+            base_signal_, ouster_sim_core::kReferenceBaseSignal);
+    } else {
+        RCLCPP_INFO(kLogger, "SIGNAL: inverse-square, base_signal %.0f",
+                    base_signal_);
     }
 
     // Initialise ray processor. The CUDA path self-probes for a GPU and flips
@@ -1050,6 +1082,10 @@ RayProcessParams GzGpuOusterLidarSystem::makeRayProcessParams() const
     pp.W = meta_->W;
     pp.base_signal = static_cast<float>(noise.base_signal);
     pp.base_reflectivity = static_cast<float>(noise.base_reflectivity);
+    if (measured_signal_) {
+        pp.signal_response = signalResponseParams(
+            meta_->profile.signal_response, meta_->W, lidar_hz_);
+    }
     pp.range_noise_min_std = static_cast<float>(noise.range_noise_min_std);
     pp.range_noise_max_std = static_cast<float>(noise.range_noise_max_std);
     pp.range_noise_reference_range =

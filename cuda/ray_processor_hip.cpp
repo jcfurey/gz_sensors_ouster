@@ -139,6 +139,10 @@ __global__ void rayProcessKernelHip(
     uint16_t * __restrict__    nearir_out,
     int H, int W,
     float base_signal,
+    // cppcheck-suppress passedByValueCallback ; GPU kernel arguments must be
+    // passed by value — the device cannot dereference a host reference.
+    // (~220 B, well inside the 4 KB kernel-parameter limit.)
+    SignalResponseParams signal_response,
     float base_reflectivity,
     float range_noise_min_std,
     float range_noise_max_std,
@@ -247,10 +251,11 @@ __global__ void rayProcessKernelHip(
     range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
     const float intensity = ouster_sim_core::opticalValueOrDefault(retro, idx, 1.0f);
-
-    float sig = rpmath::signalFromRange(d, intensity, base_signal);
+    const rpmath::SignalSample sample =
+        rpmath::signalSample(d, intensity, base_signal, signal_response);
+    float sig = sample.mean;
     if (rs != nullptr && signal_noise_scale > 0.f) {
-        float sigma_sig = sqrtf(fmaxf(sig, 0.f)) * signal_noise_scale;
+        float sigma_sig = sample.sigma * signal_noise_scale;
         sig = fmaxf(sig + hiprand_normal(rs) * sigma_sig, 0.f);
     }
     signal_out[idx] = rpmath::clampU16(sig);
@@ -356,7 +361,7 @@ public:
             static_cast<uint8_t *>(d_refl_),
             static_cast<uint16_t *>(d_nearir_),
             pp.H, pp.W,
-            pp.base_signal, pp.base_reflectivity,
+            pp.base_signal, pp.signal_response, pp.base_reflectivity,
             pp.range_noise_min_std, pp.range_noise_max_std,
             pp.range_noise_reference_range, pp.max_range,
             pp.min_range, pp.detection_range_10, pp.detection_range_80,
@@ -411,7 +416,7 @@ public:
             static_cast<uint8_t *>(d_refl_),
             static_cast<uint16_t *>(d_nearir_),
             pp.H, pp.W,
-            pp.base_signal, pp.base_reflectivity,
+            pp.base_signal, pp.signal_response, pp.base_reflectivity,
             pp.range_noise_min_std, pp.range_noise_max_std,
             pp.range_noise_reference_range, pp.max_range,
             pp.min_range, pp.detection_range_10, pp.detection_range_80,

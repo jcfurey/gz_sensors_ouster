@@ -195,5 +195,28 @@ TEST(OusterLidarProfile, ModeRangeScaleUsesDocumentedHalfRateIncrement)
     EXPECT_NEAR(ousterModeRangeScale(os2, 2048, 10.0), 1.0, 1e-12);
 }
 
+TEST(OusterLidarProfile, SignalResponseParamsCopyTheMeasuredResponse)
+{
+    const auto os1 = profile("OS1-64", "rev07", 3, 2, 64);
+    const auto & response = os1.signal_response;
+    ASSERT_TRUE(response.measured());
+    const auto params = signalResponseParams(response, 1024, 10.0);
+    ASSERT_EQ(params.knots, response.knot_count);
+    for (int i = 0; i < params.knots; ++i) {
+        EXPECT_FLOAT_EQ(params.range_m[i], static_cast<float>(response.range_m[i]));
+        EXPECT_FLOAT_EQ(params.signal_m2[i], static_cast<float>(response.signal_m2[i]));
+    }
+    EXPECT_FLOAT_EQ(params.saturation, static_cast<float>(response.saturation_signal));
+    EXPECT_FLOAT_EQ(params.shot_noise, static_cast<float>(response.shot_noise_factor));
+    EXPECT_FLOAT_EQ(params.relative_noise, static_cast<float>(response.relative_noise));
+    EXPECT_FLOAT_EQ(params.mode_gain, 1.0f);
+    EXPECT_FLOAT_EQ(signalResponseParams(response, 2048, 10.0).mode_gain, 0.5f);
+    EXPECT_FLOAT_EQ(signalResponseParams(response, 512, 10.0).mode_gain, 2.0f);
+
+    // Without recordings the kernels keep the inverse-square model.
+    const auto os2 = profile("OS2-128", "rev07", 2, 5);
+    EXPECT_EQ(signalResponseParams(os2.signal_response, 1024, 10.0).knots, 0);
+}
+
 }  // namespace
 }  // namespace gz_gpu_ouster_lidar
