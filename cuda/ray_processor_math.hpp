@@ -446,22 +446,6 @@ GZ_OUSTER_HD inline SignalSample signalSample(
             gzm::sqrt_(r.mode_gain * (shot * shot + floor_sigma * floor_sigma))};
 }
 
-/// Convert an Ouster calibrated reflectivity byte back to the physical
-/// reflectance used by the ray caster. This is the inverse of
-/// reflectivityToByte() apart from the byte quantisation.
-GZ_OUSTER_HD inline float reflectivityByteToRetro(float value)
-{
-    const float b = gzm::fmin_(gzm::fmax_(value, 0.0f), kReflByteMax);
-    if (b <= kLambertianMax) {
-        return b / kLambertianMax;
-    }
-    // A thousandth of a byte inside the bin, so float rounding in exp_ and
-    // log2_ cannot re-encode the result as the byte below.
-    constexpr float kInsideBin = 1.0e-3f;
-    constexpr float kLn2 = 0.6931471805599453f;
-    return gzm::exp_((b - kLambertianMax + kInsideBin) * kLn2 / kRetroLogSlope);
-}
-
 /// Map a Gazebo retro value to the Ouster reflectivity byte:
 ///   rv ∈ [0,1]  → linear  [0,100]      (Lambertian diffuse)
 ///   rv > 1      → log map  [101,255]    (retroreflective; 255 at rv = 864)
@@ -476,6 +460,36 @@ GZ_OUSTER_HD inline uint8_t reflectivityToByte(float rv)
     }
     return static_cast<uint8_t>(
         gzm::fmin_(kLambertianMax + gzm::log2_(rv) * kRetroLogSlope, kReflByteMax));
+}
+
+/// Reflectance at the lower edge of reflectivity value `b`'s bin, the
+/// smallest reflectance that reflectivityToByte() maps to it in exact math.
+GZ_OUSTER_HD inline float reflectivityBinEdge(float b)
+{
+    if (b <= kLambertianMax) {
+        return b / kLambertianMax;
+    }
+    constexpr float kLn2 = 0.6931471805599453f;
+    return gzm::exp_((b - kLambertianMax) * kLn2 / kRetroLogSlope);
+}
+
+/// Convert an Ouster calibrated reflectivity byte back to the physical
+/// reflectance used by the ray caster. This is the inverse of
+/// reflectivityToByte() apart from the byte quantisation: every byte re-encodes
+/// as itself, and a fractional value as its whole part.
+GZ_OUSTER_HD inline float reflectivityByteToRetro(float value)
+{
+    const float b = gzm::fmin_(gzm::fmax_(value, 0.0f), kReflByteMax);
+    const float rv = reflectivityBinEdge(b);
+    // Float rounding puts a few edges just below their bin (53 / 100 rounds
+    // to 0.52999997, which encodes as 52; likewise 59, 214 and 240). Only
+    // those move a thousandth of a byte inside it, so 50 stays exactly 0.5.
+    const float whole = gzm::floor_(b);
+    if (static_cast<float>(reflectivityToByte(rv)) < whole) {
+        constexpr float kInsideBin = 1.0e-3f;
+        return reflectivityBinEdge(whole + kInsideBin);
+    }
+    return rv;
 }
 
 /// Clamp a float to the uint16 channel range.

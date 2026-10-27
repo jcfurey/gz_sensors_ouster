@@ -297,15 +297,20 @@ TEST(NoiseModel, ReflectivityRetroScale)
 
 TEST(NoiseModel, ReflectivityByteInverseCoversBothBands)
 {
-    std::vector<float> bytes = {0.0f, 50.0f, 100.0f};
-    // Every retroreflective byte: float exp/log2 rounding must not land
-    // the round trip on the byte below.
-    for (int b = 101; b <= 255; ++b) bytes.push_back(static_cast<float>(b));
-    for (float b : bytes) {
-        const float retro = rpmath::reflectivityByteToRetro(b);
-        EXPECT_EQ(rpmath::reflectivityToByte(retro), static_cast<uint8_t>(b))
+    // Every byte re-encodes as itself, including those whose bin edge rounds
+    // just below the bin in float (53 / 100 = 0.52999997; 59, 214, 240).
+    for (int b = 0; b <= 255; ++b) {
+        const float retro = rpmath::reflectivityByteToRetro(static_cast<float>(b));
+        EXPECT_EQ(static_cast<int>(rpmath::reflectivityToByte(retro)), b)
             << "byte=" << b << " retro=" << retro;
     }
+    // Edges that already round trip stay exact: the default 50 is 0.5.
+    EXPECT_EQ(rpmath::reflectivityByteToRetro(0.0f), 0.0f);
+    EXPECT_EQ(rpmath::reflectivityByteToRetro(50.0f), 0.5f);
+    EXPECT_EQ(rpmath::reflectivityByteToRetro(100.0f), 1.0f);
+    // A fractional byte keeps its whole part, as the miss path truncates it.
+    EXPECT_EQ(rpmath::reflectivityToByte(rpmath::reflectivityByteToRetro(52.9999f)), 52u);
+    EXPECT_EQ(rpmath::reflectivityToByte(rpmath::reflectivityByteToRetro(53.5f)), 53u);
     EXPECT_FLOAT_EQ(rpmath::reflectivityByteToRetro(-10.0f), 0.0f);
     EXPECT_EQ(rpmath::reflectivityToByte(
                   rpmath::reflectivityByteToRetro(300.0f)),

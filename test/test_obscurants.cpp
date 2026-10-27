@@ -270,6 +270,22 @@ TEST(ObscurantExtinction, FallbackSupportsRetroreflectiveByteRange)
     EXPECT_EQ(rpmath::reflectivityToByte(r.retro), 144u);
 }
 
+TEST(ObscurantExtinction, FallbackReportsTheConfiguredDiffuseByte)
+{
+    // A surface without laser_retro reads back base_reflectivity, including
+    // 53 and 59, whose b / 100 rounds just below their bin in float.
+    rc::Scene scene;
+    std::vector<rc::InstanceXform> xf;
+    makeWall(scene, xf, 20.0f, 0.0f, false);
+
+    rc::ScanParams sp = baseParams();
+    for (const float byte : {50.0f, 53.0f, 59.0f}) {
+        sp.fallback_retro = rpmath::reflectivityByteToRetro(byte);
+        const RayResult r = castOne(scene, xf, sp);
+        EXPECT_EQ(static_cast<float>(rpmath::reflectivityToByte(r.retro)), byte);
+    }
+}
+
 TEST(ObscurantExtinction, MatchesClosedFormBeerLambert)
 {
     rc::Scene scene;

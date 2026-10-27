@@ -226,6 +226,13 @@ near byte 154 and 77× near byte 199, where this scale gives 10.5× and 75×. (A
 earlier scale of 22 bytes per doubling, which saturated at 132×, gave 5.5× and
 23×.)
 
+The inverse, `rpmath::reflectivityByteToRetro`, turns a byte such as
+`base_reflectivity` back into the reflectance at the lower edge of its bin.
+Where float rounding puts that edge just below the bin (53 / 100 rounds to
+0.52999997, which encodes as 52; likewise 59, 214 and 240), it moves a
+thousandth of a byte inside, so every byte reads back as itself and the
+default 50 stays exactly 0.5.
+
 - Ouster Sensor Docs, *Calibrated Reflectivity*.
   <https://docs.ouster.com/sensor-docs/calibrated-reflectivity>
 - Ouster Sensor Docs, *Sensor Data* (REFLECTIVITY field).
@@ -428,7 +435,8 @@ Three properties fall out rather than being coded:
 
 - A visual without `<laser_retro>` gets the configured `base_reflectivity`
   converted from the calibrated Ouster byte scale back to physical reflectance
-  *before* incidence, extinction and strongest-return arbitration. Untagged
+  (the lowest reflectance of that byte, §5) *before* incidence, extinction and
+  strongest-return arbitration. Untagged
   hard targets therefore attenuate and compete with smoke exactly like authored
   materials; an explicitly authored zero is not mistaken for omission during
   ray casting.
