@@ -15,9 +15,11 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "backend_env_guard.hpp"
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "raycast_scene.hpp"
 
@@ -721,7 +723,7 @@ TEST(Raycast, CastScanThroughRayProcessor)
     // The backend entry: dispatch → castScan must agree with the CPU
     // reference (on the CPU backend they are the same shared math; on a
     // GPU build this same test exercises the device kernel).
-    ::setenv("GZ_OUSTER_BACKEND", "cpu", 1);
+    testutil::BackendEnvGuard backend("cpu");
 
     constexpr int H = 8, W = 32;
     rc::Scene scene;
@@ -790,7 +792,7 @@ TEST(Raycast, ProcessDepthThroughRayProcessor)
 
 TEST(Raycast, FusedCastAndProcessMatchesTwoStageCpuPath)
 {
-    ::setenv("GZ_OUSTER_BACKEND", "cpu", 1);
+    testutil::BackendEnvGuard backend("cpu");
     constexpr int H = 2, W = 8;
     const int n = H * W;
 
@@ -839,6 +841,29 @@ TEST(Raycast, FusedCastAndProcessMatchesTwoStageCpuPath)
     EXPECT_EQ(fused_signal, expected_signal);
     EXPECT_EQ(fused_refl, expected_refl);
     EXPECT_EQ(fused_nir, expected_nir);
+
+    // The CPU backend's fused entry runs the two stages above, so agreement
+    // alone proves nothing there. Pin the scene itself: of the eight columns
+    // (45 degrees apart) only column 0 meets the 1 m sphere centred 5 m ahead,
+    // head-on at 4 m; every other beam misses and reports no return.
+    for (int row = 0; row < H; ++row) {
+        for (int column = 0; column < W; ++column) {
+            const size_t i = static_cast<size_t>(row) * W + column;
+            SCOPED_TRACE("row " + std::to_string(row) +
+                         " column " + std::to_string(column));
+            if (column == 0) {
+                EXPECT_EQ(fused_range[i], 4000u);
+                // retro 0.8 → Lambertian band: 0.8 × 100 = 80.
+                EXPECT_EQ(static_cast<int>(fused_refl[i]), 80);
+                // base_signal × ρ / r² = 800 × 0.8 / 16, head-on, no noise.
+                EXPECT_EQ(fused_signal[i], 40u);
+            } else {
+                EXPECT_EQ(fused_range[i], 0u);
+                EXPECT_EQ(fused_signal[i], 0u);
+                EXPECT_EQ(static_cast<int>(fused_refl[i]), 0);
+            }
+        }
+    }
 }
 
 TEST(Raycast, GroupedCastUsesEachColumnGroupsTransforms)
@@ -894,7 +919,7 @@ TEST(Raycast, GroupedCastWithOneSetMatchesCastScan)
 
 TEST(Raycast, ProcessorCastsEachColumnGroupWithItsOwnTransforms)
 {
-    ::setenv("GZ_OUSTER_BACKEND", "cpu", 1);
+    testutil::BackendEnvGuard backend("cpu");
     constexpr int H = 1, W = 8;
     rc::Scene scene;
     const int si = scene.addInstance(rc::GeomType::kSphere, kSphereSize, 0.8f);

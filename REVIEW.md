@@ -7,6 +7,89 @@ adversarial verifier instructed to refute it and to correct inflated severity.
 Baseline on this commit: the build is clean (no compiler warnings from repo code)
 and `colcon test` reports 398 passed, 0 failed, 2 skipped.
 
+## Status on 2026-11-09
+
+The findings below describe `cam_wip` at 5a372a0, and their line numbers refer to that commit.
+Each was re-read against `claude/measured-signal-response` in November 2026. Of the 59,
+**30 are fixed, 23 are open and 6 are partly fixed.** All eight high-severity findings are fixed.
+Findings are numbered in the order they appear below.
+
+| Status | High | Medium | Low | Total |
+|---|---|---|---|---|
+| Fixed | 8 | 14 | 8 | 30 |
+| Open | 0 | 8 | 15 | 23 |
+| Partly | 0 | 3 | 3 | 6 |
+
+"Fixed (2026-11)" marks the eight closed in the change that added this section; the rest were
+fixed earlier, most of them in b2065ca and f104532.
+
+| # | Severity | Finding | Status | Note |
+|---|---|---|---|---|
+| 1 | High | cppcheck CI gate red on 6 diagnostics | Fixed |  |
+| 2 | High | cpplint CI gate red on 3 test errors | Fixed |  |
+| 3 | High | `mirror_->postUpdate()` outside the `guarded()` firewall | Fixed |  |
+| 4 | High | `detectionProbability` saturates at rho=0.01 | Fixed |  |
+| 5 | High | d50 clamped to max_range, flat 10% retro dropout | Fixed |  |
+| 6 | High | Metadata JSONs put beam origin in wrong cell/units | Fixed |  |
+| 7 | High | Low-bandwidth UDP profiles throw in every encode | Fixed |  |
+| 8 | High | Glass continuation ray self-hits pane back face | Fixed |  |
+| 9 | Medium | SYCL backend never checks kernel errors | Open |  |
+| 10 | Medium | CI push trigger misses the integration branch | Fixed |  |
+| 11 | Medium | Tri-state backend option discards `:BOOL=` override | Fixed |  |
+| 12 | Medium | Channel kernel body copy-pasted across four backends | Open |  |
+| 13 | Medium | HIP/SYCL don't override `castScanProcessed` (cleanup) | Open |  |
+| 14 | Medium | Panels mode gates metadata and IMU on render rig | Fixed (2026-11) | Metadata, entity discovery and IMU no longer wait for the render rig. |
+| 15 | Medium | Scene-rebuild change detection only on scan-due ticks | Fixed |  |
+| 16 | Medium | test_lifecycle covers only never-Configured destructor | Partly | The encoder and scene mirror have lifecycle tests; the configured plugin's teardown order is still not run by any test. |
+| 17 | Medium | Aerosol speckle feeds the depth-edge suppressor | Fixed (2026-11) | The raycaster marks medium returns and the edge suppressor skips them, on every backend and in the core. |
+| 18 | Medium | retro==0 sentinel snaps to `base_reflectivity` | Fixed |  |
+| 19 | Medium | `max_range` unbounded, aliases in 19-bit RANGE | Fixed |  |
+| 20 | Medium | os2_128_rev7.json cannot resolve to Rev07 | Fixed |  |
+| 21 | Medium | Unrecognised `<hardware_revision>` discards part-number inference | Fixed (2026-11) | An unrecognised revision now disables the plugin with an error that lists the accepted values. |
+| 22 | Medium | HIP/SYCL host round trip per raycast scan (perf) | Open |  |
+| 23 | Medium | `processCpu` single-threaded | Fixed |  |
+| 24 | Medium | Medium sampler computes a discarded quadrature | Open |  |
+| 25 | Medium | BVH/TLAS push children in fixed order | Open |  |
+| 26 | Medium | os_cloud/os_image never declare `metadata` parameter | Fixed |  |
+| 27 | Medium | `turtlebot3_description` undeclared hard dependency | Fixed |  |
+| 28 | Medium | Reflectance exactly 0 treated as "no retro data" | Fixed |  |
+| 29 | Medium | raycast_mirror geometry extraction has no tests | Partly | Box visuals are covered; cylinder, sphere, plane and mesh conversion are not. |
+| 30 | Medium | test_metadata_parsing tests SDK, not `OusterMetadata::load` | Partly | `OusterMetadata::load` runs on every shipped file; beam-table contents, `beam_origin_mm` and malformed JSON are not asserted. |
+| 31 | Medium | FlatEmitter test only hits division-free box branch | Open |  |
+| 32 | Medium | test_parameter_validation tests a private copy | Open |  |
+| 33 | Medium | BilinearAveragesOnlyValidPixels uses identical values | Fixed (2026-11) | Distinct values, a three-corner case and a weighted four-corner case. |
+| 34 | Low | Fused-vs-two-stage test is f(x)==f(x) | Fixed (2026-11) | Still forces the CPU backend, but now pins the scene's ranges, signal and reflectivity, and restores the environment. |
+| 35 | Low | SPDX gate passes when `find` fails | Open |  |
+| 36 | Low | Dockerfile test gate misreports failures | Open |  |
+| 37 | Low | gz-msgs/gz-math used but undeclared | Partly | `package.xml` declares the vendor packages; CMake still reaches gz-msgs and gz-math only through gz-sim. |
+| 38 | Low | Docs still call panels mode a "GpuRays rig" | Open |  |
+| 39 | Low | README contradicts itself on where raycast runs | Open |  |
+| 40 | Low | README test table out of date | Open |  |
+| 41 | Low | ray_processor_cuda.cuh is a vestigial header | Open |  |
+| 42 | Low | Dead `rcApparentReflectance(const RcInstance &, ...)` overload | Open |  |
+| 43 | Low | CPU-fallback warning says "No CUDA-capable device" | Open |  |
+| 44 | Low | Four profile fields write-only or unused | Partly | The fields moved to `ouster_sim_core`; three are still never read. |
+| 45 | Low | Entity discovery retries forever, never warns | Fixed (2026-11) | Reported after 5 s of simulated time and every 10 s after; the search still repeats, since a sensor can be spawned late. |
+| 46 | Low | Obscurant warning emitted before `ray_mode` validated | Open |  |
+| 47 | Low | Dual-return profiles emit all-zero second return | Fixed |  |
+| 48 | Low | `calibratedRangeAtReflectivity` recomputes a constant log | Open |  |
+| 49 | Low | `rcCastOneRay` evaluates 6 sin/cos per ray | Open |  |
+| 50 | Low | NEAR_IR block re-derives normal and material | Open |  |
+| 51 | Low | `encodeScan` copies scan through staging buffer | Fixed |  |
+| 52 | Low | `ament_auto_package` installs `__pycache__` | Fixed |  |
+| 53 | Low | Docker smoke runs the os_image decoder | Open |  |
+| 54 | Low | sensor_stack xacro shadows built-in `pi` | Open |  |
+| 55 | Low | Sewer world has no directional light | Open |  |
+| 56 | Low | test_launch_files asserts metadata param by string count | Partly | The parameter now exists in the pinned `ouster-ros`; the test is still a substring count. |
+| 57 | Low | `rcHitUv` collapses infinite plane's response map | Fixed |  |
+| 58 | Low | test_dispatch auto-selection asserts cannot fail | Fixed (2026-11) | Requires a known backend name, agreement with the unset case and a correct processed pixel. |
+| 59 | Low | test_packet_pacing compares `columnTimestampNs` to itself | Fixed (2026-11) | Compares against hand-computed stamps. The old loop also hid a period passed in the wrong unit. |
+
+The open findings that change behaviour are 9 (SYCL kernel errors go unreported), 46 (the
+obscurant warning is issued before `ray_mode` is validated) and 55 (the sewer world's NEAR_IR
+has no directional light). The others are performance (12, 13, 22, 24, 25, 48, 49, 50), test
+coverage (31, 32), build and packaging (35, 36, 53), and documentation or dead code (38-43, 54).
+
 ## HIGH (8)
 
 ### `.github/workflows/ci.yaml:164` — cppcheck CI gate is red on HEAD: 6 diagnostics, --error-exitcode=1

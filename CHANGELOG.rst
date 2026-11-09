@@ -34,6 +34,10 @@ Changes since 1.0.0, the state of ``main`` on 2026-06-18.
   (the beam-origin offset was dropped); both ray modes now agree with the LUT.
 * [BUGFIX]: metadata transforms, the detection rolloff, glass traversal and scene rebuilds are
   corrected.
+* [BREAKING]: a ``hardware_revision`` that is not one of the listed values (``rev7.0``) is an
+  error that disables the plugin and names the accepted values. It used to be replaced, without
+  a message, by the revision guessed from the part number or by the model's fallback, so a typo
+  ran different physics from the one asked for.
 
 **Smoke, dust and fog (raycast mode)**
 
@@ -55,6 +59,12 @@ Changes since 1.0.0, the state of ``main`` on 2026-06-18.
   pairs are reported.
 * [BUGFIX]: the medium's range sampler keeps 2e-6 relative accuracy in thin media, where it lost
   up to 5.3e-4 (about 6 cm at 120 m).
+* [BUGFIX]: returns from a medium are no longer treated as depth edges. Their ranges are drawn
+  per beam from the medium, so neighbors in one cloud usually differ by more than
+  ``edge_discon_threshold``, and the edge suppressor removed about half of them along with half
+  of the surface returns seen beside them. The raycaster now marks a medium return (a negative
+  value in its internal range plane) and every backend's suppressor skips it, as a center and
+  as a neighbor. Edges between surfaces are unchanged.
 
 **Ray casting and performance**
 
@@ -72,7 +82,7 @@ Changes since 1.0.0, the state of ``main`` on 2026-06-18.
 **Packets, IMU and timing**
 
 * Metadata, product profiles, packet bytes and pacing come from the ROS-free ``ouster_sim_core``
-  submodule shared with AGX (now 0.7.0), exported through a ``gz_sensors_ouster_core`` facade
+  submodule shared with AGX (now 0.8.0), exported through a ``gz_sensors_ouster_core`` facade
   and checked by the shared conformance fixtures. Complete frames survive transport congestion.
 * Packets follow the metadata ``column_window``, legacy packets carry per-column frame IDs,
   encoder counts and status, and narrow channel fields saturate instead of wrapping.
@@ -93,6 +103,12 @@ Changes since 1.0.0, the state of ``main`` on 2026-06-18.
   panels cadence follows simulation time, nothing renders while paused, and the IMU uses the
   world's gravity.
 * ``sensor_name`` gains a leading ``/`` when it lacks one; an empty name disables the plugin.
+* [BUGFIX]: panels mode publishes metadata and IMU without waiting for its render rig. It
+  published nothing until the first render, so in a world where rendering never starts a driver
+  waited for metadata forever.
+* A ``sensor_name`` whose last segment names no sensor on the model, or an ``imu_name`` that
+  matches none, is reported after 5 s of simulated time and every 10 s after. The plugin used
+  to keep searching without a word, publishing metadata and nothing else.
 * An environment hook adds the plugin to ``GZ_SIM_SYSTEM_PLUGIN_PATH``, and ``package.xml``
   declares every directly used dependency.
 
@@ -120,6 +136,14 @@ Changes since 1.0.0, the state of ``main`` on 2026-06-18.
 * ``ouster-ros`` is pinned to the jcfurey cam-wip commit 57be1ca.
 * [BUGFIX]: the Zenoh packet tests prove the data path before they measure it. The backpressure
   test failed every run, and the burst test about 1% of runs.
+* [BUGFIX]: five tests that could not fail now can: bilinear averaging uses distinct values and
+  checks the weighted four-corner blend; the fused-raycast test pins the scene's range, signal
+  and reflectivity; backend auto-selection must name a real backend and process a pixel; and
+  column timestamps are compared with hand-computed values, which showed the old test passing a
+  100 ns period where it meant 100 ms. Tests that force a backend restore the environment.
+* ``REVIEW.md`` opens with the status of each of its 59 findings (30 fixed, 23 open, 6 partly),
+  and the known-gaps table in ``docs/MODEL_REFERENCES.md`` describes what is left of
+  moving-object sweep and of retroreflector angular response.
 
 1.0.0 (2026-06-18)
 ------------------

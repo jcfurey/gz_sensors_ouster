@@ -450,6 +450,16 @@ Three properties fall out rather than being coded:
   but only when its integrated backscatter produces a nonzero Poisson count.
   That creates sparse phantom points without drawing the whole volume as a
   solid silhouette.
+
+One downstream stage does need to know a return came from the medium: the
+depth-edge suppressor of the channel stage, which drops mixed pixels where a
+beam straddles a surface edge. A medium return's range is drawn per pixel, so
+every such pixel would look like an edge and half of them, and of the hard
+returns beside them, would be dropped on top of the photon gate above. The
+raycaster therefore marks medium returns (a negative range in the plane it
+hands the channel stage, `rpmath::isMediumRange`), and the suppressor treats
+them as neither on an edge nor evidence of one. `ouster_sim_core` applies the
+same rule to `kMedium` returns.
 - NEAR_IR moves the *opposite* way from the laser channels — lit smoke
   scatters ambient light into the receiver, so the ambient image brightens
   while the range image darkens, the signature of fog on a real Ouster.
@@ -550,7 +560,7 @@ Ordered roughly by expected impact on downstream perception realism.
 
 | Effect | What a full model adds | Reference |
 |---|---|---|
-| Agent motion during sweep | §9 distorts for EGO motion; other agents' poses stay at the scan-trigger snapshot. Fast crossing traffic also smears in reality (LiDARsim interpolates per-agent poses too). | *Lidar with Velocity*, arXiv:2111.09497; HiMo, arXiv:2503.00803 |
+| Object motion within a column group | §9 sweeps moving objects in `object_motion_samples` steps (16 by default) on the CPU backend, so each column sees an object within T/(2N), about 3 ms at 10 Hz, of its own timestamp. Motion inside a step is not interpolated, the GPU backends cast every column against the mid-scan capture, and panels mode renders one snapshot per scan. LiDARsim interpolates per-agent poses per ray. | *Lidar with Velocity*, arXiv:2111.09497; HiMo, arXiv:2503.00803 |
 | Beam divergence / footprint | Finite-footprint returns: edge mixing, multi-return, footprint-averaged ranges on oblique/rough surfaces; energy is ~2-D Gaussian over the footprint. HELIOS++ subsamples the beam cone. | Winiwarter et al. 2022 |
 | Retroreflector blooming / crosstalk | Very strong returns (signs, plates) saturate detectors and scatter into neighbouring channels — halo points, range bias. This plugin encodes ρ > 1 in the reflectivity byte but produces no artifacts. | *LiDAR Blooming Artifacts Estimation … with Synthetic Data Modeling*, IEEE (10.1109/10774004), 2024 |
 | Discrete precipitation (rain / snow) | §11 models a *continuous* medium, which fits smoke, dust and fog. Rain and snow are sparse discrete scatterers: individual drops or flakes crossing single beams give isolated near returns and per-beam flicker rather than a smooth transmittance profile, and the drop-size distribution ties σ_ext to rain rate. | Hahner et al., *LiDAR Snowfall Simulation*, CVPR 2022; Kilic et al., *LISA*, arXiv:2107.07004 |
@@ -558,7 +568,7 @@ Ordered roughly by expected impact on downstream perception realism.
 | Density structure inside a plume | Obscurant volumes are homogeneous with a hard boundary; real plumes have soft, turbulent, time-varying density, so simulated cloud edges are crisper than real ones. | §11 references |
 | Multi-return / full waveform | Second returns through vegetation, edge splits. | Winiwarter et al. 2022 |
 | Incidence angle in panels mode | Depth-image normals (from gradients) could approximate cos(α); currently panels mode applies no incidence factor. | §1 references |
-| Retroreflective BRDF | Retroreflectors (ρ > 1) are *angle-insensitive* (corner cubes return along the incident path); §8's diffuse+specular split still attenuates them by cos(α). | Kashani et al. 2015 |
+| Retroreflector entrance angularity | §8 attenuates a retroreflector (ρ > 1) by cos(α), like a diffuse surface. Real sheeting follows its own entrance-angle curve, which differs by product (glass bead or prismatic) and is not flat: the minimum coefficient of retroreflection for white ASTM D4956 Type I sheeting is 70 cd/lx/m² at −4° and 30 at +30°, and EN 12899 class RA1 allows 10 at +40°. That coefficient is per sheeting area, so a tilted sheet that intercepts the whole beam returns R_A(β)/cos(β): at least 49% of the head-on return at 30° and 19% at 40°, where cos(α) gives 87% and 77%. Sheeting at its minimum therefore dims faster than this model, and better sheeting may dim slower. A per-product curve needs measured data. | ASTM D4956; EN 12899-1; Kashani et al. 2015 |
 | NEAR_IR shadows / sky | §6 models the sun's Lambert term but casts no shadow ray (surfaces in shadow still read lit) and misses report 0 instead of sky background. | §6 references |
 | Range walk | Amplitude-dependent timing bias (strong returns trigger earlier). | Hu et al. 2018 |
 

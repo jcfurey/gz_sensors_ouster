@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "backend_env_guard.hpp"
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "panel_test_utils.hpp"
 
@@ -23,37 +24,32 @@ namespace gz_gpu_ouster_lidar {
 
 namespace {
 
-// RAII guard: set GZ_OUSTER_BACKEND for the duration of a test and restore the
-// previous value (or unset) on teardown, so tests don't leak env state.
-class BackendEnvGuard {
-public:
-    explicit BackendEnvGuard(const char * value)
-    {
-        const char * prev = std::getenv(kVar);
-        had_prev_ = prev != nullptr;
-        if (had_prev_) prev_ = prev;
-        if (value) {
-            ::setenv(kVar, value, 1);
-        } else {
-            ::unsetenv(kVar);
-        }
-    }
-    ~BackendEnvGuard()
-    {
-        if (had_prev_) {
-            ::setenv(kVar, prev_.c_str(), 1);
-        } else {
-            ::unsetenv(kVar);
-        }
-    }
-    BackendEnvGuard(const BackendEnvGuard &) = delete;
-    BackendEnvGuard & operator=(const BackendEnvGuard &) = delete;
+using testutil::BackendEnvGuard;
 
-private:
-    static constexpr const char * kVar = "GZ_OUSTER_BACKEND";
-    bool had_prev_ = false;
-    std::string prev_;
-};
+// Every backend this build could select. "none" (nothing constructed) and any
+// other string are selection failures.
+bool isKnownBackend(const std::string & name)
+{
+    return name == "cuda" || name == "hip" || name == "sycl" || name == "cpu";
+}
+
+// One finite return through whichever backend `proc` selected: 20 m at the
+// model's reference reflectivity, no noise. Returns the reported range in mm.
+uint32_t processOnePixel(RayProcessor & proc)
+{
+    RayProcessParams pp{};
+    pp.H = 1;
+    pp.W = 1;
+    pp.base_signal = 800.0f;
+    pp.base_reflectivity = 50.0f;
+    pp.max_range = 120.0f;
+    const float depth = 20.0f;
+    uint32_t range = 0;
+    uint16_t signal = 0, nearir = 0;
+    uint8_t refl = 0;
+    proc.processDepth(&depth, nullptr, &range, &signal, &refl, &nearir, pp);
+    return range;
+}
 
 }  // namespace
 
@@ -68,24 +64,32 @@ TEST(Dispatch, EnvForcesCpuBackend)
 }
 
 // An unrecognised GZ_OUSTER_BACKEND value must not throw — the dispatcher logs
-// a warning and falls back to auto selection (CPU in a CPU-only build).
+// a warning and selects exactly what it would have with no override at all.
 TEST(Dispatch, UnknownEnvFallsBackToAuto)
 {
+    std::string auto_name;
+    {
+        BackendEnvGuard guard(nullptr);
+        RayProcessor proc;
+        auto_name = proc.backendName();
+    }
     BackendEnvGuard guard("definitely-not-a-backend");
     RayProcessor proc;
-    // CPU is the last resort and always available, so auto must resolve to a
-    // non-empty, valid backend name.
-    EXPECT_STRNE(proc.backendName(), "none");
+    EXPECT_EQ(std::string(proc.backendName()), auto_name);
+    EXPECT_TRUE(isKnownBackend(proc.backendName())) << proc.backendName();
+    EXPECT_EQ(processOnePixel(proc), 20000u);
 }
 
-// With no override, auto selection must yield a usable backend. In the CI
-// CPU-only build that is "cpu"; on a GPU build it would be the GPU backend, so
-// we only assert a valid (non-"none") selection here.
+// With no override, auto selection must yield a backend that exists and works:
+// "cpu" in a CPU-only build (reported as the fallback), a GPU backend otherwise.
 TEST(Dispatch, AutoSelectionAlwaysResolves)
 {
     BackendEnvGuard guard(nullptr);  // ensure env is unset
     RayProcessor proc;
-    EXPECT_STRNE(proc.backendName(), "none");
+    const std::string name = proc.backendName();
+    EXPECT_TRUE(isKnownBackend(name)) << name;
+    EXPECT_EQ(proc.usesCpuFallback(), name == "cpu");
+    EXPECT_EQ(processOnePixel(proc), 20000u);
 }
 
 // The configured seed is reported back verbatim, and a zero seed (the
