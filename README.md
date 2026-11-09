@@ -761,8 +761,8 @@ All noise model parameters can be changed at runtime via
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `metadata_path` | string | Path to Ouster calibration JSON. Absolute paths are used as-is; relative paths are resolved against the SDF file's directory. |
-| `hardware_revision` | string | Product physics revision: `auto`, `gen1`, `revC`, `revD`, `rev05`, `rev06`, `rev06.2`, `rev07`, `rev07.1`, or `rev08`. Prefer an explicit value for synthetic metadata without a real revision-bearing part number. |
-| `sensor_name` | string | ROS topic prefix and node namespace (e.g. `/sensor/lidar/lidar0`). |
+| `hardware_revision` | string | Product physics revision: `auto`, `gen1`, `revC`, `revD`, `rev05`, `rev06`, `rev06.2`, `rev07`, `rev07.1`, or `rev08`. Prefer an explicit value for synthetic metadata without a real revision-bearing part number. Any other value (`rev7.0`) is an error that disables the plugin; it is not replaced by a guess. |
+| `sensor_name` | string | ROS topic prefix and node namespace (e.g. `/sensor/lidar/lidar0`). Its last segment must name a `<sensor>` on the plugin's model, which supplies the lidar's pose. |
 
 ### Lidar
 
@@ -846,7 +846,9 @@ volume as a solid object. Conditional on detection, the range is sampled from
 that complete received-power profile and compared with the attenuated hard
 target by received power. Successive scans produce sparse, spatially
 distributed, changing aerosol returns. Ordinary signal, range and dropout
-noise are applied afterward by the shared sensor model.
+noise are applied afterward by the shared sensor model. The depth-edge
+suppressor (`edge_discon_threshold`) leaves aerosol returns and their
+neighbours alone: their scattered ranges are not surface edges.
 
 Use explicit `<obscurant>` volumes when the physics matters. Gazebo
 `<particle_emitter>` elements are visual effects without a physical density;
@@ -887,7 +889,7 @@ world plugin.
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| `imu_name` | *(disabled)* | -- | Gazebo IMU sensor entity name. Set to `"auto"` to use the first IMU found. Omit to disable. |
+| `imu_name` | *(disabled)* | -- | Gazebo IMU sensor entity name. Set to `"auto"` to use the first IMU found. Omit to disable. A name that matches no sensor on the model is reported (see [Observability](#observability)). |
 | `imu_hz` | 100.0 | > 0 | IMU sample rate in Hz **only when the metadata's IMU profile has no packet layout** (then only `/imu` is published). Otherwise the IMU packet profile fixes the rate (see below) and a different `imu_hz` is ignored with a warning. The effective rate is exposed as the read-only `imu_hz` ROS parameter. |
 | `publish_imu_msg` | true | bool | Also publish `sensor_msgs/Imu` alongside Ouster IMU packets. |
 
@@ -1163,6 +1165,20 @@ At replay rates faster than the machine can decode, `ouster_ros` can still
 report `lidar_scans full`; replay at a lower rate or omit `os_image` when only
 clouds are needed.
 
+### Throttled WARN (10 s): sensor not found
+
+```
+/sensor/lidar/front: no sensor named 'front' on this plugin's model after 5 s
+of sim time; no scans are produced until one appears. ...
+/sensor/lidar/lidar0: no IMU sensor named 'lidar0_inertial' on this plugin's
+model after 5 s of sim time; no IMU data is published until one appears.
+```
+The plugin takes its pose from the `<sensor>` named by the last segment of
+`<sensor_name>`, and its IMU samples from `<imu_name>`. It keeps looking, since
+a sensor can be spawned late, and says so once the wait passes 5 s of simulated
+time. Until the lidar's sensor is found the plugin publishes metadata (and IMU,
+if that sensor exists) but no scans.
+
 ### One-shot ERROR: Sensors system not rendering
 
 ```
@@ -1174,6 +1190,8 @@ You are using `panels` mode but the world has no rendering sensor, so
 `gz-sim-sensors-system` never built the ogre2 scene. Either add a rendering
 anchor (`anchor_type:=camera`) or switch to `ray_mode:=raycast` (the default),
 which needs no render engine at all. See [World requirements](#world-requirements).
+Metadata and IMU do not depend on the renderer and are published meanwhile, so
+a driver connects and reports the missing scans itself.
 
 ### `/imu` covariance
 

@@ -168,7 +168,7 @@ __global__ void rayProcessKernelHip(
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
 
-    float d = depth[idx];
+    float d = rpmath::returnRange(depth[idx]);
     const bool valid = isfinite(d) && d > rpmath::kValidDepthMin;
 
     if (!valid) {

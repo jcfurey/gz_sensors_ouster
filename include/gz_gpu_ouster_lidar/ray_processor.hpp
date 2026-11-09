@@ -166,7 +166,9 @@ public:
 
     /// Noise/channel stage only, for callers that already hold exact
     /// per-beam ranges (the full-raycast mode). depth_host is H×W metres
-    /// (+inf for a miss); retro_host is an optional H×W laser_retro array
+    /// (+inf for a miss; a negative value is a return from smoke, dust or
+    /// fog at that range, which the depth-edge suppressor leaves alone);
+    /// retro_host is an optional H×W laser_retro array
     /// (nullptr or invalid element → base_reflectivity / unit intensity;
     /// a finite zero is an explicitly black material).
     /// `nir_host` (optional): per-pixel NEAR_IR ambient factor from the
@@ -186,8 +188,9 @@ public:
     /// or the OpenMP CPU fallback — identical shared math either way).
     /// GPU backends cache the uploaded scene geometry by `scene_version`
     /// and re-upload only when it changes; the per-scan transforms upload
-    /// every call. Outputs: reported Ouster range in metres (+inf miss)
-    /// and the nearest hit's laser_retro (0 on miss/unset), both H×W.
+    /// every call. Outputs: reported Ouster range in metres (+inf miss;
+    /// negated for a return from a participating medium) and the nearest
+    /// hit's laser_retro (0 on miss/unset), both H×W.
     void castScan(
         const rc::SceneView & scene,
         uint64_t scene_version,

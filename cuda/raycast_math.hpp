@@ -1395,7 +1395,10 @@ GZ_OUSTER_HD inline bool rcSampleMediumReturn(
 /// ICCV 2021 (arXiv:2108.05249) and Kilic et al., *LISA*, arXiv:2107.07004
 /// (the same extinction + medium-backscatter decomposition applied as point
 /// cloud augmentation); Koschmieder 1924 for the airlight composite.
-GZ_OUSTER_HD inline void rcApplyObscurants(
+///
+/// Returns true when the medium's own return replaced the candidate in
+/// `range`/`rho`.
+GZ_OUSTER_HD inline bool rcApplyObscurants(
     const ScanParams & sp, RcV3 o, RcV3 d, float n_off, float t_los,
     uint32_t pixel, float & range, float & rho, float * nir_val)
 {
@@ -1406,7 +1409,7 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
     // returns). It is deliberately NOT `range - n_off`: a mirror ghost is
     // reported at its folded path length while the sight line stops at the
     // mirror, and the medium beyond the mirror is not on the beam's path.
-    if (t_los <= 0.0f) return;
+    if (t_los <= 0.0f) return false;
 
     // The hard-target candidate arrives already attenuated: each candidate
     // multiplies in its own exp(−2·η·τ) before the arbitration in
@@ -1416,7 +1419,7 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
     float path_albedo = 0.0f;
     const float tau =
         rcOpticalDepth(sp, o, d, 0.0f, t_los, &path_albedo, nullptr);
-    if (tau <= kRcTauMin) return;
+    if (tau <= kRcTauMin) return false;
 
     // The PASSIVE ambient channel uses the PHYSICAL depth τ, not the
     // η-weighted one the laser round trip sees: its Koschmieder composite
@@ -1440,7 +1443,7 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
     //    supplies electronic shot/range/dropout noise afterward.
     float range_m = 0.0f, rho_m = 0.0f;
     if (!rcSampleMediumReturn(
-            sp, o, d, t_los, n_off, pixel, range_m, rho_m)) return;
+            sp, o, d, t_los, n_off, pixel, range_m, rho_m)) return false;
 
     // Strongest-return arbitration by received power ρ/R² (same rule as the
     // glass and mirror candidates). Written as a cross-multiplication so the
@@ -1448,12 +1451,16 @@ GZ_OUSTER_HD inline void rcApplyObscurants(
     if (!hit || rho_m * range * range > rho * range_m * range_m) {
         range = range_m;
         rho = rho_m;
+        return true;
     }
+    return false;
 }
 
 /// Cast one output pixel (beam × measurement id) against the whole scene.
 /// Writes the reported Ouster range (metres; `inf_value` for a miss — the
-/// value satisfying the XYZ-LUT reconstruction, see castScan docs) and the
+/// value satisfying the XYZ-LUT reconstruction, see castScan docs; NEGATED
+/// when the return comes from a participating medium rather than a surface,
+/// see rpmath::isMediumRange) and the
 /// nearest hit's APPARENT reflectance: diffuse reflectance × cos(incidence)
 /// plus the material's specular lobe (0 on a miss; an omitted laser_retro uses
 /// ScanParams::fallback_retro).
@@ -1527,13 +1534,14 @@ GZ_OUSTER_HD inline void rcCastOneRay(
         float miss_range = inf_value;
         float miss_rho = 0.0f;
         float miss_nir = 0.0f;
+        bool medium = false;
         if (sp.n_obscurants > 0) {
-            rcApplyObscurants(sp, o, d, n_off, t_budget,
-                              static_cast<uint32_t>(idx),
-                              miss_range, miss_rho,
-                              nir_out ? &miss_nir : nullptr);
+            medium = rcApplyObscurants(sp, o, d, n_off, t_budget,
+                                       static_cast<uint32_t>(idx),
+                                       miss_range, miss_rho,
+                                       nir_out ? &miss_nir : nullptr);
         }
-        range_out = miss_range;
+        range_out = medium ? -miss_range : miss_range;
         retro_out = miss_rho;
         if (nir_out) *nir_out = miss_nir;
         return;
@@ -1733,13 +1741,14 @@ GZ_OUSTER_HD inline void rcCastOneRay(
     // Smoke / dust / fog: the winning candidate is already attenuated by its
     // own path (above); what remains is the medium's competing backscatter
     // return and the NEAR_IR airlight, both over the sight line.
+    bool medium = false;
     if (sp.n_obscurants > 0) {
-        rcApplyObscurants(sp, o, d, n_off, t_los,
-                          static_cast<uint32_t>(idx), range, rho,
-                          nir_out ? &nir_val : nullptr);
+        medium = rcApplyObscurants(sp, o, d, n_off, t_los,
+                                   static_cast<uint32_t>(idx), range, rho,
+                                   nir_out ? &nir_val : nullptr);
     }
 
-    range_out = range;
+    range_out = medium ? -range : range;
     retro_out = rho;
     if (nir_out) *nir_out = nir_val;
 }

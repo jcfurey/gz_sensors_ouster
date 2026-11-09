@@ -60,7 +60,8 @@ public:
     /// GPU backends cache the uploaded geometry arrays and re-upload only
     /// when it changes; per-scan transforms upload every call.
     ///
-    /// range_out[H×W]: reported Ouster range in metres (+inf miss);
+    /// range_out[H×W]: reported Ouster range in metres (+inf miss; negated
+    /// for a return from a participating medium, rpmath::isMediumRange);
     /// retro_out[H×W]: laser_retro of the nearest hit (0 on miss/unset).
     virtual void castScan(
         const rc::SceneView & scene,

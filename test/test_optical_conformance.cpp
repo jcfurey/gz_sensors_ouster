@@ -136,6 +136,36 @@ TEST_P(OpticalConformance, ProductionBackendMatchesMeasuredSignalResponse)
     }
 }
 
+TEST_P(OpticalConformance, ProductionBackendReportsAMediumReturnAtItsRange)
+{
+    const auto processor = makeProcessor(GetParam());
+    if (!processor) {
+        GTEST_SKIP() << GetParam() << " is unavailable on this build/device";
+    }
+    RayProcessParams params{};
+    params.H = 1;
+    params.W = 2;
+    params.base_signal = 800;
+    params.base_reflectivity = 50;
+    params.min_range = .1f;
+    params.max_range = 120;
+    params.range_resolution = .001f;
+    // The raycaster marks a return from smoke, dust or fog with a negative
+    // range. Every backend must report it like a surface at that range.
+    const float depth[2] = {12.5f, -12.5f};
+    const float retro[2] = {0.25f, 0.25f};
+    uint32_t range[2];
+    uint16_t signal[2], nearir[2];
+    uint8_t reflectivity[2];
+    processor->processDepth(depth, retro, range, signal, reflectivity, nearir, params);
+    EXPECT_EQ(range[0], 12500u);
+    EXPECT_EQ(range[1], range[0]);
+    EXPECT_GT(signal[0], 0u);
+    EXPECT_EQ(signal[1], signal[0]);
+    EXPECT_EQ(reflectivity[1], reflectivity[0]);
+    EXPECT_EQ(nearir[1], nearir[0]);
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, OpticalConformance,
                         testing::Values("cpu", "cuda", "hip", "sycl"));
 }  // namespace

@@ -498,13 +498,28 @@ GZ_OUSTER_HD inline uint16_t clampU16(float v)
     return static_cast<uint16_t>(gzm::fmin_(gzm::fmax_(v, 0.0f), kU16Max));
 }
 
+/// The raycaster marks a return from a participating medium (smoke, dust,
+/// fog) with a NEGATIVE range in the depth plane it hands the channel stage
+/// (rc::rcCastOneRay). The mark is for edgeDiscontinuity(); every other
+/// reader takes the range itself through returnRange().
+GZ_OUSTER_HD inline bool isMediumRange(float depth) { return depth < 0.0f; }
+GZ_OUSTER_HD inline float returnRange(float depth) { return gzm::fabs_(depth); }
+
 /// True if any cardinal neighbour of `idx` is a miss or differs in depth by
 /// more than `threshold` — i.e. `idx` sits on a depth discontinuity. Callers
 /// gate this on `threshold > 0` and apply the kEdgeSuppressProb RNG draw.
+///
+/// `depth` is the signed plane (see isMediumRange). A medium return's range
+/// is drawn per pixel from the medium's received-power profile, so its
+/// scatter is not a surface edge: such a pixel is never on an edge, and as a
+/// neighbour it says nothing about the surfaces around it.
 GZ_OUSTER_HD inline bool edgeDiscontinuity(const float * depth, int idx,
                                            int H, int W, float threshold)
 {
     const float d = depth[idx];
+    if (isMediumRange(d)) {
+        return false;
+    }
     const int beam = idx / W;
     const int col  = idx % W;
     const int nb_r[4] = {beam - 1, beam + 1, beam, beam};
@@ -515,6 +530,7 @@ GZ_OUSTER_HD inline bool edgeDiscontinuity(const float * depth, int idx,
         const int c = nb_c[k];
         if (r < 0 || r >= H || c < 0 || c >= W) continue;
         const float nd = depth[r * W + c];
+        if (isMediumRange(nd)) continue;
         if (!gzm::isfinite_(nd) || nd < kValidDepthMin ||
             gzm::fabs_(nd - d) > threshold) {
             suppress = true;

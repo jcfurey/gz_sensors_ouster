@@ -75,6 +75,7 @@ struct RayResult {
     float range = 0.0f;
     float retro = 0.0f;
     float nir = 0.0f;
+    bool medium = false;  ///< returned by the medium, not a surface
 };
 
 /// Cast the single beam (elevation 0, azimuth 0 → straight down +x) of a
@@ -93,6 +94,9 @@ RayResult castOne(const rc::Scene & scene,
     rc::castScan(scene.view(), xf.empty() ? nullptr : xf.data(), alt, az,
                  kIdentityR, kZeroT, sp, &r.range, &r.retro,
                  nullptr, nullptr, &r.nir);
+    // The raycaster marks a medium return with a negative range.
+    r.medium = rpmath::isMediumRange(r.range);
+    r.range = rpmath::returnRange(r.range);
     return r;
 }
 
@@ -577,6 +581,8 @@ TEST(ObscurantBackscatter, DenseSmokeIsSpeckledButNearFaceWeighted)
     int near_returns = 0;
     for (const auto & r : rs) {
         ASSERT_TRUE(std::isfinite(r.range));
+        // Only the smoke's own returns carry the medium mark, not the wall's.
+        EXPECT_EQ(r.medium, r.range < 29.9f);
         if (r.range >= 29.9f) continue;
         ++medium_returns;
         EXPECT_GE(r.range, 5.0f);
@@ -606,6 +612,9 @@ TEST(ObscurantBackscatter, ThinHazeLetsTheTargetThrough)
 
     const auto rs = castOverSalts(scene, xf, sp, 500);
     EXPECT_GT(fractionWithRange(rs, 29.9f, 30.1f), 0.95);
+    for (const auto & r : rs) {
+        EXPECT_EQ(r.medium, r.range < 29.9f);
+    }
 }
 
 TEST(ObscurantBackscatter, SmokeAgainstOpenSkyStillReturns)
@@ -619,6 +628,7 @@ TEST(ObscurantBackscatter, SmokeAgainstOpenSkyStillReturns)
     const auto rs = castOverSalts(scene, xf, sp, 500);
     int finite = 0;
     for (const auto & r : rs) {
+        EXPECT_EQ(r.medium, std::isfinite(r.range));
         if (!std::isfinite(r.range)) continue;
         ++finite;
         EXPECT_GE(r.range, 5.0f);

@@ -218,6 +218,10 @@ private:
     // epoch; producer metadata prevents pre-reset work crossing that boundary.
     std::chrono::nanoseconds last_post_sim_time_{-1};
     uint64_t sim_epoch_ = 0;
+    // Sim time of this plugin's first PostUpdate (or of the last reset): the
+    // start of the wait before a sensor entity that is still missing is
+    // reported. A model can be spawned long after sim time zero.
+    std::chrono::nanoseconds entity_search_start_{-1};
     // Paused state published by PostUpdate for OnRender: scan renders are
     // skipped while paused (PostUpdate won't consume a frame until unpause,
     // and a mid-pause render could capture a half-edited GUI scene that then

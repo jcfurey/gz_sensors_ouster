@@ -65,13 +65,15 @@ TEST(NoiseModel, InvalidDepthProducesZeroRange)
     const int n = H * W;
     std::vector<float> depth(n);
     std::vector<float> retro(n, 0.5f);
-    // Mix of invalid values: inf, -inf, NaN, near-zero
+    // Mix of invalid values: inf, -inf, NaN, near-zero. A negative range
+    // marks a return from a participating medium at that distance, so it is
+    // invalid only when its magnitude is.
     depth[0] = std::numeric_limits<float>::infinity();
     depth[1] = -std::numeric_limits<float>::infinity();
     depth[2] = std::numeric_limits<float>::quiet_NaN();
     depth[3] = 0.0f;   // below 0.001 threshold
     depth[4] = 0.0005f; // below threshold
-    depth[5] = -1.0f;   // negative
+    depth[5] = -0.0005f;  // a medium return below threshold
     depth[6] = std::numeric_limits<float>::infinity();
     depth[7] = std::numeric_limits<float>::quiet_NaN();
 
@@ -88,6 +90,27 @@ TEST(NoiseModel, InvalidDepthProducesZeroRange)
         EXPECT_EQ(range[i], 0u) << "invalid depth at index " << i << " should produce range=0";
         EXPECT_EQ(signal[i], 0u) << "invalid depth at index " << i << " should produce signal=0";
     }
+}
+
+TEST(NoiseModel, MediumReturnIsReportedAtItsDistance)
+{
+    // The raycaster hands a medium (smoke, fog) return over as a negative
+    // range. Every channel is computed from its magnitude, exactly as for a
+    // surface at that distance.
+    const std::vector<float> depth = {-7.5f, 7.5f};
+    const std::vector<float> retro(2, 0.5f);
+    std::vector<uint32_t> range(2);
+    std::vector<uint16_t> signal(2), nearir(2);
+    std::vector<uint8_t>  refl(2);
+    const auto p = noNoiseParams(1, 2);
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+    EXPECT_EQ(range[0], 7500u);
+    EXPECT_GT(signal[0], 0u);
+    EXPECT_EQ(range[0], range[1]);
+    EXPECT_EQ(signal[0], signal[1]);
+    EXPECT_EQ(refl[0], refl[1]);
+    EXPECT_EQ(nearir[0], nearir[1]);
 }
 
 TEST(NoiseModel, RangeIsDepthTimesThousand)
@@ -555,6 +578,57 @@ TEST(NoiseModel, EdgeDiscontinuityCausesDropouts)
     double rate = static_cast<double>(center_dropped) / trials;
     EXPECT_GT(rate, 0.45);
     EXPECT_LT(rate, 0.55);
+}
+
+TEST(NoiseModel, MediumReturnsAreNotDepthEdges)
+{
+    constexpr int H = 3, W = 3;
+    const int n = H * W;
+    // Smoke returning from 10 m in front of a wall at 20 m. The raycaster
+    // marks a return from a participating medium with a negative range.
+    const std::vector<float> smoke = {
+        20.0f, 20.0f, 20.0f,
+        20.0f, -10.0f, 20.0f,
+        20.0f, 20.0f, 20.0f
+    };
+    const auto edge = [&](const std::vector<float> & depth, int idx) {
+        return rpmath::edgeDiscontinuity(depth.data(), idx, H, W, 5.0f);
+    };
+    for (int idx = 0; idx < n; ++idx) {
+        EXPECT_FALSE(edge(smoke, idx)) << idx;
+    }
+    // The same range from a surface puts it and its four neighbours on an edge.
+    std::vector<float> surface = smoke;
+    surface[4] = 10.0f;
+    for (int idx = 0; idx < n; ++idx) {
+        EXPECT_EQ(edge(surface, idx), idx % 2 == 1 || idx == 4) << idx;
+    }
+    // Surfaces beside the smoke still edge against each other.
+    std::vector<float> both = smoke;
+    both[5] = 10.0f;
+    EXPECT_TRUE(edge(both, 5));
+    EXPECT_TRUE(edge(both, 2));
+    EXPECT_TRUE(edge(both, 8));
+    EXPECT_FALSE(edge(both, 4));
+    EXPECT_FALSE(edge(both, 3));
+
+    // Through the channel stage, the smoke return and the wall around it
+    // are reported every time. A surface there would drop half the time.
+    std::vector<float> retro(n, 0.5f);
+    auto p = noNoiseParams(H, W);
+    p.edge_discon_threshold = 5.0f;
+    for (int trial = 0; trial < 200; ++trial) {
+        std::vector<uint32_t> range(n);
+        std::vector<uint16_t> signal(n);
+        std::vector<uint8_t>  refl(n);
+        std::vector<uint16_t> nearir(n);
+        processCpu(smoke.data(), retro.data(),
+                     range.data(), signal.data(), refl.data(), nearir.data(), p);
+        for (int idx = 0; idx < n; ++idx) {
+            ASSERT_EQ(range[idx], idx == 4 ? 10000u : 20000u) << idx;
+        }
+        ASSERT_GT(signal[4], 0u);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -390,7 +390,7 @@ private:
                 const uint32_t idx = static_cast<uint32_t>(it[0]);
                 uint64_t counter = 0;
 
-                float d = depth[idx];
+                float d = rpmath::returnRange(depth[idx]);
                 const bool valid = sycl::isfinite(d) && d > rpmath::kValidDepthMin;
                 if (!valid) {
                     // Solar-background false alarm (see the CPU reference in

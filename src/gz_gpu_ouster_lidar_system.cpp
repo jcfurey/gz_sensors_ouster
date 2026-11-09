@@ -846,7 +846,9 @@ void GzGpuOusterLidarSystem::PostUpdate(
         std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
     if (last_post_sim_time_.count() >= 0 && sim_now_ns < last_post_sim_time_) {
         ++sim_epoch_;
+        entity_search_start_ = sim_now_ns;
     }
+    if (entity_search_start_.count() < 0) entity_search_start_ = sim_now_ns;
     last_post_sim_time_ = sim_now_ns;
     if (encoder_) {
         encoder_->setSimulationState(info.paused, sim_epoch_);
@@ -862,7 +864,11 @@ void GzGpuOusterLidarSystem::PostUpdate(
         return;
     }
 
-    if (!sensor_initialized_.load(std::memory_order_acquire)) return;
+    // No gate on sensor_initialized_ here. In panels mode it only becomes
+    // true once the render rig exists, and metadata, entity discovery, the
+    // pose cache and IMU below need no renderer: a driver must be able to
+    // read metadata and IMU while the rig is still coming up, or when it
+    // never does. Until then the frame exchange below is simply empty.
     if (!ros_) return;
 
     // Sim-thread work here can throw — rclcpp publishes (an RCLError if the
@@ -890,6 +896,11 @@ void GzGpuOusterLidarSystem::PostUpdate(
             }
         }
     };
+
+    // A sensor entity that has not appeared this long (in sim time) after the
+    // plugin's first update, or after a reset, is reported.
+    constexpr std::chrono::nanoseconds kEntityWait = std::chrono::seconds(5);
+    const auto searched_ns = sim_now_ns - entity_search_start_;
 
     // ── Metadata (re)publish — sim-thread, works in both ray modes ──────────
     guarded("metadata", [&] {
@@ -924,6 +935,19 @@ void GzGpuOusterLidarSystem::PostUpdate(
                     lidar_frame_name_.c_str(), static_cast<unsigned long>(ent));
                 return false;  // stop iteration
             });
+        // The search repeats every step, since a sensor can be spawned late.
+        // One that never appears (a <sensor_name> whose last segment names no
+        // sensor on this model) would otherwise leave the plugin publishing
+        // metadata and nothing else, without a word.
+        if (!lidar_frame_found_ && searched_ns > kEntityWait) {
+            RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 10000,
+                "%s: no sensor named '%s' on this plugin's model after %.0f s "
+                "of sim time; no scans are produced until one appears. The "
+                "last segment of <sensor_name> must name the sensor the "
+                "plugin takes its pose from.",
+                sensor_name_.c_str(), lidar_frame_name_.c_str(),
+                static_cast<double>(searched_ns.count()) / 1e9);
+        }
     }
 
     // ── Locate the IMU sensor entity (once) ────────────────────────────────
@@ -978,6 +1002,15 @@ void GzGpuOusterLidarSystem::PostUpdate(
             RCLCPP_INFO(kLogger, "Found IMU entity: %s (id=%lu)",
                 imu_name_.c_str(),
                 static_cast<unsigned long>(imu_entity_));
+        } else if (searched_ns > kEntityWait) {
+            const std::string which = auto_detect
+                ? std::string("with 'imu' in its name")
+                : "named '" + imu_name_ + "'";
+            RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 10000,
+                "%s: no IMU sensor %s on this plugin's model after %.0f s of "
+                "sim time; no IMU data is published until one appears.",
+                sensor_name_.c_str(), which.c_str(),
+                static_cast<double>(searched_ns.count()) / 1e9);
         }
     }
 
