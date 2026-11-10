@@ -784,6 +784,9 @@ transport backpressure to the dedicated packet drain thread. The encoder
 retains one active frame and one newest pending frame; overload replaces a
 whole pending frame. Packet publication has its own mutex so backpressure
 does not hold simulation-thread metadata, image or IMU publication locks.
+Packet spacing follows consecutive produced scans, including scans overwritten
+in the pending slot. A transport stall therefore does not make later frames
+drain more slowly by inflating the observed scan interval.
 Set `lidar_packet_reliable: true` on `os_cloud`, `os_image` and `os_pinhole`
 consumers; the supplied examples do this using the pinned Ouster ROS fork.
 The legacy `RosInterfaceConfig::lidar_packet_qos_depth` member remains source

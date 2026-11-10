@@ -13,6 +13,7 @@
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <thread>
 #include <unistd.h>
 
 namespace gz_gpu_ouster_lidar {
@@ -210,6 +211,33 @@ TEST(CoreConformance, CongestedSinkKeepsActiveAndNewestWholeFrameWithoutBlocking
         EXPECT_EQ(format.frame_id(bytes), i < 64 ? 0u : 4u);
         EXPECT_EQ(format.col_measurement_id(format.nth_col(0, bytes)), (i % 64) * 16);
     }
+}
+
+TEST(CoreConformance, PacedSinkRecoversProducerCadenceAfterOverwritingQueuedFrames)
+{
+    MetadataFile file("RNG19_RFL8_SIG16_NIR16");
+    OusterMetadata metadata;
+    double maximum = 0;
+    ASSERT_TRUE(metadata.load(file.path, false, "rev07", false, maximum));
+    Capture capture;
+    capture.block = true;
+    capture.start(metadata, 5.0, core::PacketDeliveryMode::kPaced);
+    const auto frame = fixture::frame(metadata.core());
+    capture.submit(frame);
+    ASSERT_TRUE(capture.wait(1));
+
+    // Hold the active frame while a steady 200 ms producer overwrites two
+    // pending frames. The next drain should take 160 ms, not 480 ms inferred
+    // from the 600 ms gap between frames that reached the consumer.
+    for (int i = 0; i < 3; ++i) {
+        std::this_thread::sleep_for(200ms);
+        capture.submit(frame);
+    }
+    EXPECT_EQ(capture.encoder.droppedBatches(), 2u);
+    capture.release();
+    EXPECT_TRUE(capture.wait(128, 350ms));
+    capture.encoder.stop();
+    EXPECT_EQ(capture.packets.size(), 128u);
 }
 
 TEST(CoreConformance, PauseResetCancelsOldFrameAndRestartPublishesAgain)

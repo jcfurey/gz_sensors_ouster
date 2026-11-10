@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -81,6 +82,10 @@ private:
     std::vector<ouster_sim_core::EncodedLidarPacket> encode_pkts_;
     std::vector<ouster_sim_core::EncodedLidarPacket> drain_pkts_;
     std::chrono::steady_clock::time_point drain_produced_at_{};
+    // Observe every produced scan, so overwritten pending frames do not
+    // inflate the cadence used to pace later frames.
+    std::optional<std::chrono::steady_clock::time_point> previous_produced_at_;
+    std::optional<std::chrono::nanoseconds> drain_producer_period_;
     uint64_t drain_epoch_ = 0;
     std::thread drain_thread_;
     std::mutex drain_mtx_;

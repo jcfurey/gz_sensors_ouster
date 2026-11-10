@@ -56,6 +56,8 @@ void PacketEncoder::start(const OusterMetadata * meta, PacketSink sink,
         dropped_batches_.store(0);
         drain_ready_ = false;
         drain_pkts_.clear();
+        previous_produced_at_.reset();
+        drain_producer_period_.reset();
     }
     drain_thread_ = std::thread(&PacketEncoder::drainThreadFunc, this);
 }
@@ -83,7 +85,11 @@ void PacketEncoder::setSimulationState(bool paused, uint64_t epoch)
         changed = paused_ != paused || simulation_epoch_ != epoch;
         paused_ = paused;
         simulation_epoch_ = epoch;
-        if (changed) ++state_generation_;
+        if (changed) {
+            ++state_generation_;
+            previous_produced_at_.reset();
+            drain_producer_period_.reset();
+        }
 
         // A pending frame from before a rewind must not be decoded beside
         // post-reset packets. The in-flight local batch observes the same
@@ -124,6 +130,12 @@ void PacketEncoder::encodeScan(int64_t stamp_ns, uint64_t epoch,
         std::lock_guard<std::mutex> lk(drain_mtx_);
         // A reset may have occurred while this scan was being encoded.
         if (epoch != simulation_epoch_) return;
+        drain_producer_period_.reset();
+        if (previous_produced_at_ && produced_at > *previous_produced_at_) {
+            drain_producer_period_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                produced_at - *previous_produced_at_);
+        }
+        previous_produced_at_ = produced_at;
         overwrote = drain_ready_;
         if (overwrote) {
             dropped = dropped_batches_.fetch_add(
@@ -166,7 +178,8 @@ void PacketEncoder::drainThreadFunc()
         previous_generation = local_generation;
         pacing.resume(std::chrono::steady_clock::now());
         if (local_pkts.empty()) continue;
-        pacing.beginFrame(drain_produced_at_, std::chrono::steady_clock::now(), local_pkts.size());
+        pacing.beginFrame(drain_produced_at_, std::chrono::steady_clock::now(),
+                          local_pkts.size(), drain_producer_period_);
         try {
             while (pacing.hasActiveFrame()) {
                 if (shutdown_.load()) return;
