@@ -365,6 +365,7 @@ private:
             splitmix64(effective_seed_ + (frame_counter_++));
         const int H = p.H, W = p.W;
         const float base_signal = p.base_signal;
+        const SignalResponseParams signal_response = p.signal_response;
         const float base_refl = p.base_reflectivity;
         const float rmin = p.range_noise_min_std;
         const float rmax = p.range_noise_max_std;
@@ -389,7 +390,7 @@ private:
                 const uint32_t idx = static_cast<uint32_t>(it[0]);
                 uint64_t counter = 0;
 
-                float d = depth[idx];
+                float d = rpmath::returnRange(depth[idx]);
                 const bool valid = sycl::isfinite(d) && d > rpmath::kValidDepthMin;
                 if (!valid) {
                     // Solar-background false alarm (see the CPU reference in
@@ -468,18 +469,19 @@ private:
                 }
                 range_out[idx] = static_cast<uint32_t>(d * rpmath::kRangeToMm);
 
-                // Signal 1/r² + shot noise
+                // Signal: measured response or 1/r², with shot noise
                 const float intensity = ouster_sim_core::opticalValueOrDefault(retro, idx, 1.0f);
-
-                float sig = rpmath::signalFromRange(d, intensity, base_signal);
+                const rpmath::SignalSample sample = rpmath::signalSample(
+                    d, intensity, base_signal, signal_response);
+                float sig = sample.mean;
                 if (sig_scale > 0.f) {
-                    float sigma_sig = sycl::sqrt(sycl::fmax(sig, 0.f)) * sig_scale;
+                    float sigma_sig = sample.sigma * sig_scale;
                     sig = sycl::fmax(sig + normal01(counter, seed, idx) * sigma_sig, 0.f);
                 }
                 signal_out[idx] = rpmath::clampU16(sig);
 
                 // Reflectivity — shared rpmath::reflectivityToByte. Canonical
-                // derivation + upstream Ouster refs in ray_processor_cpu_impl.cpp.
+                // derivation + upstream Ouster refs in docs/MODEL_REFERENCES.md §5.
                 if (ouster_sim_core::opticalValuePresent(retro, idx)) {
                     refl_out[idx] = rpmath::reflectivityToByte(retro[idx]);
                 } else {

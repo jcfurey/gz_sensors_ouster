@@ -41,6 +41,12 @@ bool OusterMetadata::load(const std::string & path, bool imu_enabled,
         // Fail during configuration, before starting the scan/drain threads.
         metadata.requirePrimaryReturnProfile();
         profile = metadata.resolvedProductProfile(hardware_revision);
+        if (profile.unrecognized_revision) {
+            throw std::invalid_argument(
+                "unrecognised <hardware_revision> '" + hardware_revision +
+                "'; expected auto, gen1, revC, revD, rev05, rev06, rev06.2, "
+                "rev07, rev07.1 or rev08");
+        }
         if (!profile.supported) {
             throw std::invalid_argument("unsupported Ouster product/revision: " +
                 metadata.productLine() + " / " + hardware_revision);

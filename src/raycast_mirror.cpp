@@ -4,6 +4,7 @@
 #include "raycast_mirror.hpp"
 
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
+#include "scan_timing.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -17,6 +18,7 @@
 #include <gz/sim/components/Geometry.hh>
 #include <gz/sim/components/LaserRetro.hh>
 #include <gz/sim/components/Light.hh>
+#include <gz/sim/components/Static.hh>
 #include <gz/sim/components/Material.hh>
 #include <gz/sim/components/Transparency.hh>
 #include <gz/sim/components/Visual.hh>
@@ -187,6 +189,12 @@ void RaycastMirror::rebuildScene(
             bool has_texcoords = true;  // analytic primitives derive UVs
             Ref ref;
             ref.entity = ent;
+            const auto model = ::gz::sim::topLevelModel(ent, ecm);
+            const auto * is_static =
+                ecm.Component<::gz::sim::components::Static>(model);
+            ref.sweep = !(is_static && is_static->Data()) &&
+                        (params_.motion_distortion ||
+                         model != params_.sensor_model);
 
             switch (g.Type()) {
                 case sdf::GeometryType::BOX: {
@@ -365,6 +373,47 @@ void RaycastMirror::rebuildScene(
         visual_count);
 }
 
+int RaycastMirror::sweepGroups() const
+{
+    return std::clamp(params_.object_motion_samples, 1, std::max(1, params_.W));
+}
+
+void RaycastMirror::refXform(size_t i,
+                             const ::gz::sim::EntityComponentManager & ecm,
+                             rc::InstanceXform & out) const
+{
+    const auto pose =
+        ::gz::sim::worldPose(refs_[i].entity, ecm) *
+        ::gz::math::Pose3d(::gz::math::Vector3d::Zero, refs_[i].offset);
+    float r[9], t[3];
+    poseToRT(pose, r, t);
+    scene_->computeXform(static_cast<int>(i), r, t, out);
+}
+
+void RaycastMirror::captureSweep(const ::gz::sim::EntityComponentManager & ecm,
+                                 int group, int repeats)
+{
+    const int groups = sweepGroups();
+    const size_t n_refs = refs_.size();
+    sweep_xforms_.resize(static_cast<size_t>(groups) * n_refs);
+    sweep_captured_.resize(static_cast<size_t>(groups), 0);
+    const size_t base = static_cast<size_t>(group) * n_refs;
+    for (size_t i = 0; i < n_refs; ++i) {
+        // A visual removed since the last rebuild is dropped at the next
+        // trigger, which then rebuilds the scene and discards this sweep.
+        if (refs_[i].sweep && ecm.HasEntity(refs_[i].entity)) {
+            refXform(i, ecm, sweep_xforms_[base + i]);
+        }
+    }
+    sweep_captured_[static_cast<size_t>(group)] = 1;
+    for (int g = group + 1; g <= group + repeats; ++g) {
+        std::copy_n(sweep_xforms_.begin() + static_cast<std::ptrdiff_t>(base), n_refs,
+                    sweep_xforms_.begin() +
+                        static_cast<std::ptrdiff_t>(static_cast<size_t>(g) * n_refs));
+        sweep_captured_[static_cast<size_t>(g)] = 1;
+    }
+}
+
 void RaycastMirror::buildColumnPoses(std::chrono::nanoseconds scan_end,
                                      std::vector<float> & col_r,
                                      std::vector<float> & col_t) const
@@ -470,14 +519,37 @@ void RaycastMirror::postUpdate(
             return true;
         });
 
+    // Capture the moving visuals as the sensor sweeps each column group of
+    // the frame ending at the gate's next deadline, so the cast shows each
+    // group a moving object where it was when that group was acquired.
+    const auto sim_now =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
+    const auto period = periodFromHz(params_.lidar_hz);
+    const int groups = sweepGroups();
+    // A rewind resets the gate, which then triggers with gate.reset, so
+    // nothing captured before it is cast.
+    if (scene_ && scan_gate_.initialized() && sweep_next_ < groups) {
+        int due = 0;
+        while (sweep_next_ + due < groups &&
+               sim_now.count() >= columnGroupMidTimestampNs(
+                   scan_gate_.nextDeadline().count(), period.count(),
+                   sweep_next_ + due, groups, params_.W)) {
+            ++due;
+        }
+        if (due > 0) {
+            if (sweep_next_ == 0) sweep_version_ = scene_version_;
+            captureSweep(ecm, sweep_next_, due - 1);
+            sweep_next_ += due;
+        }
+    }
+
     // Gate on sim time before traversing the scene. The deadline advances
     // from its previous target rather than re-anchoring at the current tick,
     // so a physics step that does not divide the scan period produces bounded
     // 8/12 ms-style jitter instead of a permanently low average rate. The
-    // frame is stamped with sim_now because that is when geometry is captured.
-    const auto sim_now =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
-    const auto gate = scan_gate_.advance(sim_now, periodFromHz(params_.lidar_hz));
+    // frame is stamped with sim_now: static geometry, and the sensor pose
+    // unless motion_distortion is set, are captured at this tick.
+    const auto gate = scan_gate_.advance(sim_now, period);
     if (!gate.due) return;
 
     // Rebuild when visual identity, geometry/material state, or pending changes occur.
@@ -513,15 +585,27 @@ void RaycastMirror::postUpdate(
             if (post_col_t_.empty()) post_col_t_.swap(job_col_t_);
         }
     }
-    post_xforms_.resize(refs_.size());
-    for (size_t i = 0; i < refs_.size(); ++i) {
-        const auto pose =
-            ::gz::sim::worldPose(refs_[i].entity, ecm) *
-            ::gz::math::Pose3d(::gz::math::Vector3d::Zero, refs_[i].offset);
-        float r[9], t[3];
-        poseToRT(pose, r, t);
-        scene_->computeXform(static_cast<int>(i), r, t, post_xforms_[i]);
+    // One transform set per column group: the moving visuals as captured
+    // during the sweep, everything else (and any group the sweep missed: the
+    // first frame, a rewind, skipped frames, or a scene rebuilt at this tick)
+    // as it is now.
+    const size_t n_refs = refs_.size();
+    const bool swept = !gate.reset && gate.skipped == 0 &&
+                       sweep_version_ == scene_version_ &&
+                       sweep_captured_.size() == static_cast<size_t>(groups) &&
+                       sweep_xforms_.size() == static_cast<size_t>(groups) * n_refs;
+    post_xforms_.resize(static_cast<size_t>(groups) * n_refs);
+    for (size_t i = 0; i < n_refs; ++i) {
+        rc::InstanceXform now;
+        refXform(i, ecm, now);
+        for (int g = 0; g < groups; ++g) {
+            const size_t k = static_cast<size_t>(g) * n_refs + i;
+            post_xforms_[k] = swept && refs_[i].sweep && sweep_captured_[g] ?
+                sweep_xforms_[k] : now;
+        }
     }
+    sweep_next_ = 0;
+    std::fill(sweep_captured_.begin(), sweep_captured_.end(), 0);
 
     // Per-column poses for motion distortion (needs ≥ 2 history samples to
     // interpolate; falls back to the snapshot pose otherwise).
@@ -587,6 +671,7 @@ void RaycastMirror::postUpdate(
         job_scene_ = scene_;
         job_scene_version_ = scene_version_;
         job_xforms_.swap(post_xforms_);
+        job_xform_sets_ = groups;
         poseToRT(sensor_pose, job_sensor_r_, job_sensor_t_);
         job_col_r_.swap(post_col_r_);
         job_col_t_.swap(post_col_t_);
@@ -618,6 +703,7 @@ void RaycastMirror::threadFunc()
         FrameMetadata metadata;
         RayProcessParams process_params;
         uint64_t version = 0;
+        int xform_sets = 1;
         float sr[9], st[3], sun[5];
         // Obscurants are copied rather than swapped: at most
         // rc::kMaxObscurants entries (~576 B), and the kernel wants them in
@@ -636,6 +722,7 @@ void RaycastMirror::threadFunc()
             scene = job_scene_;
             version = job_scene_version_;
             xforms.swap(job_xforms_);
+            xform_sets = job_xform_sets_;
             col_r.swap(job_col_r_);
             col_t.swap(job_col_t_);
             metadata = job_metadata_;
@@ -695,7 +782,8 @@ void RaycastMirror::threadFunc()
                 scratch_.data(), scratch_.data() + n,
                 scratch_.data() + 2 * n,
                 col_r.empty() ? nullptr : col_r.data(),
-                col_t.empty() ? nullptr : col_t.data());
+                col_t.empty() ? nullptr : col_t.data(),
+                xform_sets);
 
             if (exch_->publish(range_out_, signal_out_, reflectivity_out_,
                                nearir_out_, n, metadata)) {

@@ -15,9 +15,11 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "backend_env_guard.hpp"
 #include "gz_gpu_ouster_lidar/ray_processor.hpp"
 #include "raycast_scene.hpp"
 
@@ -721,7 +723,7 @@ TEST(Raycast, CastScanThroughRayProcessor)
     // The backend entry: dispatch → castScan must agree with the CPU
     // reference (on the CPU backend they are the same shared math; on a
     // GPU build this same test exercises the device kernel).
-    ::setenv("GZ_OUSTER_BACKEND", "cpu", 1);
+    testutil::BackendEnvGuard backend("cpu");
 
     constexpr int H = 8, W = 32;
     rc::Scene scene;
@@ -790,7 +792,7 @@ TEST(Raycast, ProcessDepthThroughRayProcessor)
 
 TEST(Raycast, FusedCastAndProcessMatchesTwoStageCpuPath)
 {
-    ::setenv("GZ_OUSTER_BACKEND", "cpu", 1);
+    testutil::BackendEnvGuard backend("cpu");
     constexpr int H = 2, W = 8;
     const int n = H * W;
 
@@ -839,6 +841,117 @@ TEST(Raycast, FusedCastAndProcessMatchesTwoStageCpuPath)
     EXPECT_EQ(fused_signal, expected_signal);
     EXPECT_EQ(fused_refl, expected_refl);
     EXPECT_EQ(fused_nir, expected_nir);
+
+    // The CPU backend's fused entry runs the two stages above, so agreement
+    // alone proves nothing there. Pin the scene itself: of the eight columns
+    // (45 degrees apart) only column 0 meets the 1 m sphere centred 5 m ahead,
+    // head-on at 4 m; every other beam misses and reports no return.
+    for (int row = 0; row < H; ++row) {
+        for (int column = 0; column < W; ++column) {
+            const size_t i = static_cast<size_t>(row) * W + column;
+            SCOPED_TRACE("row " + std::to_string(row) +
+                         " column " + std::to_string(column));
+            if (column == 0) {
+                EXPECT_EQ(fused_range[i], 4000u);
+                // retro 0.8 → Lambertian band: 0.8 × 100 = 80.
+                EXPECT_EQ(static_cast<int>(fused_refl[i]), 80);
+                // base_signal × ρ / r² = 800 × 0.8 / 16, head-on, no noise.
+                EXPECT_EQ(fused_signal[i], 40u);
+            } else {
+                EXPECT_EQ(fused_range[i], 0u);
+                EXPECT_EQ(fused_signal[i], 0u);
+                EXPECT_EQ(static_cast<int>(fused_refl[i]), 0);
+            }
+        }
+    }
+}
+
+TEST(Raycast, GroupedCastUsesEachColumnGroupsTransforms)
+{
+    // 8 columns in 2 transform sets: columns 0-3 cast with set 0, 4-7 with
+    // set 1. Column 0 looks along +x and column 4 along -x.
+    rc::Scene scene;
+    const int si = scene.addInstance(rc::GeomType::kSphere, kSphereSize, 0.0f);
+    const auto ahead = xformAt(scene, si, 5.0f, 0.0f, 0.0f);
+    const auto behind = xformAt(scene, si, -5.0f, 0.0f, 0.0f);
+    const auto parked = xformAt(scene, si, 500.0f, 0.0f, 0.0f);  // out of range
+    const std::vector<float> alt = {0.0f}, az = {0.0f};
+    const auto sp = scanParams(1, 8);
+    const auto grouped = [&](const std::vector<rc::InstanceXform> & xf) {
+        std::vector<rc::Tlas> tlas(2);
+        for (size_t s = 0; s < tlas.size(); ++s) rc::buildTlas(&xf[s], 1, tlas[s]);
+        std::vector<float> range(8);
+        rc::castScanGrouped(scene.view(), xf.data(), 2, tlas.data(),
+                            alt.data(), az.data(), kIdentityR, kZeroT, sp,
+                            range.data(), nullptr);
+        return range;
+    };
+
+    EXPECT_NEAR(grouped({ahead, parked})[0], 4.0f, 1e-4f);
+    EXPECT_EQ(grouped({parked, ahead})[0], kInf);
+    EXPECT_NEAR(grouped({parked, behind})[4], 4.0f, 1e-4f);
+    EXPECT_EQ(grouped({behind, parked})[4], kInf);
+}
+
+TEST(Raycast, GroupedCastWithOneSetMatchesCastScan)
+{
+    rc::Scene scene;
+    const float box_size[3] = {0.5f, 0.5f, 0.5f};
+    const float cyl_size[3] = {0.3f, 1.0f, 0.0f};
+    const int bi = scene.addInstance(rc::GeomType::kBox, box_size, 0.4f);
+    const int ci = scene.addInstance(rc::GeomType::kCylinder, cyl_size, 0.7f);
+    std::vector<rc::InstanceXform> xf = {xformAt(scene, bi, 4.0f, 0.0f, 0.0f),
+                                         xformAt(scene, ci, 0.0f, -3.0f, 0.0f)};
+    const std::vector<float> alt = {-5.0f, 0.0f, 5.0f}, az = {0.0f, 0.5f, -0.5f};
+    const auto sp = scanParams(3, 64);
+    std::vector<float> retro;
+    const auto expected = cast(scene, xf, alt, az, sp, &retro);
+
+    std::vector<rc::Tlas> tlas(1);
+    rc::buildTlas(xf.data(), 2, tlas[0]);
+    std::vector<float> range(expected.size()), grouped_retro(expected.size());
+    rc::castScanGrouped(scene.view(), xf.data(), 1, tlas.data(),
+                        alt.data(), az.data(), kIdentityR, kZeroT, sp,
+                        range.data(), grouped_retro.data());
+    EXPECT_EQ(range, expected);
+    EXPECT_EQ(grouped_retro, retro);
+}
+
+TEST(Raycast, ProcessorCastsEachColumnGroupWithItsOwnTransforms)
+{
+    testutil::BackendEnvGuard backend("cpu");
+    constexpr int H = 1, W = 8;
+    rc::Scene scene;
+    const int si = scene.addInstance(rc::GeomType::kSphere, kSphereSize, 0.8f);
+    const auto ahead = xformAt(scene, si, 5.0f, 0.0f, 0.0f);
+    const auto parked = xformAt(scene, si, 500.0f, 0.0f, 0.0f);
+    const std::vector<float> alt(H, 0.0f), az(H, 0.0f);
+    const auto sp = scanParams(H, W);
+    RayProcessParams pp{};
+    pp.H = H;
+    pp.W = W;
+    pp.base_signal = 800.0f;
+    pp.base_reflectivity = 50.0f;
+    pp.max_range = 120.0f;
+
+    RayProcessor proc{123u};
+    const auto cast_sets = [&](const std::vector<rc::InstanceXform> & xf) {
+        std::vector<uint32_t> range(W);
+        std::vector<uint16_t> signal(W), nir(W);
+        std::vector<uint8_t> refl(W);
+        std::vector<float> scratch(3 * W);
+        proc.castScanProcessed(
+            scene.view(), 1u, xf.data(), alt.data(), az.data(),
+            kIdentityR, kZeroT, sp, range.data(), signal.data(), refl.data(),
+            nir.data(), pp, scratch.data(), scratch.data() + W,
+            scratch.data() + 2 * W, nullptr, nullptr, 2);
+        return range;
+    };
+
+    const auto seen = cast_sets({ahead, parked});
+    EXPECT_GT(seen[0], 3500u);
+    EXPECT_LT(seen[0], 4500u);
+    EXPECT_EQ(cast_sets({parked, ahead})[0], 0u);
 }
 
 TEST(Raycast, ApparentReflectanceCombinedKdKs)

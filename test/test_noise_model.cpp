@@ -65,13 +65,15 @@ TEST(NoiseModel, InvalidDepthProducesZeroRange)
     const int n = H * W;
     std::vector<float> depth(n);
     std::vector<float> retro(n, 0.5f);
-    // Mix of invalid values: inf, -inf, NaN, near-zero
+    // Mix of invalid values: inf, -inf, NaN, near-zero. A negative range
+    // marks a return from a participating medium at that distance, so it is
+    // invalid only when its magnitude is.
     depth[0] = std::numeric_limits<float>::infinity();
     depth[1] = -std::numeric_limits<float>::infinity();
     depth[2] = std::numeric_limits<float>::quiet_NaN();
     depth[3] = 0.0f;   // below 0.001 threshold
     depth[4] = 0.0005f; // below threshold
-    depth[5] = -1.0f;   // negative
+    depth[5] = -0.0005f;  // a medium return below threshold
     depth[6] = std::numeric_limits<float>::infinity();
     depth[7] = std::numeric_limits<float>::quiet_NaN();
 
@@ -88,6 +90,27 @@ TEST(NoiseModel, InvalidDepthProducesZeroRange)
         EXPECT_EQ(range[i], 0u) << "invalid depth at index " << i << " should produce range=0";
         EXPECT_EQ(signal[i], 0u) << "invalid depth at index " << i << " should produce signal=0";
     }
+}
+
+TEST(NoiseModel, MediumReturnIsReportedAtItsDistance)
+{
+    // The raycaster hands a medium (smoke, fog) return over as a negative
+    // range. Every channel is computed from its magnitude, exactly as for a
+    // surface at that distance.
+    const std::vector<float> depth = {-7.5f, 7.5f};
+    const std::vector<float> retro(2, 0.5f);
+    std::vector<uint32_t> range(2);
+    std::vector<uint16_t> signal(2), nearir(2);
+    std::vector<uint8_t>  refl(2);
+    const auto p = noNoiseParams(1, 2);
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+    EXPECT_EQ(range[0], 7500u);
+    EXPECT_GT(signal[0], 0u);
+    EXPECT_EQ(range[0], range[1]);
+    EXPECT_EQ(signal[0], signal[1]);
+    EXPECT_EQ(refl[0], refl[1]);
+    EXPECT_EQ(nearir[0], nearir[1]);
 }
 
 TEST(NoiseModel, RangeIsDepthTimesThousand)
@@ -134,6 +157,122 @@ TEST(NoiseModel, SignalFollowsInverseSquareLaw)
     EXPECT_EQ(signal[2], 100u);
 }
 
+// A 100% target carries x = 1e4 at the 2 m knot (and, held, anywhere closer)
+// and 2e4 at 10 m; the detector saturates at 5000.
+static SignalResponseParams handCheckedResponse()
+{
+    SignalResponseParams r{};
+    r.knots = 2;
+    r.range_m[0] = 2.0f;
+    r.range_m[1] = 10.0f;
+    r.signal_m2[0] = 4.0e4f;
+    r.signal_m2[1] = 2.0e6f;
+    r.saturation = 5000.0f;
+    r.shot_noise = 1.25f;
+    r.relative_noise = 0.01f;
+    r.mode_gain = 1.0f;
+    return r;
+}
+
+// The documented saturation c = x / (1 + (x / 5000)^(4/3))^(3/4), and its
+// slope, evaluated independently in double with pow.
+static double saturated(double x)
+{
+    return x / std::pow(1.0 + std::pow(x / 5000.0, 4.0 / 3.0), 0.75);
+}
+
+static double saturationSlope(double x)
+{
+    return std::pow(1.0 + std::pow(x / 5000.0, 4.0 / 3.0), -1.75);
+}
+
+TEST(NoiseModel, MeasuredResponseSaturatesInsteadOfFollowingInverseSquare)
+{
+    constexpr int H = 1, W = 6;
+    const int n = H * W;
+    std::vector<float> depth = {0.7f, 2.0f, 6.0f, 20.0f, 3.0f, 3.0f};
+    std::vector<float> retro = {0.5f, 0.5f, 0.3f, 0.25f, 1.0e6f, 0.0f};
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.signal_response = handCheckedResponse();
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+
+    // x = .5 * 1e4 = 5000, the same closer than the first knot. Float
+    // against double may land a count apart.
+    EXPECT_NEAR(signal[1], saturated(5000.0), 1.0);
+    EXPECT_EQ(signal[0], signal[1]);
+    // Midway signal_m2 is linear in range: x = .3 * 1.02e6 / 36 = 8500.
+    EXPECT_NEAR(signal[2], saturated(8500.0), 1.0);
+    // Beyond the last knot, 1/r^2: x = .25 * 2e6 / 400 = 1250.
+    EXPECT_NEAR(signal[3], saturated(1250.0), 1.0);
+    // A retroreflector saturates; a present black surface returns nothing.
+    EXPECT_GE(signal[4], 4999u);
+    EXPECT_LE(signal[4], 5000u);
+    EXPECT_EQ(signal[5], 0u);
+    // Reflectivity stays the calibrated byte.
+    EXPECT_EQ(refl[0], 50u);
+}
+
+TEST(NoiseModel, MeasuredResponseScalesWithBaseSignalAndShots)
+{
+    constexpr int H = 1, W = 1;
+    std::vector<float> depth(1, 2.0f);
+    std::vector<float> retro(1, 0.25f);
+    std::vector<uint32_t> range(1);
+    std::vector<uint16_t> signal(1);
+    std::vector<uint8_t>  refl(1);
+    std::vector<uint16_t> nearir(1);
+
+    auto p = noNoiseParams(H, W);
+    p.signal_response = handCheckedResponse();
+    // Twice the reference sensitivity doubles x to 5000; half the shots per
+    // measurement (2048x10 against a 1024x10 recording) halve the output.
+    p.base_signal = 1600.0f;
+    p.signal_response.mode_gain = 0.5f;
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p);
+    EXPECT_NEAR(signal[0], 0.5 * saturated(5000.0), 1.0);
+}
+
+TEST(NoiseModel, MeasuredResponseNoiseHasTheModelledSpread)
+{
+    constexpr int H = 1, W = 40000;
+    const int n = H * W;
+    std::vector<float> depth(n, 2.0f);
+    std::vector<float> retro(n, 0.5f);
+    std::vector<uint32_t> range(n);
+    std::vector<uint16_t> signal(n);
+    std::vector<uint8_t>  refl(n);
+    std::vector<uint16_t> nearir(n);
+
+    auto p = noNoiseParams(H, W);
+    p.signal_response = handCheckedResponse();
+    p.signal_noise_scale = 1.0f;
+    processCpu(depth.data(), retro.data(),
+                 range.data(), signal.data(), refl.data(), nearir.data(), p, 7u);
+
+    double sum = 0.0, sum_sq = 0.0;
+    for (int i = 0; i < n; ++i) {
+        sum += signal[i];
+        sum_sq += static_cast<double>(signal[i]) * signal[i];
+    }
+    const double mean = sum / n;
+    const double stddev = std::sqrt(sum_sq / n - mean * mean);
+    // At x = 5000: shot 1.25 * dc/dx * sqrt(5000) and floor .01 * c in
+    // quadrature, 40 counts or 1.3% of the signal (the inverse-square model's
+    // Poisson sigma would be sqrt(c) = 55).
+    const double sigma = std::hypot(
+        1.25 * saturationSlope(5000.0) * std::sqrt(5000.0),
+        0.01 * saturated(5000.0));
+    EXPECT_NEAR(mean, saturated(5000.0) - 0.5, 1.0);  // truncation to counts
+    EXPECT_NEAR(stddev, sigma, 0.03 * sigma);
+}
+
 TEST(NoiseModel, ReflectivityLambertianScale)
 {
     // retro <= 1.0 maps to 0-100 linearly
@@ -172,19 +311,29 @@ TEST(NoiseModel, ReflectivityRetroScale)
     processCpu(depth.data(), retro.data(),
                  range.data(), signal.data(), refl.data(), nearir.data(), p);
 
-    // 100 + log2(2) * 22 = 100 + 22 = 122
-    EXPECT_EQ(refl[0], 122u);
-    // 100 + log2(4) * 22 = 100 + 44 = 144
-    EXPECT_EQ(refl[1], 144u);
+    // 15.89 bytes per doubling, (255 - 100) / log2(864):
+    // 100 + log2(2) * 15.89 = 115.9
+    EXPECT_EQ(refl[0], 115u);
+    // 100 + log2(4) * 15.89 = 131.8
+    EXPECT_EQ(refl[1], 131u);
 }
 
 TEST(NoiseModel, ReflectivityByteInverseCoversBothBands)
 {
-    for (float b : {0.0f, 50.0f, 100.0f, 122.0f, 144.0f, 254.0f}) {
-        const float retro = rpmath::reflectivityByteToRetro(b);
-        EXPECT_EQ(rpmath::reflectivityToByte(retro), static_cast<uint8_t>(b))
+    // Every byte re-encodes as itself, including those whose bin edge rounds
+    // just below the bin in float (53 / 100 = 0.52999997; 59, 214, 240).
+    for (int b = 0; b <= 255; ++b) {
+        const float retro = rpmath::reflectivityByteToRetro(static_cast<float>(b));
+        EXPECT_EQ(static_cast<int>(rpmath::reflectivityToByte(retro)), b)
             << "byte=" << b << " retro=" << retro;
     }
+    // Edges that already round trip stay exact: the default 50 is 0.5.
+    EXPECT_EQ(rpmath::reflectivityByteToRetro(0.0f), 0.0f);
+    EXPECT_EQ(rpmath::reflectivityByteToRetro(50.0f), 0.5f);
+    EXPECT_EQ(rpmath::reflectivityByteToRetro(100.0f), 1.0f);
+    // A fractional byte keeps its whole part, as the miss path truncates it.
+    EXPECT_EQ(rpmath::reflectivityToByte(rpmath::reflectivityByteToRetro(52.9999f)), 52u);
+    EXPECT_EQ(rpmath::reflectivityToByte(rpmath::reflectivityByteToRetro(53.5f)), 53u);
     EXPECT_FLOAT_EQ(rpmath::reflectivityByteToRetro(-10.0f), 0.0f);
     EXPECT_EQ(rpmath::reflectivityToByte(
                   rpmath::reflectivityByteToRetro(300.0f)),
@@ -431,13 +580,64 @@ TEST(NoiseModel, EdgeDiscontinuityCausesDropouts)
     EXPECT_LT(rate, 0.55);
 }
 
+TEST(NoiseModel, MediumReturnsAreNotDepthEdges)
+{
+    constexpr int H = 3, W = 3;
+    const int n = H * W;
+    // Smoke returning from 10 m in front of a wall at 20 m. The raycaster
+    // marks a return from a participating medium with a negative range.
+    const std::vector<float> smoke = {
+        20.0f, 20.0f, 20.0f,
+        20.0f, -10.0f, 20.0f,
+        20.0f, 20.0f, 20.0f
+    };
+    const auto edge = [&](const std::vector<float> & depth, int idx) {
+        return rpmath::edgeDiscontinuity(depth.data(), idx, H, W, 5.0f);
+    };
+    for (int idx = 0; idx < n; ++idx) {
+        EXPECT_FALSE(edge(smoke, idx)) << idx;
+    }
+    // The same range from a surface puts it and its four neighbours on an edge.
+    std::vector<float> surface = smoke;
+    surface[4] = 10.0f;
+    for (int idx = 0; idx < n; ++idx) {
+        EXPECT_EQ(edge(surface, idx), idx % 2 == 1 || idx == 4) << idx;
+    }
+    // Surfaces beside the smoke still edge against each other.
+    std::vector<float> both = smoke;
+    both[5] = 10.0f;
+    EXPECT_TRUE(edge(both, 5));
+    EXPECT_TRUE(edge(both, 2));
+    EXPECT_TRUE(edge(both, 8));
+    EXPECT_FALSE(edge(both, 4));
+    EXPECT_FALSE(edge(both, 3));
+
+    // Through the channel stage, the smoke return and the wall around it
+    // are reported every time. A surface there would drop half the time.
+    std::vector<float> retro(n, 0.5f);
+    auto p = noNoiseParams(H, W);
+    p.edge_discon_threshold = 5.0f;
+    for (int trial = 0; trial < 200; ++trial) {
+        std::vector<uint32_t> range(n);
+        std::vector<uint16_t> signal(n);
+        std::vector<uint8_t>  refl(n);
+        std::vector<uint16_t> nearir(n);
+        processCpu(smoke.data(), retro.data(),
+                     range.data(), signal.data(), refl.data(), nearir.data(), p);
+        for (int idx = 0; idx < n; ++idx) {
+            ASSERT_EQ(range[idx], idx == 4 ? 10000u : 20000u) << idx;
+        }
+        ASSERT_GT(signal[4], 0u);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Boundary-condition tests for core math formulas
 // ---------------------------------------------------------------------------
 
 TEST(NoiseModel, ReflectivitySaturatesAt255)
 {
-    // rv=1024: 100 + log2(1024)*22 = 100 + 10*22 = 320 → clamped to 255.
+    // rv=1024: 100 + log2(1024)*15.89 = 258.9 → clamped to 255 (864 and up).
     constexpr int H = 1, W = 1;
     std::vector<float> depth(1, 10.0f);
     std::vector<float> retro(1, 1024.0f);

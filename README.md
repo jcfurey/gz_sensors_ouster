@@ -54,7 +54,8 @@ length and reported range before claiming full noisy optical equivalence.
 `test_core_conformance` exercises the production loader/encoder and bounded
 frame delivery, including pause, rewind, restart and blocked sinks.
 `test_optical_conformance` runs every available backend (unavailable devices
-are reported as skipped). The shared contract suites run against Gazebo's SDK
+are reported as skipped) against the core's noiseless contract and, within a
+count of float rounding, its measured Rev7 SIGNAL response. The shared contract suites run against Gazebo's SDK
 provider. `test_zenoh_packet_burst` uses an owned private router to verify 1,024
 large packets, late metadata delivery, and simulation-thread progress while
 packet transport is blocked. Native IMU packets (LEGACY and
@@ -426,16 +427,16 @@ ros2 launch gz_sensors_ouster ouster_standalone.launch.py \
 
 | Azimuth | Zone | What to look for |
 |---------|------|------------------|
-| 0° | Range ladder | Six identical 80%-reflectance targets at 6–105 m: range-noise σ ramps with distance, signal falls as 1/r², the far pair thins out from `dropout_rate_far` |
+| 0° | Range ladder | Six identical 80%-reflectance targets at 6–105 m: range-noise σ ramps with distance, signal follows the product's range response (1/r² beyond about 20 m for a Rev7 OS1), the far pair thins out from `dropout_rate_far` |
 | 45° | Reflectance ladder | Seven panels at one range, `laser_retro` 0.02→1.0: an even staircase across the 0–100 reflectivity band; dark panels are noisier and drop out more |
-| 58–72° | Retroreflector ladder | Nine posts, `laser_retro` 1.3→300 → the calibrated log band walked end to end (bytes 108, 130, 151, 173, 195, 220, 242, 255, 255), like signs and retro tape |
-| 82–129° | **Signal / intensity ladder** | Nine posts at *fixed* reflectivity walking in from 19.2 m to 1.2 m. SIGNAL is `base_signal·ρ/r²`, so the 1/r² term — not reflectivity — is what sweeps it; the closest post saturates the channel outright |
+| 58–72° | Retroreflector ladder | Nine posts, `laser_retro` 1.3→1000 → the calibrated log band walked end to end (bytes 106, 121, 136, 152, 168, 187, 203, 230, 255; Ouster's scale ends at 864× a white target), like signs and retro tape |
+| 82–129° | **Signal / intensity ladder** | Nine retroreflective posts at *fixed* reflectivity walking in from 19.2 m to 1.2 m. Under the inverse-square model SIGNAL is `base_signal·ρ/r²`, so range alone sweeps it and the closest post saturates the 16-bit channel; a measured Rev7 response holds every post at the detector's saturation near 5,700, as retroreflectors read on the real sensor |
 | 135° | Detection rolloff | Rev7 OS1 dark targets at 90 m and 115 m sit at the published 90%-detection point and in its smooth tail; a bright target at 115 m remains highly detectable. Returns thin statistically instead of disappearing at an artificial hard boundary. |
 | 180° | Specular / gloss | Matte (kₛ 0.10), glossy (0.45) and mirror (0.95) faces: the specular lobe, and above the mirror threshold a **ghost return** behind the mirror (the orange post's reflection) |
 | 215° | Glass | Panes at τ=0.60 and τ=0.92 with walls behind: the pane wins on the first, the wall behind wins on the second — "lidar sees through the window" |
 | 270° | Curvature | Spheres and cylinders of several radii: apparent reflectance ρ·cos(α) falls off toward each silhouette |
 | 305° | Sun / NEAR_IR | Four identical panels at different tilts. NEAR_IR is reflected *ambient*, so orientation alone separates them while range and reflectivity do not |
-| 330° | Moving beacon | A rotating arm with a retroreflective paddle — exercises dynamic transforms, and honestly shows that `motion_distortion` corrects **ego** motion only, not moving targets |
+| 330° | Moving beacon | A rotating arm with a retroreflective paddle — exercises dynamic transforms and the sweep of a moving target: each column group sees the paddle where it was when that group was acquired (`object_motion_samples`), while `motion_distortion` covers **ego** motion |
 | — | Perimeter + ground | Walls at 60 m for long-range structure; a straight wall spanning many columns makes any azimuth/encoder-convention error obvious (it would break into arcs) |
 
 #### Channel coverage
@@ -447,18 +448,20 @@ of values can look correct in sim and fall over on real data. Measured from the
 
 | Channel | min | max | Coverage |
 |---------|-----|-----|----------|
-| `intensity` (SIGNAL) | 0 | **65535** | 4.8 decades, ~7800 distinct values |
-| `reflectivity` | 0 | **255** | ~206 distinct values across 0–255 |
+| `intensity` (SIGNAL) | 0 | **5844** | 3.8 decades, ~5700 distinct values: the measured Rev7 response saturates near 5,700 at 1024x10, as the real sensor does |
+| `reflectivity` | 0 | **255** | ~200 distinct values across 0–255; the 1000× post reads 255, past the 864× top of Ouster's scale |
 | `ambient` (NEAR_IR) | 0 | **65535** | saturates on the sun-facing retro panel |
-| `range` | 0 | **~110000 mm** | out to the 110 m perimeter (inside the Rev7 OS1's 233 m representable window) |
+| `range` | 0 | **~133000 mm** | out to the ends of the 110 m perimeter walls, 133 m away (inside the Rev7 OS1's 233 m representable window) |
 
 Two design points make the hard channels reachable:
 
-- **SIGNAL is the one a naive scene starves.** It goes as `ρ/r²`, so with
-  nothing closer than 6 m it never leaves single digits — before the intensity
-  ladder existed this world peaked at **195** of a possible 65535 (0.3% of the
-  channel), with a third of objects returning literally 0. The ladder walks in
-  to 1.2 m at *constant* `laser_retro`, so range alone sweeps it.
+- **SIGNAL needs range spread under the inverse-square model.** It goes as
+  `ρ/r²`, so with nothing closer than 6 m it never leaves single digits —
+  before the intensity ladder existed this world peaked at **195** of a
+  possible 65535 (0.3% of the channel), with a third of objects returning
+  literally 0. The ladder walks in to 1.2 m at *constant* `laser_retro`, so
+  range alone sweeps it. A measured response reads hundreds to thousands
+  across the diffuse zones, as a real Rev7 does, and saturates the ladder.
 - **Occlusion and calibrated detection are load-bearing.** The perimeter sits
   at 110 m rather than 60 m, because at 60 m it silently blocked the 70 m and
   105 m range targets (max observed range was 69 m). Its `laser_retro` is 0.75,
@@ -758,8 +761,8 @@ All noise model parameters can be changed at runtime via
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `metadata_path` | string | Path to Ouster calibration JSON. Absolute paths are used as-is; relative paths are resolved against the SDF file's directory. |
-| `hardware_revision` | string | Product physics revision: `auto`, `gen1`, `revC`, `revD`, `rev05`, `rev06`, `rev06.2`, `rev07`, `rev07.1`, or `rev08`. Prefer an explicit value for synthetic metadata without a real revision-bearing part number. |
-| `sensor_name` | string | ROS topic prefix and node namespace (e.g. `/sensor/lidar/lidar0`). |
+| `hardware_revision` | string | Product physics revision: `auto`, `gen1`, `revC`, `revD`, `rev05`, `rev06`, `rev06.2`, `rev07`, `rev07.1`, or `rev08`. Prefer an explicit value for synthetic metadata without a real revision-bearing part number. Any other value (`rev7.0`) is an error that disables the plugin; it is not replaced by a guess. |
+| `sensor_name` | string | ROS topic prefix and node namespace (e.g. `/sensor/lidar/lidar0`). Its last segment must name a `<sensor>` on the plugin's model, which supplies the lidar's pose. |
 
 ### Lidar
 
@@ -815,14 +818,16 @@ targets produce weaker returns.
 |-----------|---------|-------|-------|-------------|
 | `range_noise_min_std` | *profile* | >= 0 | m | Near-range precision sigma. Defaults to the selected hardware/mode precision envelope and scales with reflectivity. |
 | `range_noise_max_std` | *profile* | >= 0 | m | Far precision sigma, reached at the profile's 10%-reflectivity D90 reference range. |
-| `signal_noise_scale` | 1.0 | >= 0 | -- | Poisson shot noise on signal channel. 0 = off, 1 = physical. |
+| `signal_noise_scale` | 1.0 | >= 0 | -- | Shot noise on the signal channel: the measured noise of the product's response, or Poisson for the inverse-square model. 0 = off, 1 = physical. |
 | `nearir_noise_scale` | 1.0 | >= 0 | -- | Poisson noise on near-IR channel (both packet and image). |
-| `base_signal` | 800.0 | >= 0 | photon m^2 | Baseline for the 1/r² signal model and photon-limited aerosol detection. OS0: ~400, OS1: ~800. |
-| `base_reflectivity` | 50.0 | 0-255 | -- | Default calibrated reflectivity byte when no retro channel is available. In raycast mode, an omitted `laser_retro` is converted to physical reflectance before incidence, smoke attenuation and return arbitration. |
+| `signal_model` | `auto` | `auto` \| `measured` \| `inverse_square` | -- | SIGNAL response. `auto` uses the product's measured response where recordings calibrate it (Rev7 OS0 and OS1; see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §1) and the inverse-square model otherwise; `measured` warns when there is none. |
+| `base_signal` | 800.0 | >= 0 | photon m^2 | Sensor sensitivity. The inverse-square model reports `base_signal·ρ/r²`; a measured response scales its linear signal by `base_signal/800`, so 800 reproduces its recordings. Also the photon budget of aerosol detection. |
+| `base_reflectivity` | 50.0 | 0-255 | -- | Default calibrated reflectivity byte when no retro channel is available. In raycast mode, an omitted `laser_retro` is converted to physical reflectance before incidence, smoke attenuation and return arbitration, so an untagged surface facing the beam reads back this byte. |
 | `dropout_rate_close` | 0.0005 | 0-1 | probability | Random miss rate at 0 m. Scales with reflectivity (low retro = more drops). |
 | `dropout_rate_far` | 0.03 | 0-1 | probability | Random miss rate at the representable range, combined with the product-calibrated smooth detection probability. |
 | `false_alarm_rate` | 0.0 | 0-1 | probability | Solar-background false alarms: each no-return pixel becomes a spurious point (uniform range, noise-floor signal) with this probability per frame. 0 = off. Try 0.0005-0.002 for bright daylight. |
-| `motion_distortion` | false | bool | -- | Raycast mode only. Rolling-shutter sweep: each column casts from the sensor pose at its acquisition time (interpolated per sim tick), skewing the cloud by the platform's motion over one scan — as a real spinning lidar does (see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9). Ego motion only; default off preserves the instantaneous snapshot. |
+| `motion_distortion` | false | bool | -- | Raycast mode only. Rolling-shutter sweep: each column casts from the sensor pose at its acquisition time (interpolated per sim tick), skewing the cloud by the platform's motion over one scan — as a real spinning lidar does (see [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9). Ego motion only (moving objects follow `object_motion_samples`); default off casts every column from the sensor pose at the scan trigger. |
+| `object_motion_samples` | 16 | int | ≥ 1 | Raycast mode only. Moving objects (visuals of non-static models) are captured this many times per scan, once per group of columns at the middle of its acquisition times, so each column sees them as they were within T/(2N) of its timestamp, plus the physics step a capture waits for (3 ms + 1 ms at 10 Hz and a 1 kHz step), instead of at the scan trigger, up to a period after the scan's first column. 1 captures them once, mid-scan. Without `motion_distortion` the model carrying the sensor stays at the scan trigger, like the pose the sensor casts from. The CPU backend casts each group with its own capture; GPU backends use the middle capture for every column. Panels mode renders one snapshot. |
 | `edge_discon_threshold` | 0.15 | >= 0 | m | Depth-discontinuity suppression threshold (1ns echo delay convention). 0 = off. |
 
 ### Smoke, dust and fog obscuration (raycast mode)
@@ -841,7 +846,9 @@ volume as a solid object. Conditional on detection, the range is sampled from
 that complete received-power profile and compared with the attenuated hard
 target by received power. Successive scans produce sparse, spatially
 distributed, changing aerosol returns. Ordinary signal, range and dropout
-noise are applied afterward by the shared sensor model.
+noise are applied afterward by the shared sensor model. The depth-edge
+suppressor (`edge_discon_threshold`) leaves aerosol returns and their
+neighbours alone: their scattered ranges are not surface edges.
 
 Use explicit `<obscurant>` volumes when the physics matters. Gazebo
 `<particle_emitter>` elements are visual effects without a physical density;
@@ -882,7 +889,7 @@ world plugin.
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| `imu_name` | *(disabled)* | -- | Gazebo IMU sensor entity name. Set to `"auto"` to use the first IMU found. Omit to disable. |
+| `imu_name` | *(disabled)* | -- | Gazebo IMU sensor entity name. Set to `"auto"` to use the first IMU found. Omit to disable. A name that matches no sensor on the model is reported (see [Observability](#observability)). |
 | `imu_hz` | 100.0 | > 0 | IMU sample rate in Hz **only when the metadata's IMU profile has no packet layout** (then only `/imu` is published). Otherwise the IMU packet profile fixes the rate (see below) and a different `imu_hz` is ignored with a warning. The effective rate is exposed as the read-only `imu_hz` ROS parameter. |
 | `publish_imu_msg` | true | bool | Also publish `sensor_msgs/Imu` alongside Ouster IMU packets. |
 
@@ -935,9 +942,11 @@ consumers don't get literal-zero variances.
 ## Sensor Tuning Guide
 
 Start by selecting the real `<hardware_revision>` and matching model metadata;
-the profile supplies the optical limits and precision. Tune environmental
-terms (`base_signal`, shot noise, random dropout, solar false alarms and
-obscurants) only for the simulated conditions. `max_range`, `min_range` and
+the profile supplies the optical limits, precision and, for Rev7 OS0 and OS1,
+the measured SIGNAL response. Tune environmental terms (`base_signal`, shot
+noise, random dropout, solar false alarms and obscurants) only for the
+simulated conditions; with a measured response, `base_signal` other than 800
+models a unit more or less sensitive than the recorded ones. `max_range`, `min_range` and
 range-noise parameters are escape hatches for measured unit-specific behavior,
 not required per-model boilerplate.
 
@@ -1028,7 +1037,7 @@ colcon test-result --verbose --test-result-base build/gz_sensors_ouster
 
 | Binary | Coverage |
 |--------|---------|
-| `test_noise_model` | Range/signal/refl/nearir math + statistical bounds on dropouts and range noise |
+| `test_noise_model` | Range/signal/refl/nearir math + statistical bounds on dropouts and range noise; the measured SIGNAL response's knots, saturation, gains and noise spread |
 | `test_resample` | Panel-rig layout (coverage, packing) + beam resample math (uniform range through cylindrical and hemispherical rigs, all-inf, far clip, beam-origin subtraction, azimuth offset, nearest-mode edge non-blending and quantisation bound) |
 | `test_metadata_parsing` | Loads each shipped `config/metadata/*.json` via the Ouster SDK |
 | `test_parameter_validation` | Clamping/validation rules for SDF + ROS-param inputs |
@@ -1156,6 +1165,20 @@ At replay rates faster than the machine can decode, `ouster_ros` can still
 report `lidar_scans full`; replay at a lower rate or omit `os_image` when only
 clouds are needed.
 
+### Throttled WARN (10 s): sensor not found
+
+```
+/sensor/lidar/front: no sensor named 'front' on this plugin's model after 5 s
+of sim time; no scans are produced until one appears. ...
+/sensor/lidar/lidar0: no IMU sensor named 'lidar0_inertial' on this plugin's
+model after 5 s of sim time; no IMU data is published until one appears.
+```
+The plugin takes its pose from the `<sensor>` named by the last segment of
+`<sensor_name>`, and its IMU samples from `<imu_name>`. It keeps looking, since
+a sensor can be spawned late, and says so once the wait passes 5 s of simulated
+time. Until the lidar's sensor is found the plugin publishes metadata (and IMU,
+if that sensor exists) but no scans.
+
 ### One-shot ERROR: Sensors system not rendering
 
 ```
@@ -1167,6 +1190,8 @@ You are using `panels` mode but the world has no rendering sensor, so
 `gz-sim-sensors-system` never built the ogre2 scene. Either add a rendering
 anchor (`anchor_type:=camera`) or switch to `ray_mode:=raycast` (the default),
 which needs no render engine at all. See [World requirements](#world-requirements).
+Metadata and IMU do not depend on the renderer and are published meanwhile, so
+a driver connects and reports the missing scans itself.
 
 ### `/imu` covariance
 
@@ -1203,16 +1228,18 @@ noise params to 0 falls back to the ouster_ros default literals
    factor in both directions and uses 80% of the interval, leaving an idle
    tail for consumers to finish the completed scan. It stops while simulation
    is paused and cancels pre-reset batches. Packet/column **timestamps are sim
-   time** and describe an idealised rotation across the scan period;
-   the underlying data is a single instantaneous snapshot per scan by
-   default; in raycast mode, `<motion_distortion>true</motion_distortion>`
-   casts each column from its acquisition-time sensor pose instead
-   (rolling-shutter sweep — [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md)
-   §9). Wall-clock spacing exists only to avoid bursting consumers.
+   time** and describe a rotation across the scan period. In raycast mode
+   moving objects are captured as each group of columns is swept
+   (`object_motion_samples`), and `<motion_distortion>true</motion_distortion>`
+   also casts each column from its acquisition-time sensor pose (rolling-shutter
+   sweep — [docs/MODEL_REFERENCES.md](docs/MODEL_REFERENCES.md) §9); otherwise,
+   and always in panels mode, a scan is one snapshot at its trigger.
+   Wall-clock spacing exists only to avoid bursting consumers.
 
 With `<ray_mode>raycast</ray_mode>` steps 2-3 are replaced by an ECM scene
 mirror (visual geometries extracted on geometry/material changes, world poses
-refreshed per scan) and a worker thread that casts every beam exactly against
+refreshed per scan, and those of moving objects per column group as the scan
+sweeps them) and a worker thread that casts every beam exactly against
 it (`cuda/raycast_scene.{hpp,cpp}`: analytic primitives + per-mesh triangle
 BVH). CUDA keeps the depth, reflectance, and near-IR intermediates on one
 device stream, runs channel/noise synthesis immediately after the cast, and

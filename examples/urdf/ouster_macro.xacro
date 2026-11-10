@@ -44,6 +44,7 @@
             lidar_hz:=10.0
             enable_imu:=false imu_hz:=100.0
             ray_mode:=raycast
+            signal_model:=auto
             anchor_type:=altimeter
             obscurant_profile:=''">
 
@@ -159,6 +160,9 @@
         <lidar_hz>${lidar_hz}</lidar_hz>
         <!-- panels (GPU render rig) | raycast (CPU per-beam, no rendering). -->
         <ray_mode>${ray_mode}</ray_mode>
+        <!-- auto (the product's measured response where recordings calibrate
+             it, else inverse-square) | measured | inverse_square. -->
+        <signal_model>${signal_model}</signal_model>
         <xacro:if value="${obscurant_profile == 'smoke_demo'}">
           <xacro:ouster_smoke_obscurants/>
         </xacro:if>

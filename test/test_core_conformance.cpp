@@ -124,6 +124,15 @@ TEST(CoreConformance, RejectsUnsupportedReturnsAndUnencodableRangeBeforePublicat
         double maximum = 120;
         EXPECT_FALSE(metadata.load(file.path, false, "rev07", false, maximum));
     }
+    {
+        // A mistyped revision is refused, not run with another revision's
+        // physics under a profile that looks deliberate.
+        MetadataFile file(fixture::primaryProfiles[0]);
+        OusterMetadata metadata;
+        double maximum = 120;
+        EXPECT_FALSE(metadata.load(file.path, false, "rev7.0", false, maximum));
+        EXPECT_TRUE(metadata.load(file.path, false, "rev07", false, maximum));
+    }
     MetadataFile file("RNG15_RFL8_NIR8");
     auto low_json = fixture::metadataJson(OUSTER_SIM_CORE_TEST_DATA_DIR "/os1_64_rev7.json",
                                           "RNG15_RFL8_NIR8");

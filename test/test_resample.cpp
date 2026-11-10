@@ -399,18 +399,51 @@ TEST(Resample, AzimuthOffsetShiftsColumns)
 
 TEST(Resample, BilinearAveragesOnlyValidPixels)
 {
-    // When 2 of 4 pixels are valid, bilinearOrAverage returns their mean
-    // (not a weighted bilinear blend, which would require all 4 valid).
+    // With fewer than four valid corners, bilinearOrAverage returns the plain
+    // mean of the valid ones: the blend weights are ignored and an invalid
+    // corner's value is never read.
     const float inf = std::numeric_limits<float>::infinity();
-    // a00=40m, a01=40m, a10=inf (invalid), a11=inf (invalid) → mean = 40.
-    const float result = rpmath::bilinearOrAverage(
-        40.0f, 40.0f, inf, inf,
-        0.5f, 0.5f,
-        /*v00=*/true, /*v01=*/true, /*v10=*/false, /*v11=*/false,
-        /*n_valid=*/2, inf);
 
-    ASSERT_TRUE(std::isfinite(result));
-    EXPECT_NEAR(result, 40.0f, 0.01f);
+    // Two valid corners (40 and 44) at an off-centre weight: mean 42, where a
+    // weighted blend of that row would give 41.
+    EXPECT_FLOAT_EQ(rpmath::bilinearOrAverage(
+        40.0f, 44.0f, inf, inf,
+        0.25f, 0.5f,
+        /*v00=*/true, /*v01=*/true, /*v10=*/false, /*v11=*/false,
+        /*n_valid=*/2, inf), 42.0f);
+
+    // The same with finite values in the invalid corners: still 42.
+    EXPECT_FLOAT_EQ(rpmath::bilinearOrAverage(
+        40.0f, 44.0f, 1000.0f, 2000.0f,
+        0.25f, 0.5f,
+        /*v00=*/true, /*v01=*/true, /*v10=*/false, /*v11=*/false,
+        /*n_valid=*/2, inf), 42.0f);
+
+    // Three valid corners (30, 36, 45): mean 37.
+    EXPECT_FLOAT_EQ(rpmath::bilinearOrAverage(
+        30.0f, inf, 36.0f, 45.0f,
+        0.25f, 0.75f,
+        /*v00=*/true, /*v01=*/false, /*v10=*/true, /*v11=*/true,
+        /*n_valid=*/3, inf), 37.0f);
+}
+
+TEST(Resample, BilinearBlendsFourValidPixelsByWeight)
+{
+    // All four valid: top row 10→20 at h=0.25 is 12.5, bottom row 30→40 is
+    // 32.5, and v=0.5 between them is 22.5 (the plain mean would be 25).
+    const float inf = std::numeric_limits<float>::infinity();
+    EXPECT_FLOAT_EQ(rpmath::bilinearOrAverage(
+        10.0f, 20.0f, 30.0f, 40.0f,
+        0.25f, 0.5f,
+        true, true, true, true,
+        /*n_valid=*/4, inf), 22.5f);
+    // The corners themselves are reproduced exactly.
+    EXPECT_FLOAT_EQ(rpmath::bilinearOrAverage(
+        10.0f, 20.0f, 30.0f, 40.0f, 1.0f, 0.0f,
+        true, true, true, true, 4, inf), 20.0f);
+    EXPECT_FLOAT_EQ(rpmath::bilinearOrAverage(
+        10.0f, 20.0f, 30.0f, 40.0f, 0.0f, 1.0f,
+        true, true, true, true, 4, inf), 30.0f);
 }
 
 TEST(Resample, BilinearOneValidPixelReturnsThatPixel)

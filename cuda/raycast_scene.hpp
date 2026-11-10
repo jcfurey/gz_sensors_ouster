@@ -171,5 +171,27 @@ void castScan(const SceneView & scene,
               const int * tlas_order = nullptr,
               int n_tlas_nodes = 0);
 
+/// Transform set that castScanGrouped casts column m of W with, out of
+/// `sets`: consecutive groups of about W / sets columns share a set.
+inline int columnSet(int m, int W, int sets)
+{
+    return static_cast<int>(static_cast<int64_t>(m) * sets / W);
+}
+
+/// castScan with one set of instance transforms per group of columns, so
+/// that each group sees moving instances where they were when the sensor
+/// swept it. `xforms` holds `sets` consecutive arrays of scene.n_instances
+/// transforms and `tlas` one top-level BVH per set (an empty one falls back
+/// to the linear scan); column m uses set columnSet(m, W, sets).
+void castScanGrouped(const SceneView & scene,
+                     const InstanceXform * xforms, int sets, const Tlas * tlas,
+                     const float * beam_alt_deg,
+                     const float * beam_az_deg,
+                     const float sensor_r[9], const float sensor_t[3],
+                     const ScanParams & sp,
+                     float * range_out, float * retro_out,
+                     const float * col_r = nullptr, const float * col_t = nullptr,
+                     float * nir_out = nullptr);
+
 }  // namespace rc
 }  // namespace gz_gpu_ouster_lidar

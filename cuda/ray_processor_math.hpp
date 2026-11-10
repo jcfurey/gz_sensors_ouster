@@ -57,10 +57,14 @@ constexpr float kU16Max          = 65535.0f;
 constexpr float kEdgeSuppressProb = 0.5f;     ///< P(suppress) at a detected depth edge
 constexpr float kNearIrScale     = 256.0f;    ///< retro → near-IR photon-count analogue
 
+// Measured SIGNAL response (ouster_sim_core/signal_response.hpp).
+constexpr float kReferenceBaseSignal = 800.0f;  ///< base_signal of the recordings
+constexpr float kFullySaturatedRatio = 1.0e20f; ///< x/sat beyond which c = sat in float
+
 // Reflectivity model (Ouster calibrated scale).
 constexpr float kLambertianMax   = 100.0f;    ///< 0..100 diffuse band
 constexpr float kReflByteMax     = 255.0f;
-constexpr float kRetroLogSlope   = 22.0f;     ///< (255-100)/7 → 7 doublings of retro headroom
+constexpr float kRetroLogSlope   = 15.889471f; ///< (255-100)/log2(864): 255 is 864× a 100% diffuse target
 
 // Reflectivity weighting of dropout / range noise on dark targets.
 constexpr float kDropoutRetroFloor = 0.33f;   ///< retro floor → up to 3× dropout
@@ -78,6 +82,7 @@ GZ_OUSTER_HD inline float fmax_(float a, float b) { return a > b ? a : b; }
 
 #if defined(SYCL_LANGUAGE_VERSION)
 GZ_OUSTER_HD inline float sqrt_(float x)     { return sycl::sqrt(x); }
+GZ_OUSTER_HD inline float cbrt_(float x)     { return sycl::cbrt(x); }
 GZ_OUSTER_HD inline float log2_(float x)     { return sycl::log2(x); }
 GZ_OUSTER_HD inline float log_(float x)      { return sycl::log(x); }
 GZ_OUSTER_HD inline float exp_(float x)      { return sycl::exp(x); }
@@ -90,6 +95,7 @@ GZ_OUSTER_HD inline float fabs_(float x)     { return sycl::fabs(x); }
 GZ_OUSTER_HD inline bool  isfinite_(float x) { return sycl::isfinite(x); }
 #else
 GZ_OUSTER_HD inline float sqrt_(float x)     { return std::sqrt(x); }
+GZ_OUSTER_HD inline float cbrt_(float x)     { return std::cbrt(x); }
 GZ_OUSTER_HD inline float log2_(float x)     { return std::log2(x); }
 GZ_OUSTER_HD inline float log_(float x)      { return std::log(x); }
 GZ_OUSTER_HD inline float exp_(float x)      { return std::exp(x); }
@@ -381,22 +387,70 @@ GZ_OUSTER_HD inline float signalFromRange(float d, float intensity, float base_s
     return base_signal * intensity / r_sq;
 }
 
-/// Convert an Ouster calibrated reflectivity byte back to the physical
-/// reflectance used by the ray caster. This is the inverse of
-/// reflectivityToByte() apart from the byte quantisation.
-GZ_OUSTER_HD inline float reflectivityByteToRetro(float value)
+/// Mean SIGNAL of one return and the standard deviation of its noise, before
+/// signal_noise_scale.
+struct SignalSample {
+    float mean;
+    float sigma;
+};
+
+/// Received SIGNAL for apparent reflectance `rho` at range `d`.
+///
+/// Without a measured response: the inverse-square base_signal·ρ/r² with
+/// Poisson σ = √mean. With one, ouster_sim_core::evaluateSignalResponse in
+/// float: the linear signal x = (base_signal / 800)·ρ·signal_m2(d)/d², with
+/// signal_m2 linear in range between knots, x held below the first knot and
+/// falling as 1/r² beyond the last, saturates to
+/// c = x / (1 + (x / saturation)^(4/3))^(3/4). σ adds the shot noise
+/// shot_noise·√x·dc/dx and relative_noise·c in quadrature, and the mode gain
+/// m reports m·c with σ·√m.
+GZ_OUSTER_HD inline SignalSample signalSample(
+    float d, float rho, float base_signal, const SignalResponseParams & r)
 {
-    const float b = gzm::fmin_(gzm::fmax_(value, 0.0f), kReflByteMax);
-    if (b <= kLambertianMax) {
-        return b / kLambertianMax;
+    if (r.knots <= 0) {
+        const float mean = signalFromRange(d, rho, base_signal);
+        return {mean, gzm::sqrt_(gzm::fmax_(mean, 0.0f))};
     }
-    constexpr float kLn2 = 0.6931471805599453f;
-    return gzm::exp_((b - kLambertianMax) * kLn2 / kRetroLogSlope);
+    const float gain = base_signal / kReferenceBaseSignal;
+    if (!(rho > 0.0f) || !(d > 0.0f) || !(gain > 0.0f)) {
+        return {0.0f, 0.0f};
+    }
+    const int last = r.knots - 1;
+    float full;  // linear signal of a 100% diffuse target
+    if (d <= r.range_m[0]) {
+        full = r.signal_m2[0] / (r.range_m[0] * r.range_m[0]);
+    } else if (d >= r.range_m[last]) {
+        full = r.signal_m2[last] / (d * d);
+    } else {
+        int upper = 1;
+        while (r.range_m[upper] < d) ++upper;
+        const float t = (d - r.range_m[upper - 1]) /
+                        (r.range_m[upper] - r.range_m[upper - 1]);
+        full = (r.signal_m2[upper - 1] +
+                t * (r.signal_m2[upper] - r.signal_m2[upper - 1])) / (d * d);
+    }
+    const float linear = gain * rho * full;
+    const float ratio = linear / r.saturation;
+    float saturated = r.saturation;
+    float shot = 0.0f;  // the saturated slope dc/dx is zero
+    if (ratio < kFullySaturatedRatio) {
+        const float root = gzm::cbrt_(ratio);
+        const float t = 1.0f + root * root * root * root;  // 1 + ratio^(4/3)
+        const float sqrt_t = gzm::sqrt_(t);
+        const float fraction = 1.0f / (sqrt_t * gzm::sqrt_(sqrt_t));  // t^(-3/4)
+        saturated = linear * fraction;
+        shot = r.shot_noise * (fraction / t) * gzm::sqrt_(linear);  // dc/dx = t^(-7/4)
+    }
+    const float floor_sigma = r.relative_noise * saturated;
+    return {r.mode_gain * saturated,
+            gzm::sqrt_(r.mode_gain * (shot * shot + floor_sigma * floor_sigma))};
 }
 
 /// Map a Gazebo retro value to the Ouster reflectivity byte:
 ///   rv ∈ [0,1]  → linear  [0,100]      (Lambertian diffuse)
-///   rv > 1      → log map  [101,255]    (retroreflective)
+///   rv > 1      → log map  [101,255]    (retroreflective; 255 at rv = 864)
+/// This is Ouster's calibrated scale (docs/MODEL_REFERENCES.md §5), matching
+/// ouster_sim_core::quantizeOusterReflectivity().
 /// Missing laser_retro values are resolved to physical reflectance by the ray
 /// caster before incidence, obscurant attenuation and return arbitration.
 GZ_OUSTER_HD inline uint8_t reflectivityToByte(float rv)
@@ -408,19 +462,64 @@ GZ_OUSTER_HD inline uint8_t reflectivityToByte(float rv)
         gzm::fmin_(kLambertianMax + gzm::log2_(rv) * kRetroLogSlope, kReflByteMax));
 }
 
+/// Reflectance at the lower edge of reflectivity value `b`'s bin, the
+/// smallest reflectance that reflectivityToByte() maps to it in exact math.
+GZ_OUSTER_HD inline float reflectivityBinEdge(float b)
+{
+    if (b <= kLambertianMax) {
+        return b / kLambertianMax;
+    }
+    constexpr float kLn2 = 0.6931471805599453f;
+    return gzm::exp_((b - kLambertianMax) * kLn2 / kRetroLogSlope);
+}
+
+/// Convert an Ouster calibrated reflectivity byte back to the physical
+/// reflectance used by the ray caster. This is the inverse of
+/// reflectivityToByte() apart from the byte quantisation: every byte re-encodes
+/// as itself, and a fractional value as its whole part.
+GZ_OUSTER_HD inline float reflectivityByteToRetro(float value)
+{
+    const float b = gzm::fmin_(gzm::fmax_(value, 0.0f), kReflByteMax);
+    const float rv = reflectivityBinEdge(b);
+    // Float rounding puts a few edges just below their bin (53 / 100 rounds
+    // to 0.52999997, which encodes as 52; likewise 59, 214 and 240). Only
+    // those move a thousandth of a byte inside it, so 50 stays exactly 0.5.
+    const float whole = gzm::floor_(b);
+    if (static_cast<float>(reflectivityToByte(rv)) < whole) {
+        constexpr float kInsideBin = 1.0e-3f;
+        return reflectivityBinEdge(whole + kInsideBin);
+    }
+    return rv;
+}
+
 /// Clamp a float to the uint16 channel range.
 GZ_OUSTER_HD inline uint16_t clampU16(float v)
 {
     return static_cast<uint16_t>(gzm::fmin_(gzm::fmax_(v, 0.0f), kU16Max));
 }
 
+/// The raycaster marks a return from a participating medium (smoke, dust,
+/// fog) with a NEGATIVE range in the depth plane it hands the channel stage
+/// (rc::rcCastOneRay). The mark is for edgeDiscontinuity(); every other
+/// reader takes the range itself through returnRange().
+GZ_OUSTER_HD inline bool isMediumRange(float depth) { return depth < 0.0f; }
+GZ_OUSTER_HD inline float returnRange(float depth) { return gzm::fabs_(depth); }
+
 /// True if any cardinal neighbour of `idx` is a miss or differs in depth by
 /// more than `threshold` — i.e. `idx` sits on a depth discontinuity. Callers
 /// gate this on `threshold > 0` and apply the kEdgeSuppressProb RNG draw.
+///
+/// `depth` is the signed plane (see isMediumRange). A medium return's range
+/// is drawn per pixel from the medium's received-power profile, so its
+/// scatter is not a surface edge: such a pixel is never on an edge, and as a
+/// neighbour it says nothing about the surfaces around it.
 GZ_OUSTER_HD inline bool edgeDiscontinuity(const float * depth, int idx,
                                            int H, int W, float threshold)
 {
     const float d = depth[idx];
+    if (isMediumRange(d)) {
+        return false;
+    }
     const int beam = idx / W;
     const int col  = idx % W;
     const int nb_r[4] = {beam - 1, beam + 1, beam, beam};
@@ -431,6 +530,7 @@ GZ_OUSTER_HD inline bool edgeDiscontinuity(const float * depth, int idx,
         const int c = nb_c[k];
         if (r < 0 || r >= H || c < 0 || c >= W) continue;
         const float nd = depth[r * W + c];
+        if (isMediumRange(nd)) continue;
         if (!gzm::isfinite_(nd) || nd < kValidDepthMin ||
             gzm::fabs_(nd - d) > threshold) {
             suppress = true;

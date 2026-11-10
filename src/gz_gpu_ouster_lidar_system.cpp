@@ -15,6 +15,7 @@
 #include "imu_sampler.hpp"
 #include "lidar_common.hpp"
 #include "lidar_rate.hpp"
+#include "ouster_lidar_profile.hpp"
 #include "ouster_metadata.hpp"
 #include "packet_encoder.hpp"
 #include "panel_rig.hpp"
@@ -232,11 +233,22 @@ void GzGpuOusterLidarSystem::Configure(
     if (sdf->HasElement("motion_distortion")) {
         motion_distortion_ = sdf->Get<bool>("motion_distortion");
     }
+    if (sdf->HasElement("object_motion_samples")) {
+        const int samples = sdf->Get<int>("object_motion_samples");
+        if (samples < 1) {
+            RCLCPP_WARN(kLogger,
+                "object_motion_samples must be >= 1, got %d; using 1", samples);
+        }
+        object_motion_samples_ = std::max(1, samples);
+    }
     if (sdf->HasElement("edge_discon_threshold")) {
         edge_discon_threshold_ = sdf->Get<double>("edge_discon_threshold");
     }
     if (sdf->HasElement("base_signal")) {
         base_signal_ = sdf->Get<double>("base_signal");
+    }
+    if (sdf->HasElement("signal_model")) {
+        signal_model_ = sdf->Get<std::string>("signal_model");
     }
     if (sdf->HasElement("base_reflectivity")) {
         base_reflectivity_ = sdf->Get<double>("base_reflectivity");
@@ -332,6 +344,13 @@ void GzGpuOusterLidarSystem::Configure(
             "Unknown panel_sampling='%s'; expected bilinear|nearest. "
             "Defaulting to bilinear.", panel_sampling_.c_str());
         panel_sampling_ = "bilinear";
+    }
+    if (signal_model_ != "auto" && signal_model_ != "measured" &&
+        signal_model_ != "inverse_square") {
+        RCLCPP_WARN(kLogger,
+            "Unknown signal_model='%s'; expected auto|measured|inverse_square. "
+            "Defaulting to auto.", signal_model_.c_str());
+        signal_model_ = "auto";
     }
 
     auto validate_qos = [](std::string & val, const char * field, const char * fallback) {
@@ -462,6 +481,27 @@ void GzGpuOusterLidarSystem::Configure(
             "be below max_range; plugin disabled", min_range_, max_range_);
         meta_.reset();
         return;
+    }
+
+    // SIGNAL: the product's measured response where recordings calibrate it.
+    const bool has_response = meta_->profile.signal_response.measured();
+    measured_signal_ = has_response && signal_model_ != "inverse_square";
+    if (signal_model_ == "measured" && !has_response) {
+        RCLCPP_WARN(kLogger,
+            "signal_model=measured, but no recordings calibrate %s; using "
+            "the inverse-square model", meta_->profile.id.c_str());
+    }
+    if (measured_signal_) {
+        RCLCPP_INFO(kLogger,
+            "SIGNAL: measured %s response at %.2fx its recordings' shots per "
+            "measurement, base_signal %.0f (%.0f reproduces the recordings)",
+            meta_->profile.id.c_str(),
+            ouster_sim_core::signalModeGain(
+                meta_->profile.signal_response, meta_->W, lidar_hz_),
+            base_signal_, ouster_sim_core::kReferenceBaseSignal);
+    } else {
+        RCLCPP_INFO(kLogger, "SIGNAL: inverse-square, base_signal %.0f",
+                    base_signal_);
     }
 
     // Initialise ray processor. The CUDA path self-probes for a GPU and flips
@@ -673,6 +713,8 @@ void GzGpuOusterLidarSystem::Configure(
         mp.lidar_hz = lidar_hz_;
         mp.beam_origin_mm = meta_->beam_origin_mm;
         mp.motion_distortion = motion_distortion_;
+        mp.object_motion_samples = object_motion_samples_;
+        mp.sensor_model = ::gz::sim::topLevelModel(sensor_entity_, ecm);
         mp.beam_alt_f = &meta_->beam_alt_f;
         mp.beam_az_f = &meta_->beam_az_f;
         mp.obscurants = obscurants_.get();
@@ -804,7 +846,9 @@ void GzGpuOusterLidarSystem::PostUpdate(
         std::chrono::duration_cast<std::chrono::nanoseconds>(info.simTime);
     if (last_post_sim_time_.count() >= 0 && sim_now_ns < last_post_sim_time_) {
         ++sim_epoch_;
+        entity_search_start_ = sim_now_ns;
     }
+    if (entity_search_start_.count() < 0) entity_search_start_ = sim_now_ns;
     last_post_sim_time_ = sim_now_ns;
     if (encoder_) {
         encoder_->setSimulationState(info.paused, sim_epoch_);
@@ -820,7 +864,11 @@ void GzGpuOusterLidarSystem::PostUpdate(
         return;
     }
 
-    if (!sensor_initialized_.load(std::memory_order_acquire)) return;
+    // No gate on sensor_initialized_ here. In panels mode it only becomes
+    // true once the render rig exists, and metadata, entity discovery, the
+    // pose cache and IMU below need no renderer: a driver must be able to
+    // read metadata and IMU while the rig is still coming up, or when it
+    // never does. Until then the frame exchange below is simply empty.
     if (!ros_) return;
 
     // Sim-thread work here can throw — rclcpp publishes (an RCLError if the
@@ -848,6 +896,11 @@ void GzGpuOusterLidarSystem::PostUpdate(
             }
         }
     };
+
+    // A sensor entity that has not appeared this long (in sim time) after the
+    // plugin's first update, or after a reset, is reported.
+    constexpr std::chrono::nanoseconds kEntityWait = std::chrono::seconds(5);
+    const auto searched_ns = sim_now_ns - entity_search_start_;
 
     // ── Metadata (re)publish — sim-thread, works in both ray modes ──────────
     guarded("metadata", [&] {
@@ -882,6 +935,19 @@ void GzGpuOusterLidarSystem::PostUpdate(
                     lidar_frame_name_.c_str(), static_cast<unsigned long>(ent));
                 return false;  // stop iteration
             });
+        // The search repeats every step, since a sensor can be spawned late.
+        // One that never appears (a <sensor_name> whose last segment names no
+        // sensor on this model) would otherwise leave the plugin publishing
+        // metadata and nothing else, without a word.
+        if (!lidar_frame_found_ && searched_ns > kEntityWait) {
+            RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 10000,
+                "%s: no sensor named '%s' on this plugin's model after %.0f s "
+                "of sim time; no scans are produced until one appears. The "
+                "last segment of <sensor_name> must name the sensor the "
+                "plugin takes its pose from.",
+                sensor_name_.c_str(), lidar_frame_name_.c_str(),
+                static_cast<double>(searched_ns.count()) / 1e9);
+        }
     }
 
     // ── Locate the IMU sensor entity (once) ────────────────────────────────
@@ -936,6 +1002,15 @@ void GzGpuOusterLidarSystem::PostUpdate(
             RCLCPP_INFO(kLogger, "Found IMU entity: %s (id=%lu)",
                 imu_name_.c_str(),
                 static_cast<unsigned long>(imu_entity_));
+        } else if (searched_ns > kEntityWait) {
+            const std::string which = auto_detect
+                ? std::string("with 'imu' in its name")
+                : "named '" + imu_name_ + "'";
+            RCLCPP_WARN_THROTTLE(kLogger, *ros_->clock(), 10000,
+                "%s: no IMU sensor %s on this plugin's model after %.0f s of "
+                "sim time; no IMU data is published until one appears.",
+                sensor_name_.c_str(), which.c_str(),
+                static_cast<double>(searched_ns.count()) / 1e9);
         }
     }
 
@@ -1040,6 +1115,10 @@ RayProcessParams GzGpuOusterLidarSystem::makeRayProcessParams() const
     pp.W = meta_->W;
     pp.base_signal = static_cast<float>(noise.base_signal);
     pp.base_reflectivity = static_cast<float>(noise.base_reflectivity);
+    if (measured_signal_) {
+        pp.signal_response = signalResponseParams(
+            meta_->profile.signal_response, meta_->W, lidar_hz_);
+    }
     pp.range_noise_min_std = static_cast<float>(noise.range_noise_min_std);
     pp.range_noise_max_std = static_cast<float>(noise.range_noise_max_std);
     pp.range_noise_reference_range =

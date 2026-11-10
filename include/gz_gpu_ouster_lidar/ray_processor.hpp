@@ -50,14 +50,36 @@ struct ResampleParams {
     ResamplePanel panels[kMaxResamplePanels];
 };
 
+/// Largest knot table of a measured SIGNAL response
+/// (ouster_sim_core::OusterSignalResponse::kMaxKnots).
+constexpr int kMaxSignalKnots = 24;
+
+/// A product's measured SIGNAL response, as the kernels evaluate it: a float
+/// copy of ouster_sim_core::OusterSignalResponse plus the active mode's
+/// shots-per-measurement gain. knots == 0 selects the inverse-square model
+/// base_signal·ρ/r² with Poisson noise.
+struct SignalResponseParams {
+    int knots;                          ///< Valid table entries (0 = none)
+    float range_m[kMaxSignalKnots];     ///< Knot ranges, ascending (m)
+    float signal_m2[kMaxSignalKnots];   ///< 100% diffuse linear SIGNAL·r²
+    float saturation;                   ///< SIGNAL the detector saturates at
+    float shot_noise;                   ///< σ/√x before saturation
+    float relative_noise;               ///< σ floor as a fraction of SIGNAL
+    float mode_gain;                    ///< Shots per measurement vs recording
+};
+
 /// Parameters for CUDA ray post-processing kernel
 struct RayProcessParams {
     int H;                     ///< Beam count (pixels per column)
     int W;                     ///< Columns per frame
 
     // ── Signal model ─────────────────────────────────────────────────────────
-    float base_signal;         ///< Baseline signal for 1/r² model (photons·m²)
+    /// Sensor sensitivity. The inverse-square model reports
+    /// base_signal·ρ/r² (photons·m²); a measured response scales its linear
+    /// signal by base_signal / 800, so 800 reproduces its recordings.
+    float base_signal;
     float base_reflectivity;   ///< Default reflectivity value [0–255]
+    SignalResponseParams signal_response;  ///< Measured response, if any
 
     // ── Range noise ──────────────────────────────────────────────────────────
     float range_noise_min_std; ///< Min range noise σ at 0 m (metres), e.g. 0.005
@@ -144,7 +166,9 @@ public:
 
     /// Noise/channel stage only, for callers that already hold exact
     /// per-beam ranges (the full-raycast mode). depth_host is H×W metres
-    /// (+inf for a miss); retro_host is an optional H×W laser_retro array
+    /// (+inf for a miss; a negative value is a return from smoke, dust or
+    /// fog at that range, which the depth-edge suppressor leaves alone);
+    /// retro_host is an optional H×W laser_retro array
     /// (nullptr or invalid element → base_reflectivity / unit intensity;
     /// a finite zero is an explicitly black material).
     /// `nir_host` (optional): per-pixel NEAR_IR ambient factor from the
@@ -164,8 +188,9 @@ public:
     /// or the OpenMP CPU fallback — identical shared math either way).
     /// GPU backends cache the uploaded scene geometry by `scene_version`
     /// and re-upload only when it changes; the per-scan transforms upload
-    /// every call. Outputs: reported Ouster range in metres (+inf miss)
-    /// and the nearest hit's laser_retro (0 on miss/unset), both H×W.
+    /// every call. Outputs: reported Ouster range in metres (+inf miss;
+    /// negated for a return from a participating medium) and the nearest
+    /// hit's laser_retro (0 on miss/unset), both H×W.
     void castScan(
         const rc::SceneView & scene,
         uint64_t scene_version,
@@ -185,6 +210,10 @@ public:
     /// depth/retro/NIR planes device-resident between kernels, then transfer
     /// only the final channel arrays. The scratch planes are used by fallback
     /// backends whose raycaster and processor communicate through host memory.
+    /// `xform_sets` > 1: `xforms` holds that many consecutive sets of
+    /// scene.n_instances transforms, captured as the sensor swept successive
+    /// column groups; the CPU backend casts each group with its own set and
+    /// the GPU backends cast every column with the middle one.
     void castScanProcessed(
         const rc::SceneView & scene,
         uint64_t scene_version,
@@ -203,7 +232,8 @@ public:
         float * retro_scratch,
         float * nir_scratch,
         const float * col_r = nullptr,
-        const float * col_t = nullptr);
+        const float * col_t = nullptr,
+        int xform_sets = 1);
 
     /// Returns true when the active backend is the CPU fallback (no GPU
     /// path is compiled in, or all GPU probes failed at construction).

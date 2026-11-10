@@ -88,6 +88,9 @@ private:
     // Rolling-shutter motion distortion (raycast mode only): cast each
     // column from the sensor pose at its acquisition time.
     bool motion_distortion_ = false;
+    // Captures of moving objects per scan (raycast mode only), one per
+    // column group at its acquisition time.
+    int object_motion_samples_ = 16;
     double panel_oversample_ = 2.0;          // clamped 1..4
     std::string panel_sampling_ = "bilinear";  // "bilinear" | "nearest"
     std::string image_qos_ = "reliable";
@@ -127,6 +130,11 @@ private:
     double edge_discon_threshold_ = 0.15;
     double base_signal_ = 800.0;
     double base_reflectivity_ = 50.0;
+    // SIGNAL model: "auto" uses the product's measured response when its
+    // profile has one, "measured" asks for it (warning when there is none)
+    // and "inverse_square" keeps base_signal·ρ/r². Resolved in Configure.
+    std::string signal_model_ = "auto";
+    bool measured_signal_ = false;
 
     // ── IMU configuration (SDF-optional) ─────────────────────────────────────
     std::string imu_name_;
@@ -210,6 +218,10 @@ private:
     // epoch; producer metadata prevents pre-reset work crossing that boundary.
     std::chrono::nanoseconds last_post_sim_time_{-1};
     uint64_t sim_epoch_ = 0;
+    // Sim time of this plugin's first PostUpdate (or of the last reset): the
+    // start of the wait before a sensor entity that is still missing is
+    // reported. A model can be spawned long after sim time zero.
+    std::chrono::nanoseconds entity_search_start_{-1};
     // Paused state published by PostUpdate for OnRender: scan renders are
     // skipped while paused (PostUpdate won't consume a frame until unpause,
     // and a mid-pause render could capture a half-edited GUI scene that then
