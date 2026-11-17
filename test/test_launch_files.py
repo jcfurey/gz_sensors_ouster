@@ -119,7 +119,7 @@ def test_ouster_consumers_preseed_metadata_before_fast_bag_playback(name):
 
 
 @pytest.mark.parametrize('name', EXAMPLE_LAUNCHES)
-def test_decoders_match_complete_frame_packet_reliability(name):
+def test_decoder_packet_qos_and_panorama_parameters(name):
     tree = ast.parse((LAUNCHES / name).read_text())
     decoders = 0
     for node in ast.walk(tree):
@@ -131,12 +131,12 @@ def test_decoders_match_complete_frame_packet_reliability(name):
                 'os_cloud', 'os_image', 'os_pinhole'):
             continue
         decoders += 1
-        parameters = keywords['parameters']
-        assert any(
-            isinstance(item, ast.Dict) and any(
-                isinstance(key, ast.Constant) and key.value == 'lidar_packet_reliable'
-                and isinstance(value, ast.Constant) and value.value is True
-                for key, value in zip(item.keys, item.values))
-            for item in parameters.elts
-        ), f'{name}: {executable.value} must accept reliable simulation packets'
+        parameters = {
+            key.value: value for item in keywords['parameters'].elts if isinstance(item, ast.Dict)
+            for key, value in zip(item.keys, item.values) if isinstance(key, ast.Constant)
+        }
+        assert ast.literal_eval(parameters['lidar_packet_reliable']) is True
+        if executable.value == 'os_image':
+            assert 'frame_id' in parameters
+            assert ast.literal_eval(parameters['publish_camera_info']) is True
     assert decoders >= 2

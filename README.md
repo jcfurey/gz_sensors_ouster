@@ -90,6 +90,12 @@ divergent versions of each topic. Set `publish_native_images=true` only to A/B t
 images. When enabled, image/CameraInfo and IMU topics are still published lazily — only when
 a subscriber is present.
 
+With `images:=true`, the example launches configure `os_image` to publish
+four decoded panoramas and their matching `camera_info`. The driver attaches
+each panorama optical frame to that unit's URDF lidar frame. Its calibration
+approximates the panorama for display. Use the metadata beam angles and Ouster
+XYZ lookup table for calibrated 3D projection.
+
 ## Supported ROS 2 / Gazebo versions
 
 The build is **version-agnostic**: `CMakeLists.txt` discovers Gazebo through the

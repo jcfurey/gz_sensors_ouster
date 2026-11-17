@@ -238,11 +238,9 @@ def generate_launch_description():
                 'metadata': metadata,
                 'lidar_packet_reliable': True,
                 'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
-                # Stamp images/camera_info in the URDF lidar frame. The os_image
-                # default 'os_lidar' is broadcast by nothing in this launch
-                # (pub_static_tf is false), so TF-consuming uses of the images
-                # would fail to resolve the frame.
-                'sensor_frame': 'lidar0/lidar_frame',
+                # os_image attaches its panorama optical frame to this mount.
+                'frame_id': 'lidar0/lidar_frame',
+                'publish_camera_info': True,
             }],
             condition=IfCondition(LaunchConfiguration('images')),
         ),

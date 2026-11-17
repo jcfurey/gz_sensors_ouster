@@ -104,9 +104,8 @@ def _os_image(name, metadata):
     image pubs are off by default), matching the RViz Image displays. Gated
     behind images:=true (default): os_image decodes every scan whether or not
     anything subscribes, so headless/CI runs can opt out with images:=false.
-    sensor_frame stamps the images/camera_info in the URDF lidar frame — the
-    os_image default 'os_lidar' is broadcast by nothing here (pub_static_tf is
-    false) and would also make front/rear indistinguishable by frame_id."""
+    Each panorama uses an optical frame attached by os_image to the
+    corresponding URDF lidar frame."""
     return Node(
         package='ouster_ros',
         executable='os_image',
@@ -118,7 +117,8 @@ def _os_image(name, metadata):
             'metadata': metadata,
             'lidar_packet_reliable': True,
             'timestamp_mode': 'TIME_FROM_INTERNAL_OSC',
-            'sensor_frame': name + '/lidar_frame',
+            'frame_id': name + '/lidar_frame',
+            'publish_camera_info': True,
         }],
         condition=IfCondition(LaunchConfiguration('images')),
     )
